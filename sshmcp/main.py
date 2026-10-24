@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from . import store
 from .api import router
+from .auth import router as auth_router
 from .mcp_tools import mcp
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -34,6 +35,7 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+app.include_router(auth_router)
 app.include_router(router)
 
 
@@ -59,6 +61,17 @@ async def secure_transport(request: Request, call_next):
 @app.get("/healthz")
 def healthz():
     return {"ok": True, "version": "0.1.0", "service": "ssh-mcp-server"}
+
+
+@app.get("/setup")
+def setup_page():
+    return FileResponse(STATIC_DIR / "setup.html", media_type="text/html",
+        headers={"Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"})
+
+
+@app.get("/static/setup.js")
+def setup_script():
+    return FileResponse(STATIC_DIR / "setup.js", media_type="application/javascript")
 
 
 @app.get("/")
