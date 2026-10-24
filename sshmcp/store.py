@@ -33,10 +33,27 @@ def ensure_secret(filename: str, creator) -> bytes:
 def init_db():
     DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     ensure_secret("master.key", Fernet.generate_key)
-    ensure_secret("admin.token", lambda: secrets.token_urlsafe(36).encode())
+    # Bootstrap credential is one-time only; not accepted by normal Web login.
+    ensure_secret("bootstrap.token", lambda: secrets.token_urlsafe(48).encode())
     ensure_secret("mcp.token", lambda: secrets.token_urlsafe(36).encode())
     with db() as c:
         c.executescript("""
+        CREATE TABLE IF NOT EXISTS settings(
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          encrypted INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS oauth_states(
+          state_hash TEXT PRIMARY KEY,
+          expires INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS web_sessions(
+          token_hash TEXT PRIMARY KEY,
+          open_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          csrf TEXT NOT NULL,
+          expires INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS credentials(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           name TEXT NOT NULL UNIQUE,
@@ -217,3 +234,23 @@ def get_proxy(proxy_id: int | None) -> dict | None:
 def groups_for(host_id: int) -> list[int]:
     with db() as c:
         return [r[0] for r in c.execute("SELECT group_id FROM host_groups WHERE host_id=?", (host_id,))]
+
+
+def setting(key: str) -> str:
+    """Return a non-sensitive setting or decrypt encrypted application secret."""
+    with db() as c:
+        row = c.execute("SELECT value,encrypted FROM settings WHERE key=?", (key,)).fetchone()
+    if not row:
+        return ""
+    return unseal(row["value"]) if row["encrypted"] else row["value"]
+
+
+def save_settings(values: dict[str, str], encrypted: set[str] | None = None):
+    encrypted = encrypted or set()
+    with db() as c:
+        for key, value in values.items():
+            c.execute(
+                "INSERT INTO settings(key,value,encrypted) VALUES (?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value,encrypted=excluded.encrypted",
+                (key, seal(value) if key in encrypted else value, int(key in encrypted)),
+            )
