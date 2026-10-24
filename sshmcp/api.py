@@ -71,7 +71,7 @@ class ConfirmIn(BaseModel):
 
 class BatchConfirmedKey(BaseModel):
     host_id: int
-    independently_verified_sha256: str = Field(min_length=20, max_length=120)
+    independently_verified_sha256: str = Field(min_length=1, max_length=120)
 
 
 class ConfirmBatchIn(BaseModel):
