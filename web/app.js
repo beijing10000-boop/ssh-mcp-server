@@ -127,9 +127,9 @@ async function pageKeys(){
     '<div class="toolbar"><select id="batch-select">'+(batchlist||'<option>没有扫描记录</option>')+'</select>'+btn("refresh","刷新")+'</div>'+
     table(["主机","候选 SHA256 指纹","核验状态","详情与核验命令","操作"],records),scanButtons);
  const matching=detail?detail.items.filter(r=>r.status==="candidate"||r.status==="changed"): [];
- const trust=panel("批量导入可信指纹",'<p class="muted">批量核验无需逐台点击弹窗。请先通过服务器控制台、Ansible 可信通道或已有可信资产台账取得真实 SHA256 指纹，再按「主机 ID 或 IP + 空格 + SHA256 指纹」逐行粘贴。<strong>不能直接复制本页面扫描到的指纹作为可信来源。</strong> 任意一台不匹配，整批不保存。</p>'+
+ const trust=panel("批量导入可信指纹",'<p class="muted">批量核验无需逐台点击弹窗。请先通过服务器控制台、Ansible 可信通道或已有可信资产台账取得真实 SHA256 指纹，再按「主机 ID/IP + [可选算法] + SHA256 指纹」逐行粘贴；支持从已开启 SSH 主机身份校验的 Ansible 清单导入。<strong>不能直接复制本页面扫描到的指纹作为可信来源。</strong> 任意一台不匹配，整批不保存。</p>'+
  '<p class="muted">当前批次待确认：'+matching.length+' 台</p>'+
- '<textarea id="trusted-fingerprints" rows="7" placeholder="1 SHA256:独立可信渠道获取的指纹&#10;172.20.200.93 SHA256:独立可信渠道获取的指纹"></textarea>'+
+ '<textarea id="trusted-fingerprints" rows="7" placeholder="1 SHA256:独立可信渠道获取的指纹&#10;172.20.200.93 ssh-ed25519 SHA256:独立可信渠道获取的指纹"></textarea>'+
  '<div class="modal-actions">'+btn("confirm-batch-from-manifest","核对并保存可信指纹","","primary")+'</div>');
  return results+trust;
 }
@@ -349,16 +349,24 @@ $("#content").addEventListener("click",async (e)=>{
    const raw=($("#trusted-fingerprints")?.value||"").trim();
    if(!raw)throw new Error("请粘贴通过独立可信渠道取得的主机指纹清单");
    const lines=raw.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
-   const entries=lines.map((line,index)=>{
-     const m=line.match(/^(\S+)\s+(SHA256:[A-Za-z0-9+/=_-]+)$/);
-     if(!m)throw new Error("第 "+(index+1)+" 行格式错误：应为「资产 ID 或 IP + 空格 + SHA256:...」");
+   const entries=[];
+   let skipped=0;
+   for(const [index,line] of lines.entries()){
+     const m=line.match(/^(\S+)\s+(?:(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256)\s+)?(SHA256:[A-Za-z0-9+/=_-]+)$/);
+     if(!m)throw new Error("第 "+(index+1)+" 行格式错误：应为「资产 ID/IP [密钥算法] SHA256:...」");
      const match=eligible.find(r=>String(r.host_id)===m[1]||r.address===m[1]);
-     if(!match)throw new Error("第 "+(index+1)+" 行的主机不在当前待核验批次中："+m[1]);
-     return {host_id:match.host_id,independently_verified_sha256:m[2]};
-   });
-   if(!entries.length||new Set(entries.map(x=>x.host_id)).size!==entries.length)
-     throw new Error("核验清单为空或出现重复主机");
-   if(!confirm("已通过独立可信渠道确认 "+entries.length+" 台主机的指纹？不匹配将整批拒绝。"))return;
+     // Independently gathered Ansible inventories may include several key
+     // algorithms and more hosts than the current scan. Use only exact matches.
+     if(!match||m[2]&&m[2]!==match.algorithm){
+       if(!m[2]&&!match)throw new Error("第 "+(index+1)+" 行的主机不在待核验批次："+m[1]);
+       skipped++;continue;
+     }
+     entries.push({host_id:match.host_id,independently_verified_sha256:m[3]});
+   }
+   if(!entries.length)throw new Error("清单没有当前批次匹配的可信主机指纹，请核对 IP 与密钥算法");
+   if(new Set(entries.map(x=>x.host_id)).size!==entries.length)
+     throw new Error("同一主机存在重复匹配的可信指纹，请清理重复行");
+   if(!confirm("将独立核验 "+entries.length+" 台主机，跳过 "+skipped+" 行其他主机或不同算法指纹。任意一台不匹配将整批拒绝。确定继续？"))return;
    const result=await api("/host-keys/confirm-batch","POST",{items:entries,confirmed:true});
    notice("已成功保存 "+result.count+" 台主机的公钥。可返回主机资产进行 SSH 连接测试。");
    await render();
