@@ -119,8 +119,8 @@ def test_host_key_never_trusted_without_confirmation(client):
     fp = diagnostics.host_fingerprint(candidate)
     with store.db() as c:
         c.execute(
-            "INSERT INTO host_key_candidates(host_id,key,fingerprint) VALUES (?,?,?)",
-            (host_id, candidate, fp),
+            "INSERT INTO host_key_candidates(host_id,key,fingerprint,source_signature) VALUES (?,?,?,?)",
+            (host_id, candidate, fp, store.scan_signature(store.get_host(host_id))),
         )
     url = "/api/v1/host-keys/confirm"
     assert client.post(url, headers=auth(), json={
@@ -244,3 +244,108 @@ def test_feishu_oauth_authorized_and_unauthorized(client, monkeypatch):
     assert accepted.status_code == 303, accepted.text
     assert client.get("/api/v1/auth/me").json()["name"] == "系统管理员"
     assert client.get("/api/v1/hosts").status_code == 200
+
+
+def test_bulk_trusted_fingerprints_transactionality(client):
+    """Wrong SHA256 in any batch row must roll back all trusted keys."""
+    first = make_host(client)
+    second_response = client.post("/api/v1/hosts", headers=auth(), json={
+        "name": "第二台", "address": "172.20.1.16", "username": "root", "port": 22,
+    })
+    assert second_response.status_code == 201, second_response.text
+    second = second_response.json()["id"]
+    keys = [paramiko.RSAKey.generate(1024) for _ in (first, second)]
+    manifest = []
+    with store.db() as c:
+        for host_id, private in zip([first,second], keys):
+            pub = "ssh-rsa " + private.get_base64()
+            fingerprint = diagnostics.host_fingerprint(pub)
+            c.execute(
+                "INSERT INTO host_key_candidates(host_id,key,fingerprint,source_signature)"
+                " VALUES (?,?,?,?)",
+                (host_id, pub, fingerprint, store.scan_signature(store.get_host(host_id))),
+            )
+            manifest.append({"host_id": host_id,
+                             "independently_verified_sha256": fingerprint})
+    url = "/api/v1/host-keys/confirm-batch"
+    invalid = [dict(manifest[0]),dict(manifest[1])]
+    invalid[1]["independently_verified_sha256"] = "SHA256:WRONG"
+    assert client.post(url, headers=auth(), json={"items":invalid,"confirmed":True}).status_code == 422
+    assert store.get_host(first)["host_key"] == ""
+    assert store.get_host(second)["host_key"] == ""
+    assert client.post(url, headers=auth(), json={"items":manifest,"confirmed":True}).status_code == 200
+    assert store.get_host(first)["host_key"]
+    assert store.get_host(second)["host_key"]
+
+
+def test_host_ip_change_forces_reverification(client):
+    trusted = paramiko.RSAKey.generate(1024)
+    original = "ssh-rsa " + trusted.get_base64()
+    host_id = make_host(client, original)
+    response = client.put("/api/v1/hosts/" + str(host_id), headers=auth(), json={
+        "name":"测试改 IP","address":"172.20.1.99","port":22,
+        "username":"root", "host_key":""
+    })
+    assert response.status_code == 200, response.text
+    assert store.get_host(host_id)["host_key"] == ""
+
+
+def test_stale_scanned_candidate_cannot_be_confirmed(client):
+    host_id = make_host(client)
+    private = paramiko.RSAKey.generate(1024)
+    candidate = "ssh-rsa " + private.get_base64()
+    with store.db() as c:
+        c.execute(
+            "INSERT INTO host_key_candidates(host_id,key,fingerprint,source_signature)"
+            " VALUES (?,?,?,?)",
+            (host_id, candidate, diagnostics.host_fingerprint(candidate),
+             store.scan_signature(store.get_host(host_id))),
+        )
+        c.execute("UPDATE hosts SET port=2222 WHERE id=?", (host_id,))
+    r = client.post("/api/v1/host-keys/confirm", headers=auth(), json={
+        "host_id":host_id, "confirmed":True,
+        "independently_verified_sha256":diagnostics.host_fingerprint(candidate),
+    })
+    assert r.status_code == 409
+    assert store.get_host(host_id)["host_key"] == ""
+
+
+def test_scanner_keeps_candidate_but_not_trust(monkeypatch, client):
+    host_id = make_host(client)
+    remote = paramiko.RSAKey.generate(1024)
+    class FakeSecurity:
+        key_types = ("rsa-sha2-512", "ssh-ed25519", "ssh-rsa")
+    class FakeTransport:
+        def __init__(self, *args): self.closed=False
+        def get_security_options(self): return FakeSecurity()
+        def start_client(self, timeout): pass
+        def get_remote_server_key(self): return remote
+        def close(self): self.closed=True
+    monkeypatch.setattr(diagnostics.paramiko, "Transport", FakeTransport)
+    result = diagnostics.scan_host_key(host_id)
+    assert result["state"] == "candidate"
+    assert result["algorithm"] == "ssh-rsa"
+    assert store.get_host(host_id)["host_key"] == ""
+    with store.db() as c:
+        scanned = c.execute("SELECT fingerprint FROM host_key_candidates WHERE host_id=?", (host_id,)).fetchone()
+    assert scanned["fingerprint"] == result["fingerprint"]
+
+
+def test_bulk_scan_by_filter_and_retry_failed(client, monkeypatch):
+    a=make_host(client)
+    r=client.post("/api/v1/hosts",headers=auth(),json={
+        "name":"新办公室","address":"172.20.2.11","username":"root","port":22
+    })
+    assert r.status_code==201
+    b=r.json()["id"]
+    from sshmcp import api as module
+    # Avoid background-network tests; inspect results of the selection function.
+    monkeypatch.setattr(module, "_scan_batch", lambda batch, ids: None)
+    response=client.post("/api/v1/host-keys/scan",headers=auth(),json={"query":"172.20.2"})
+    assert response.status_code==202,response.text
+    with store.db() as c:
+        batch=c.execute("SELECT total FROM scan_batches WHERE id=?",(response.json()["batch_id"],)).fetchone()
+    assert batch["total"]==1
+    response=client.post("/api/v1/host-keys/scan",headers=auth(),json={"unverified_only":True})
+    assert response.status_code==202,response.text
+    assert response.json()["total"]==2
