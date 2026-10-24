@@ -4,8 +4,12 @@
 
 - 传输：**Streamable HTTP**（MCP 标准协议）
 - 地址：`http://可信内网IP:9099/mcp`
-- Header：`Authorization: Bearer <从 /app/data/mcp.token 获取的独立 MCP 令牌>`
-- Web 登录使用的 admin.token **不能用于** MCP。
+- Header：`Authorization: Bearer <Web「MCP 接入」签发的客户端令牌>`
+- Web 使用飞书 Cookie 会话，不能用于 MCP；初始化 Token 也不能用于 MCP。
+
+在 Web 创建客户端，选择允许的主机组（或明确授权全部主机）、诊断动作和 1–365 天有效期。原始令牌只显示一次，关闭弹窗后不能再次读取；数据库仅存哈希。撤销/到期从下一次请求起生效，不承诺终止已经执行中的 SSH。
+
+兼容的 `/app/data/mcp.token` 拥有全部主机和动作权限，可在 MCP 接入页面停用。不同团队应使用不同客户端令牌。当前为内部服务 Bearer 认证，不提供完整 OAuth 2.1 动态客户端授权流程。
 
 示例客户端配置（结构依据客户端支持情况调整）：
 
@@ -26,28 +30,37 @@
 | MCP 工具 | 说明 |
 | --- | --- |
 | ssh_list_hosts | 只列出已登记、已启用、已审核公钥的主机 |
+| ssh_resolve_host | 按 Zabbix Host ID 精确定位唯一授权主机，返回主机 ID 与版本 |
 | ssh_test_connection | 验证 SSH 身份、认证和固定命令 |
+| ssh_diagnose_health | 负载、内存、Swap、文件系统、inode 与高 CPU 进程综合快照 |
+| ssh_diagnose_capabilities | 登录 UID、诊断命令是否可用，不自动安装工具 |
 | ssh_diagnose_cpu | CPU 负载/内核计数 |
 | ssh_diagnose_memory | 内存与 Swap |
 | ssh_diagnose_disk | 磁盘容量、inode 与挂载 |
 | ssh_diagnose_processes | 进程概况 |
+| ssh_diagnose_memory_processes | 按 RSS 排序的进程概况，不读取环境变量或完整命令行 |
 | ssh_diagnose_io | I/O 数据 |
 | ssh_diagnose_network | 网卡与路由 |
 | ssh_diagnose_sockets | 监听与 TCP 汇总 |
 | ssh_diagnose_system | 运行时长/内核 |
 | ssh_diagnose_service | 指定合法 systemd 服务状态 |
+| ssh_diagnose_failed_services | 最多 60 项失败 systemd 服务，不重启 |
+| ssh_diagnose_containers | 限时读取最多 60 项 Docker/Podman 容器状态，不 inspect/exec |
+| ssh_diagnose_kernel | 最近 1–120 分钟、最多 100 行内核告警 |
 | ssh_diagnose_logs | 指定合法 systemd 服务最近有限时间范围日志 |
 | ssh_diagnose_directory_usage | 白名单目录下一级空间排行，8 秒限时，支持逐层深入 |
 | ssh_diagnose_peer_connections | 当前远端 IP TCP 连接数 Top 50 |
 | ssh_diagnose_peer_traffic | 约 3 秒同一 TCP socket 的发送、接收字节增量 Top 30 |
 
-所有主机操作**仅接受登记的数字 host_id**。即使模型请求任意 IP 或 shell 命令，服务端也没有对应工具，SSH 执行器更会拒绝无效动作。
+共 22 个工具（20 类诊断 + 列表/映射）。`ssh_list_hosts` 支持 query、offset、limit（最多 1000），只返回当前客户端可访问且已就绪的资产。所有执行操作**仅接受登记的数字 host_id**，支持可选的 `expected_revision`：建议 AI 平台始终传入解析时取得的版本，拒绝过期映射。即使模型请求任意 IP 或 shell 命令，服务端也没有对应工具。
+
+结果包含 `status=success|partial|failed|cancelled`；已创建的执行任务包含 `job_id`，可供管理员在 Web 查看。工具层面的 MCP `isError` 和结果里的 `status` 都需要检查。缺命令、读取权限不足、非零退出或输出截断不能解释为诊断成功。MCP 工具采用同步返回，客户端断连不保证立即取消远端任务。
 
 ## 接入 AI Ops Platform
 
 当前整合平台使用内置的 `diagnose_linux_host` 工具和执行器，**不能仅更改 MCP URL 就自动将其切换至本服务**。
 
-需要在整合平台单独实现：
+详细逐文件说明和可运行适配器见 [AI 平台改造方案](AI-PLATFORM-INTEGRATION.md)。需要在整合平台单独实现：
 1. 将本 SSH MCP 作为第二个 MCP 会话加载，与 Zabbix MCP 分开认证；
 2. 工具发现与白名单按 `ssh_*` 限制；
 3. 使用本平台 Host ID 的精确映射，不要把 Zabbix Host ID 或 IP 直接当作 SSH Host ID；

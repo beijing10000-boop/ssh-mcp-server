@@ -1,4 +1,5 @@
 """只读空间与连接分析：只解析内核现有统计，不修改目标主机。"""
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -7,7 +8,15 @@ import re
 
 # 固定扫描根路径，不能通过工具输入任意磁盘路径。
 DIRECTORY_ROOTS = (
-    "/", "/data", "/var", "/var/log", "/var/lib", "/opt", "/home", "/tmp", "/usr",
+    "/",
+    "/data",
+    "/var",
+    "/var/log",
+    "/var/lib",
+    "/opt",
+    "/home",
+    "/tmp",
+    "/usr",
 )
 
 
@@ -17,11 +26,14 @@ def validate_directory_root(root: str | None) -> str:
         raise ValueError("目录路径长度不正确")
     if root == "/":
         return root
-    if not re.fullmatch(r"/(?:data|var|opt|home|tmp|usr)(?:/[A-Za-z0-9._-]+){0,6}", root):
+    if not re.fullmatch(
+        r"/(?:data|var|opt|home|tmp|usr)(?:/[A-Za-z0-9._-]+){0,6}", root
+    ):
         raise ValueError("目录须位于 /data、/var、/opt、/home、/tmp 或 /usr 下")
     if any(segment in (".", "..") for segment in root.split("/")):
         raise ValueError("目录路径禁止 . 或 .. 等跳转")
     return root
+
 
 _SS_COUNTER = re.compile(r"^(bytes_sent|bytes_received):([0-9]+)$")
 _SAMPLE_MARKER = re.compile(r"^__SAMPLE_([AB])__$")
@@ -37,11 +49,14 @@ def parse_directory(text: str, root: str) -> dict:
         if not size.isdecimal() or not path.startswith("/"):
             continue
         rows.append({"directory": path, "bytes": int(size)})
-    root_total = next((item["bytes"] for item in rows if item["directory"] == root), None)
+    root_total = next(
+        (item["bytes"] for item in rows if item["directory"] == root), None
+    )
     children = [r for r in rows if r["directory"] != root]
     children.sort(key=lambda item: item["bytes"], reverse=True)
     return {
-        "root": root, "scanned_root_bytes": root_total,
+        "root": root,
+        "scanned_root_bytes": root_total,
         "top_directories": children[:30],
         "ranking_scope": "根目录的直接子目录（-x：只统计同一文件系统）",
         "notes": [
@@ -64,11 +79,13 @@ def parse_peer_connections(text: str) -> dict:
         except ValueError:
             continue
         if total.isdecimal() and established.isdecimal():
-            rows.append({
-                "peer_ip": ip,
-                "tcp_connections": int(total),
-                "established_connections": int(established),
-            })
+            rows.append(
+                {
+                    "peer_ip": ip,
+                    "tcp_connections": int(total),
+                    "established_connections": int(established),
+                }
+            )
     rows.sort(key=lambda x: x["tcp_connections"], reverse=True)
     return {
         "ranking": rows[:50],
@@ -125,7 +142,9 @@ def parse_tcp_samples(text: str, sample_seconds: int = 3) -> dict:
             continue
         total_records += 1
         snapshots[selected][(local, peer)] = (int(sent), int(received))
-    rows = defaultdict(lambda: {"sent_bytes": 0, "received_bytes": 0, "matched_tcp_connections": 0})
+    rows = defaultdict(
+        lambda: {"sent_bytes": 0, "received_bytes": 0, "matched_tcp_connections": 0}
+    )
     common = snapshots["A"].keys() & snapshots["B"].keys()
     for socket_id in common:
         first, second = snapshots["A"][socket_id], snapshots["B"][socket_id]
@@ -139,9 +158,12 @@ def parse_tcp_samples(text: str, sample_seconds: int = 3) -> dict:
         row["matched_tcp_connections"] += 1
     ranking = [
         {
-            "peer_ip": ip, **stats,
+            "peer_ip": ip,
+            **stats,
             "total_bytes": stats["sent_bytes"] + stats["received_bytes"],
-            "avg_bytes_per_second": round((stats["sent_bytes"] + stats["received_bytes"]) / sample_seconds, 2),
+            "avg_bytes_per_second": round(
+                (stats["sent_bytes"] + stats["received_bytes"]) / sample_seconds, 2
+            ),
         }
         for ip, stats in rows.items()
     ]

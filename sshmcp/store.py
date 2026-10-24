@@ -1,4 +1,5 @@
 """持久化 SQLite + 加密凭据 + 双令牌，禁止将敏感信息写入日志。"""
+
 from __future__ import annotations
 
 import hashlib
@@ -9,25 +10,39 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
+import tempfile
 from contextlib import contextmanager
 
 from cryptography.fernet import Fernet
+import base64
+import paramiko
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 IDENTITY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,31}$")
-HOSTKEY = re.compile(r"^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) [A-Za-z0-9+/=]+(?: .*)?$")
+HOSTKEY = re.compile(
+    r"^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) [A-Za-z0-9+/=]+(?: .*)?$"
+)
 GROUP = re.compile(r"^.{1,80}$", re.S)
 
 
 def ensure_secret(filename: str, creator) -> bytes:
     DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    DATA_DIR.chmod(0o700)
     p = DATA_DIR / filename
-    try:
-        with p.open("xb") as fh:
-            os.chmod(p, 0o600)
-            fh.write(creator())
-    except FileExistsError:
-        pass
+    if not p.exists():
+        descriptor, temporary = tempfile.mkstemp(dir=DATA_DIR, prefix=".secret-")
+        try:
+            with os.fdopen(descriptor, "wb") as fh:
+                fh.write(creator())
+                fh.flush()
+                os.fsync(fh.fileno())
+            try:
+                os.link(temporary, p)
+            except FileExistsError:
+                pass
+        finally:
+            os.unlink(temporary)
+    p.chmod(0o600)
     return p.read_bytes().strip()
 
 
@@ -131,12 +146,49 @@ def init_db():
         """)
         cols = {r["name"] for r in c.execute("PRAGMA table_info(hosts)")}
         if "mode" not in cols:
-            c.execute("ALTER TABLE hosts ADD COLUMN mode TEXT NOT NULL DEFAULT 'standard'")
+            c.execute(
+                "ALTER TABLE hosts ADD COLUMN mode TEXT NOT NULL DEFAULT 'standard'"
+            )
         if "gateway_approved" not in cols:
-            c.execute("ALTER TABLE hosts ADD COLUMN gateway_approved INTEGER NOT NULL DEFAULT 0")
-        candidates = {r["name"] for r in c.execute("PRAGMA table_info(host_key_candidates)")}
+            c.execute(
+                "ALTER TABLE hosts ADD COLUMN gateway_approved INTEGER NOT NULL DEFAULT 0"
+            )
+        if "revision" not in cols:
+            c.execute(
+                "ALTER TABLE hosts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"
+            )
+        c.executescript("""
+        CREATE TABLE IF NOT EXISTS mcp_clients(
+          id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, token_hash TEXT NOT NULL UNIQUE,
+          prefix TEXT NOT NULL, group_ids TEXT NOT NULL, actions TEXT NOT NULL,
+          all_hosts INTEGER NOT NULL DEFAULT 0,
+          expires_at INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP, last_used_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS diagnostic_jobs(
+          id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, host_id INTEGER NOT NULL,
+          host_name TEXT NOT NULL, host_revision INTEGER NOT NULL,
+          actor TEXT NOT NULL, source TEXT NOT NULL, action TEXT NOT NULL,
+          request TEXT NOT NULL, result TEXT, status TEXT NOT NULL DEFAULT 'queued',
+          cancel_requested INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '',
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP, started_at TEXT, completed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS ix_jobs_created ON diagnostic_jobs(created_at DESC,id);
+        CREATE INDEX IF NOT EXISTS ix_jobs_host ON diagnostic_jobs(host_id,status);
+        CREATE INDEX IF NOT EXISTS ix_hosts_zabbix ON hosts(zabbix_hostid);
+        CREATE INDEX IF NOT EXISTS ix_audit_created ON audit(created_at DESC,id);
+        """)
+        c.execute(
+            "UPDATE diagnostic_jobs SET status='failed',error='服务重启，任务中断；请重新提交',"
+            "completed_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running')"
+        )
+        candidates = {
+            r["name"] for r in c.execute("PRAGMA table_info(host_key_candidates)")
+        }
         if "source_signature" not in candidates:
-            c.execute("ALTER TABLE host_key_candidates ADD COLUMN source_signature TEXT NOT NULL DEFAULT ''")
+            c.execute(
+                "ALTER TABLE host_key_candidates ADD COLUMN source_signature TEXT NOT NULL DEFAULT ''"
+            )
         results = {r["name"] for r in c.execute("PRAGMA table_info(scan_results)")}
         if "algorithm" not in results:
             c.execute("ALTER TABLE scan_results ADD COLUMN algorithm TEXT")
@@ -153,6 +205,7 @@ def init_db():
 @contextmanager
 def db():
     c = sqlite3.connect(str(DATA_DIR / "ssh-mcp.sqlite3"), timeout=10)
+    (DATA_DIR / "ssh-mcp.sqlite3").chmod(0o600)
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
     c.execute("PRAGMA busy_timeout=10000")
@@ -171,11 +224,19 @@ def token(name: str) -> str:
 
 
 def seal(plaintext: str) -> str:
-    return Fernet(ensure_secret("master.key", Fernet.generate_key)).encrypt(plaintext.encode()).decode()
+    return (
+        Fernet(ensure_secret("master.key", Fernet.generate_key))
+        .encrypt(plaintext.encode())
+        .decode()
+    )
 
 
 def unseal(ciphertext: str) -> str:
-    return Fernet(ensure_secret("master.key", Fernet.generate_key)).decrypt(ciphertext.encode()).decode()
+    return (
+        Fernet(ensure_secret("master.key", Fernet.generate_key))
+        .decrypt(ciphertext.encode())
+        .decode()
+    )
 
 
 def private_ip(value: str) -> str:
@@ -184,10 +245,20 @@ def private_ip(value: str) -> str:
     except ValueError:
         raise ValueError("只允许登记内网 IP 地址，不接受域名") from None
     allowed = (
-        any(addr in ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
-        if addr.version == 4 else addr in ipaddress.ip_network("fc00::/7")
+        any(
+            addr in ipaddress.ip_network(n)
+            for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+        )
+        if addr.version == 4
+        else addr in ipaddress.ip_network("fc00::/7")
     )
-    if not allowed or addr.is_multicast or addr.is_loopback or addr.is_unspecified:
+    if (
+        not allowed
+        or getattr(addr, "scope_id", None)
+        or addr.is_multicast
+        or addr.is_loopback
+        or addr.is_unspecified
+    ):
         raise ValueError("目标必须是允许的内网地址")
     return str(addr)
 
@@ -199,11 +270,20 @@ def username(value: str) -> str:
 
 
 def validate_hostkey(value: str, *, optional: bool = False) -> str:
+    if len(value) > 4096 or "\n" in value.strip():
+        raise ValueError("主机公钥长度或格式无效")
     value = " ".join(value.strip().split())
     if not value and optional:
         return ""
     if not HOSTKEY.fullmatch(value):
         raise ValueError("主机公钥格式错误；需要 ssh-ed25519/ssh-rsa/ECDSA 公钥")
+    kind, encoded = value.split()[:2]
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+        if paramiko.PKey.from_type_string(kind, raw).asbytes() != raw:
+            raise ValueError()
+    except Exception:
+        raise ValueError("SSH 公钥内容与算法不匹配或已损坏") from None
     return " ".join(value.split()[:2])
 
 
@@ -232,7 +312,9 @@ def get_credential(credential_id: int | None) -> str:
     if not credential_id:
         raise ValueError("目标未绑定 SSH 凭据")
     with db() as c:
-        row = c.execute("SELECT secret FROM credentials WHERE id=?", (credential_id,)).fetchone()
+        row = c.execute(
+            "SELECT secret FROM credentials WHERE id=?", (credential_id,)
+        ).fetchone()
     if not row:
         raise ValueError("SSH 凭据不存在")
     return unseal(row["secret"])
@@ -250,13 +332,20 @@ def get_proxy(proxy_id: int | None) -> dict | None:
 
 def groups_for(host_id: int) -> list[int]:
     with db() as c:
-        return [r[0] for r in c.execute("SELECT group_id FROM host_groups WHERE host_id=?", (host_id,))]
+        return [
+            r[0]
+            for r in c.execute(
+                "SELECT group_id FROM host_groups WHERE host_id=?", (host_id,)
+            )
+        ]
 
 
 def setting(key: str) -> str:
     """Return a non-sensitive setting or decrypt encrypted application secret."""
     with db() as c:
-        row = c.execute("SELECT value,encrypted FROM settings WHERE key=?", (key,)).fetchone()
+        row = c.execute(
+            "SELECT value,encrypted FROM settings WHERE key=?", (key,)
+        ).fetchone()
     if not row:
         return ""
     return unseal(row["value"]) if row["encrypted"] else row["value"]
@@ -269,7 +358,11 @@ def save_settings(values: dict[str, str], encrypted: set[str] | None = None):
             c.execute(
                 "INSERT INTO settings(key,value,encrypted) VALUES (?,?,?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value,encrypted=excluded.encrypted",
-                (key, seal(value) if key in encrypted else value, int(key in encrypted)),
+                (
+                    key,
+                    seal(value) if key in encrypted else value,
+                    int(key in encrypted),
+                ),
             )
 
 
@@ -277,10 +370,15 @@ def scan_signature(host: dict) -> str:
     """Stable snapshot of SSH endpoint identity; no secret/key stored in snapshot."""
     material = json.dumps(
         {
-            "id": host["id"], "address": host["address"],
-            "port": host["port"], "proxy_id": host.get("proxy_id"),
-            "enabled": host.get("enabled"), "host_key": host.get("host_key", ""),
+            "id": host["id"],
+            "address": host["address"],
+            "port": host["port"],
+            "proxy_id": host.get("proxy_id"),
+            "enabled": host.get("enabled"),
+            "host_key": host.get("host_key", ""),
+            "revision": host.get("revision", 1),
         },
-        ensure_ascii=False, sort_keys=True,
+        ensure_ascii=False,
+        sort_keys=True,
     )
     return hashlib.sha256(material.encode()).hexdigest()
