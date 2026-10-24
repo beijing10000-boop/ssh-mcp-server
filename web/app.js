@@ -1,20 +1,20 @@
 "use strict";
 const $ = (q) => document.querySelector(q);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (x) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[x]));
-let adminToken = sessionStorage.getItem("sshmcp_admin") || "";
+let csrfToken = "";
+let currentUser = null;
 const state = {page:"overview",hosts:[],groups:[],credentials:[],proxies:[],batchId:null,editor:null,selected:new Set()};
-const titles = {overview:"运维总览",hosts:"主机资产",groups:"主机组",credentials:"SSH 凭据管理",proxies:"SSH 跳板管理",keys:"主机公钥核验",diagnostics:"Linux 只读诊断",audit:"操作审计"};
+const titles = {overview:"运维总览",hosts:"主机资产",groups:"主机组",credentials:"SSH 凭据管理",proxies:"SSH 跳板管理",keys:"主机公钥核验",diagnostics:"Linux 只读诊断",audit:"操作审计",feishu:"飞书管理"};
 let timer = null;
 
 async function api(path, method="GET", body) {
   const result = await fetch("/api/v1" + path, {
-    method, headers: {"Authorization":"Bearer " + adminToken, ...(body ? {"Content-Type":"application/json"} : {})},
+    method, credentials:"same-origin", headers: {...(body ? {"Content-Type":"application/json"} : {}), ...(method!=="GET"&&csrfToken?{"X-CSRF-Token":csrfToken}:{})},
     body: body ? JSON.stringify(body) : undefined,
   });
   const payload = await result.json().catch(() => ({}));
   if (result.status === 401) {
-    sessionStorage.removeItem("sshmcp_admin");
-    adminToken = "";
+    csrfToken = "";currentUser = null;
     $("#app").hidden = true;
     $("#login").hidden = false;
     throw new Error("身份验证失效，请重新登录");
@@ -125,13 +125,28 @@ async function pageAudit(){
  return panel("只读与管理操作审计",table(["时间","操作者","动作","目标","结果","说明"],rows.map(r=>
   '<tr><td>'+esc(r.created_at)+'</td><td>'+esc(r.actor)+'</td><td>'+esc(r.action)+'</td><td>'+esc(r.target)+'</td><td>'+esc(r.outcome)+'</td><td>'+esc(r.detail)+'</td></tr>').join("")));
 }
+async function pageFeishu(){
+ const r=await api("/settings/feishu");
+ return panel("飞书登录与授权管理",
+  '<p class="intro">SSH MCP 控制台仅允许指定的飞书 Open ID 登录。首次初始化 Token 不再具备日常登录权限。</p>'+
+  '<div class="fields">'+
+    field("lark_app_id","飞书应用 App ID",r.lark_app_id,"text",null,false)+
+    field("web_public_host","Web 外部访问地址",r.web_protocol+"://"+r.web_public_host,"text",null,false)+
+    '<div class="wide"><label>飞书回调地址</label><div class="code-result">'+esc(r.web_protocol+"://"+r.web_public_host+"/api/v1/auth/callback")+'</div></div>'+
+    '<div class="wide"><label>App Secret</label><div class="pill">'+(r.lark_app_secret_configured?"已加密配置（不回显）":"未配置")+'</div></div>'+
+  '</div><hr class="rule"/>'+
+  '<form id="feishu-admins-form"><div class="fields">'+field("open_ids","指定管理员 Open ID（英文逗号分隔）",r.feishu_admin_open_ids,"textarea",null,true,
+   "必须保留当前登录管理员；更改名单后，已移除的账号会立即失去访问权限。")+
+  '</div><div class="modal-actions"><button type="submit" class="btn primary">保存管理员名单</button></div></form>'
+ );
+}
 async function render(){
  clearTimeout(timer);
  $("#page-title").textContent=titles[state.page]||"SSH MCP";
  for(const el of document.querySelectorAll(".nav-link"))el.classList.toggle("active",el.dataset.page===state.page);
  $("#content").innerHTML='<div class="panel muted">正在加载…</div>';
  try {
-   let html = await ({overview:pageOverview,hosts:pageHosts,groups:pageGroups,credentials:pageCredentials,proxies:pageProxies,keys:pageKeys,diagnostics:pageDiagnostics,audit:pageAudit}[state.page]||pageOverview)();
+   let html = await ({overview:pageOverview,hosts:pageHosts,groups:pageGroups,credentials:pageCredentials,proxies:pageProxies,keys:pageKeys,diagnostics:pageDiagnostics,audit:pageAudit,feishu:pageFeishu}[state.page]||pageOverview)();
    $("#content").innerHTML=html;
    if(state.page==="keys"&&state.batchId){
      const batches=await api("/host-keys/batches");
@@ -140,17 +155,26 @@ async function render(){
  } catch(e) {$("#content").textContent="加载失败："+e.message;}
 }
 async function login(){
- if(!adminToken)return;
  try{
-   await api("/auth/check");
-   $("#login").hidden=true;$("#app").hidden=false;await render();
- }catch(e){$("#login-error").hidden=false;$("#login-error").textContent=e.message;}
+   currentUser=await api("/auth/me");
+   csrfToken=currentUser.csrf||"";
+   $("#whoami").textContent=currentUser.name+" · 飞书管理员";
+   $("#login").hidden=true;$("#app").hidden=false;
+   await render();
+ }catch(e){
+   $("#app").hidden=true;$("#login").hidden=false;
+   $("#login-error").hidden=false;
+   $("#login-error").textContent=e.message;
+   try{
+     const r=await fetch("/api/v1/setup/status");
+     if(r.ok&&(await r.json()).setup_required)$("#login-error").textContent="首次部署，请先完成飞书绑定与管理员初始化。";
+   }catch{}
+ }
 }
-$("#login-form").addEventListener("submit", async (e)=>{
- e.preventDefault();adminToken=$("#admin-token").value.trim();
- sessionStorage.setItem("sshmcp_admin",adminToken);await login();
+$("#logout").addEventListener("click",async()=>{
+ try{await api("/auth/logout","POST");location.reload();}
+ catch(e){notice(e.message,true);}
 });
-$("#logout").addEventListener("click",()=>{adminToken="";sessionStorage.removeItem("sshmcp_admin");$("#app").hidden=true;$("#login").hidden=false;$("#admin-token").value="";});
 $("#reload").addEventListener("click",render);
 $("#nav").addEventListener("click",e=>{const b=e.target.closest("[data-page]");if(b){state.page=b.dataset.page;notice("");render();}});
 $("#editor-close").addEventListener("click",closeModal);
@@ -209,6 +233,17 @@ $("#content").addEventListener("change",(e)=>{
  if(e.target.id==="batch-select"){state.batchId=e.target.value;render();}
 });
 $("#content").addEventListener("submit",async(e)=>{
+ if(e.target.id==="feishu-admins-form"){
+  e.preventDefault();
+  const button=e.target.querySelector("button[type=submit]");
+  button.disabled=true;
+  try{
+   await api("/settings/admins","PUT",{open_ids:e.target.elements.open_ids.value});
+   notice("管理员名单已保存，权限立即生效。");
+  }catch(ex){notice(ex.message,true);}
+  finally{button.disabled=false;}
+  return;
+ }
  if(e.target.id!=="diagnostic-form")return;
  e.preventDefault();
  const form=e.target, display=$("#diagnostic-result");
