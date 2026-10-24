@@ -730,7 +730,7 @@ async function pageDiagnostics() {
           "text",
           null,
           true,
-          "每次最多扫描 8 秒。仅统计单层目录，可继续深入；不会修改或清理文件。",
+          "支持 /root、/root/.cache、/data、/var 等目录，每次最多扫描 8 秒；仅统计单层，不修改或清理文件。",
         ) +
         '</div><div class="notice diagnostic-help">快照反映采集时刻的状态。日志、目录与流量数据需有相应读取权限；缺失能力会显示为部分完成。</div>' +
         (!options.length && !state.selected.size
