@@ -14,8 +14,8 @@
 
 ## 安全设计
 
-- 两套独立的随机访问令牌：Web 管理令牌与 MCP Bearer 令牌，首次启动自动生成；文件只留在持久卷内，切勿上传到 Git 仓库。
-- Web/API 与 MCP 接口全部鉴权；禁止未登录访问主机与诊断操作。
+- 首次初始化 Token 用于绑定飞书应用和指定管理员 Open ID；完成后 Web 只能通过飞书 OAuth 登录，MCP 独立使用 Bearer Token。
+- Web/API 使用飞书管理员会话、HttpOnly Cookie 与 CSRF 校验；MCP 使用独立 Bearer Token。
 - SSH **只允许已登记的内网 IP**、已登记 SSH 凭据、经管理员确认的主机公钥。
 - 严格 SSH 主机公钥校验，批量获取只能产生候选结果，不自动信任。
 - 固定只读诊断动作，无执行任意 Shell 的 MCP 工具，不支持文件上传、下载或自动修复。
@@ -34,10 +34,10 @@ docker compose ps
 docker compose logs --tail=50 ssh-mcp
 ```
 
-登录令牌、MCP 接入令牌分别查看：
+一次性初始化 Token、MCP 接入令牌分别查看：
 
 ```bash
-docker compose exec ssh-mcp cat /app/data/admin.token
+docker compose exec ssh-mcp cat /app/data/bootstrap.token
 docker compose exec ssh-mcp cat /app/data/mcp.token
 ```
 
@@ -55,7 +55,7 @@ docker compose exec ssh-mcp cat /app/data/mcp.token
 | 主机公钥获取 | 支持批量探测 + SHA256 指纹审核确认，绝不自动信任 |
 | SSH 诊断 | 连接、CPU、内存、磁盘、进程、I/O、网络、系统、服务与日志 |
 | MCP 工具 | 列表与定向受控诊断，不允许模型传入任意目标 IP 或 Shell |
-| 访问控制 | Web、MCP 两套 Bearer，服务端参数与主机白名单复核 |
+| 访问控制 | Web 飞书 OAuth + CSRF、独立 MCP Bearer、服务端主机白名单 |
 | 部署 | 单容器 + SQLite，独立端口 9099，日志轮转 |
 
 ## 与现有 AI Ops Platform 关系
