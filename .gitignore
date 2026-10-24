@@ -7,3 +7,5 @@ __pycache__/
 *.sqlite3
 *.token
 master.key
+
+trusted-host-fingerprints*.txt
