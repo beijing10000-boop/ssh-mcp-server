@@ -6,21 +6,14 @@ import json
 import re
 import secrets
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from . import store, diagnostics
+from .auth import admin
 
 router = APIRouter(prefix="/api/v1")
 SCAN_WORKERS = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ssh-key-batches")
-
-
-def admin(authorization: str | None = Header(default=None)) -> str:
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "请先输入管理员访问令牌")
-    if not secrets.compare_digest(authorization[7:], store.token("admin.token")):
-        raise HTTPException(401, "管理员令牌无效")
-    return "admin"
 
 
 def fail(exc: Exception):
