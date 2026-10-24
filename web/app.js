@@ -172,6 +172,18 @@ function summarizeDiagnostic(result){
  const caveats=(d.notes||[]).map(v=>'<p class="help">· '+esc(v)+'</p>').join("");
  return title+table(header,rows.join(""))+(rows.length?"":'<p class="inline-error">本次未获得可用于排行的数据。请查看下方详细结果与能力说明。</p>')+caveats;
 }
+function updateDiagnosticInputs(){
+ const form=$("#diagnostic-form");if(!form)return;
+ const action=getForm(form,"action");
+ for(const [name,visible] of [
+  ["service",["logs","service"].includes(action)],
+  ["minutes",action==="logs"],
+  ["directory_root",action==="directory"],
+ ]){
+  const item=form.elements.namedItem(name);
+  if(item)item.closest("div").hidden=!visible;
+ }
+}
 async function pageAudit(){
  const rows=await api("/audit");
  return panel("只读与管理操作审计",table(["时间","操作者","动作","目标","结果","说明"],rows.map(r=>
@@ -200,6 +212,7 @@ async function render(){
  try {
    let html = await ({overview:pageOverview,hosts:pageHosts,groups:pageGroups,credentials:pageCredentials,proxies:pageProxies,keys:pageKeys,diagnostics:pageDiagnostics,audit:pageAudit,feishu:pageFeishu}[state.page]||pageOverview)();
    $("#content").innerHTML=html;
+   if(state.page==="diagnostics")updateDiagnosticInputs();
    if(state.page==="keys"&&state.batchId){
      const batches=await api("/host-keys/batches");
      if(batches.some(b=>b.id===state.batchId && b.status==="running"))timer=setTimeout(render,2500);
@@ -279,6 +292,7 @@ $("#content").addEventListener("input",(e)=>{
  }
 });
 $("#content").addEventListener("change",(e)=>{
+ if(e.target.name==="action")updateDiagnosticInputs();
  if(e.target.classList.contains("host-selected")){
   const id=Number(e.target.dataset.id);if(e.target.checked)state.selected.add(id);else state.selected.delete(id);
  }
@@ -300,6 +314,7 @@ $("#content").addEventListener("submit",async(e)=>{
  e.preventDefault();
  const form=e.target, display=$("#diagnostic-result");
  display.textContent="正在执行只读诊断…";
+ $("#diagnostic-summary").innerHTML='<p class="muted">正在通过 SSH 采集只读数据，请勿重复提交…</p>';
  try{
   const host_id=Number(getForm(form,"host_id"));
   const action=getForm(form,"action");
