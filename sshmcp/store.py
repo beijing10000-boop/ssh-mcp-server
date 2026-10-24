@@ -143,6 +143,11 @@ def init_db():
         if "previous_fingerprint" not in results:
             c.execute("ALTER TABLE scan_results ADD COLUMN previous_fingerprint TEXT")
         c.execute("UPDATE scan_batches SET status='interrupted' WHERE status='running'")
+        c.execute(
+            "UPDATE scan_results SET status='interrupted',error='任务执行中断，可仅重试失败主机' "
+            "WHERE status='queued' AND batch_id IN "
+            "(SELECT id FROM scan_batches WHERE status='interrupted')"
+        )
 
 
 @contextmanager
