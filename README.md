@@ -45,7 +45,7 @@ docker compose exec ssh-mcp cat /app/data/mcp.token
 
 需开放给可信内网时，在项目目录创建 `.env`，并设置 `WEB_BIND_IP=内网绑定IP`；建议同时通过防火墙限制允许访问的源地址。
 
-请阅读 [安装部署](docs/INSTALLATION.md)、[MCP 接入](docs/MCP.md)、[安全说明](docs/SECURITY.md)。
+请阅读 [安装部署](docs/INSTALLATION.md)、[MCP 接入](docs/MCP.md)、[安全说明](docs/SECURITY.md)、[目录与 IP 流量分析](docs/INSIGHTS.md)。
 
 ## 核心能力
 
@@ -54,6 +54,9 @@ docker compose exec ssh-mcp cat /app/data/mcp.token
 | 中文 Web | 主机、主机组、凭据、跳板、主机密钥核验、执行与审计 |
 | 主机公钥获取 | 支持批量探测 + SHA256 指纹审核确认，绝不自动信任 |
 | SSH 诊断 | 连接、CPU、内存、磁盘、进程、I/O、网络、系统、服务与日志 |
+| 目录空间排行 | 对 /data、/var 等安全路径执行限时一层 du，占用空间从大到小排序 |
+| IP 连接数排行 | 从 ss 统计当前远端 IP 的 TCP 连接总数和已建立数量 |
+| IP 流量采样 | 使用 ss -ti 的 TCP 字节计数做约 3 秒同连接增量排名（有明确覆盖限制） |
 | MCP 工具 | 列表与定向受控诊断，不允许模型传入任意目标 IP 或 Shell |
 | 访问控制 | Web 飞书 OAuth + CSRF、独立 MCP Bearer、服务端主机白名单 |
 | 部署 | 单容器 + SQLite，独立端口 9099，日志轮转 |
