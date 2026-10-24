@@ -135,3 +135,30 @@ def test_diagnostics_gates_unverified_hosts(client):
     with store.db() as c:
         row = c.execute("SELECT action,outcome FROM audit ORDER BY id DESC LIMIT 1").fetchone()
     assert row["outcome"] == "failed"
+
+
+def test_mcp_streamable_http_handshake_and_tools(client):
+    """真正的 MCP JSON-RPC 握手与工具发现；不能只检查 /healthz。"""
+    headers = {
+        "Authorization": "Bearer " + store.token("mcp.token"),
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    init = client.post("/mcp", headers=headers, json={
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "pytest", "version": "0.1"},
+        },
+    })
+    assert init.status_code == 200, init.text
+    assert "result" in init.json(), init.text
+    listing = client.post("/mcp", headers={
+        **headers, "MCP-Protocol-Version": "2025-06-18",
+    }, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+    assert listing.status_code == 200, listing.text
+    names = {x["name"] for x in listing.json()["result"]["tools"]}
+    assert "ssh_test_connection" in names
+    assert "ssh_diagnose_disk" in names
+    assert "execute_shell" not in names
