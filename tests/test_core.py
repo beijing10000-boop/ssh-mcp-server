@@ -211,7 +211,7 @@ def test_csrf_and_admin_revoke(client):
     assert client.put("/api/v1/settings/admins", headers=auth(), json={"open_ids":"ou_someone_else"}).status_code == 422
     assert client.put("/api/v1/settings/admins", headers=auth(), json={"open_ids":"ou_123456789,ou_someone_else"}).status_code == 200
     assert client.get("/api/v1/settings/feishu").json()["lark_app_secret_configured"] is True
-    assert "lark_app_secret" not in client.get("/api/v1/settings/feishu").text
+    assert "dummy-app-secret" not in client.get("/api/v1/settings/feishu").text
     store.save_settings({"feishu_admin_open_ids":"ou_someone_else"})
     assert client.get("/api/v1/hosts").status_code == 401
 
