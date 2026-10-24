@@ -173,7 +173,7 @@ function hostFields(h={}){
  field("proxy_id","跳板（可选）",h.proxy_id||"","text",[["","直连"],...state.proxies.map(p=>[p.id,p.name])])+
  field("mode","诊断模式",h.mode||"standard","text",[["standard","A · 标准免 Agent"],["gateway","B · 受限强制命令网关"]])+
  field("host_key","已核验 SSH 主机公钥", "", "textarea",null,true, h.id ? "留空表示保留当前已核验主机公钥；也可以使用批量公钥核验流程。" : "建议先留空，保存后批量获取候选指纹并在可信渠道核实。")+
- '<div class="wide">'+field("enabled","启用资产",h.enabled!==false,"checkbox")+'</div>'+
+ '<div class="wide">'+field("enabled","启用资产",h.enabled===undefined?true:Boolean(h.enabled),"checkbox")+'</div>'+
  '<div class="wide"><label class="check"><input type="checkbox" name="gateway_approved" '+(h.gateway_approved?"checked":"")+'/> 已核实受限强制命令网关（仅 B 模式）</label></div>'+
  '<div class="wide"><label>所属主机组</label>'+ (gs||'<div class="muted">暂无主机组</div>')+'</div>';
 }
