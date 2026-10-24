@@ -136,13 +136,41 @@ async function pageKeys(){
 async function pageDiagnostics(){
  state.hosts=await api("/hosts");
  const hosts=state.hosts.filter(h=>h.enabled).map(h=>[h.id,h.name+' · '+h.address]);
- const action=[["connection","连接测试"],["cpu","CPU 负载"],["memory","内存使用"],["disk","文件系统"],["processes","进程"],["io","磁盘 I/O"],["network","网络接口"],["sockets","TCP 监听"],["system","系统信息"],["service","服务状态"],["logs","服务日志"]];
+ const action=[["directory","目录空间排行"],["peer_connections","远端 IP 连接数排行"],["peer_traffic","远端 IP 流量采样"],["connection","连接测试"],["cpu","CPU 负载"],["memory","内存使用"],["disk","文件系统"],["processes","进程"],["io","磁盘 I/O"],["network","网络接口"],["sockets","TCP 监听"],["system","系统信息"],["service","服务状态"],["logs","服务日志"]];
  return panel("Linux 固定只读诊断",
   '<p class="intro">所有操作仅作用于已登记的内网资产。诊断失败会直接展示明确的中文错误信息。</p>'+
   '<form id="diagnostic-form"><div class="fields">'+field("host_id","目标主机",hosts[0]?.[0]??"", "text",hosts)+
     field("action","诊断类型","cpu","text",action)+field("service","systemd 服务名称","")+
     field("minutes","日志查询窗口（分钟）",30,"number")+
-  '</div><div class="modal-actions"><button class="btn primary" type="submit">执行诊断 →</button></div></form><hr class="rule"/><h3>执行结果</h3><pre id="diagnostic-result" class="code-result">尚未执行</pre>');
+     field("directory_root","空间排行扫描目录","/data","text",null,true,"允许 /data、/var、/opt、/home、/tmp、/usr 等路径，可输入 /data/mysql 深入一层；每次最长扫描 8 秒。")+
+   '</div><div class="modal-actions"><button class="btn primary" type="submit">执行诊断 →</button></div></form><hr class="rule"/><h3>执行结果</h3><div id="diagnostic-summary" class="diagnostic-summary"></div><details class="result-details"><summary>原始结构化结果 / 排错信息</summary><pre id="diagnostic-result" class="code-result">尚未执行</pre></details>');
+}
+function formatSize(n){
+ if(!Number.isFinite(Number(n)))return "—";
+ let v=Number(n), unit=["B","KiB","MiB","GiB","TiB"];
+ let i=0;while(v>=1024&&i<unit.length-1){v/=1024;i++;}
+ return (v>=10||i===0?v.toFixed(0):v.toFixed(1))+" "+unit[i];
+}
+function summarizeDiagnostic(result){
+ const d=result?.data;
+ if(!d) return '<pre class="code-result">'+esc(result?.output||result?.stderr||"没有输出")+'</pre>';
+ const label=result.status==="success"?"完成":"部分结果或采集能力不足";
+ let title='<p class="muted">'+esc(label)+" · "+esc(d.metric||d.ranking_scope||"目录占用")+" · "+esc(result.duration_ms)+" ms</p>";
+ let rows=[],header=[];
+ if(result.action==="directory"){
+  title+='<p class="muted">扫描根目录：<strong>'+esc(d.root)+'</strong>；根目录占用：'+formatSize(d.scanned_root_bytes)+'</p>';
+  header=["排名","目录","已占用空间"];
+  rows=d.top_directories.map((v,i)=>'<tr><td>'+(i+1)+'</td><td class="mono">'+esc(v.directory)+'</td><td>'+formatSize(v.bytes)+'</td></tr>');
+ }else if(result.action==="peer_connections"){
+  header=["排名","远端 IP","TCP 连接总数","其中已建立"];
+  rows=d.ranking.map((v,i)=>'<tr><td>'+(i+1)+'</td><td class="mono">'+esc(v.peer_ip)+'</td><td><strong>'+esc(v.tcp_connections)+'</strong></td><td>'+esc(v.established_connections)+'</td></tr>');
+ }else if(result.action==="peer_traffic"){
+  title+='<p class="muted">'+esc(d.sample_seconds)+' 秒 TCP 采样 · 两次都存在的 socket：'+esc(d.matched_sockets)+'（采样 A '+esc(d.sample_a_sockets)+' / B '+esc(d.sample_b_sockets)+'）</p>';
+  header=["排名","远端 IP","发送增量","接收增量","总计","平均每秒"];
+  rows=d.ranking.map((v,i)=>'<tr><td>'+(i+1)+'</td><td class="mono">'+esc(v.peer_ip)+'</td><td>'+formatSize(v.sent_bytes)+'</td><td>'+formatSize(v.received_bytes)+'</td><td><strong>'+formatSize(v.total_bytes)+'</strong></td><td>'+formatSize(v.avg_bytes_per_second)+'/s</td></tr>');
+ }
+ const caveats=(d.notes||[]).map(v=>'<p class="help">· '+esc(v)+'</p>').join("");
+ return title+table(header,rows.join(""))+(rows.length?"":'<p class="inline-error">本次未获得可用于排行的数据。请查看下方详细结果与能力说明。</p>')+caveats;
 }
 async function pageAudit(){
  const rows=await api("/audit");
@@ -275,10 +303,16 @@ $("#content").addEventListener("submit",async(e)=>{
  try{
   const host_id=Number(getForm(form,"host_id"));
   const action=getForm(form,"action");
-  const body={action,service:["logs","service"].includes(action)?getForm(form,"service"):null,minutes:Number(getForm(form,"minutes"))};
+  const body={action,service:["logs","service"].includes(action)?getForm(form,"service"):null,
+   minutes:Number(getForm(form,"minutes")),
+   directory_root:action==="directory"?getForm(form,"directory_root").trim():null};
   const out=await api("/hosts/"+host_id+"/diagnose","POST",body);
   display.textContent=JSON.stringify(out,null,2);
- }catch(ex){display.textContent="诊断失败："+ex.message;}
+  $("#diagnostic-summary").innerHTML=summarizeDiagnostic(out);
+ }catch(ex){
+  $("#diagnostic-summary").innerHTML='<p class="inline-error">'+esc("诊断失败："+ex.message)+'</p>';
+  display.textContent="诊断失败："+ex.message;
+ }
 });
 $("#content").addEventListener("click",async (e)=>{
  const b=e.target.closest("[data-action]");if(!b)return;
