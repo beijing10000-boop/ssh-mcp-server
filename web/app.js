@@ -77,7 +77,9 @@ async function pageHosts(){
  '<td><div class="actions">'+btn("test","测试",h.id)+btn("edit-host","编辑",h.id)+btn("diagnose-host","诊断",h.id)+btn("disable-host","停用",h.id,"danger")+'</div></td></tr>').join("");
  return panel("Linux 主机资产",
    '<p class="intro">SSH 从本服务发起；主机必须是经过登记的内网 IP。管理员可以使用 root，但系统层面的 root 不等于只读账号。</p>'+
-   '<div class="toolbar"><input id="host-filter" placeholder="按主机名称 / IP / Host ID 筛选"/>'+btn("scan-selected","批量获取选中主机公钥")+'</div>'+
+   '<div class="toolbar"><input id="host-filter" placeholder="筛选主机名称 / IP / Host ID"/>'+
+    btn("select-filtered","选择筛选结果")+btn("scan-selected","扫描选中主机")+
+    btn("scan-all-unverified","批量扫描全部未核验主机","","primary")+'</div>'+
    table(["选择","主机 / 关联","SSH 路由","权限模式","公钥 / 验证","操作"],rows),
    btn("new-host","新增主机","","primary"));
 }
@@ -98,16 +100,38 @@ async function pageProxies(){
 async function pageKeys(){
  const batches=await api("/host-keys/batches");
  if(!state.batchId && batches.length)state.batchId=batches[0].id;
- let body='<p class="intro">获取主机公钥只执行 SSH 握手，不使用目标 SSH 私钥登录。返回的指纹仅为候选值，不会自动信任。</p>';
- let records="";
+ let intro='<p class="intro">① 选择目标并批量扫描 SSH 握手公钥 → ② 按服务器实际密钥算法取得可信指纹 → ③ 独立核对后确认保存 → ④ 返回主机资产进行连接测试。扫描本身不会自动信任服务器。</p>';
+ let records="",detail=null;
  if(state.batchId) {
-   const info=await api("/host-keys/batches/"+encodeURIComponent(state.batchId));
-   body+='<p class="muted">当前批次 '+esc(info.batch.id)+' · '+esc(info.batch.status)+' · 进度 '+info.batch.completed+'/'+info.batch.total+'</p>';
-   records=info.items.map(r=>'<tr><td>'+r.host_id+'<small>'+esc(r.name||"")+'</small></td><td class="mono">'+esc(r.fingerprint||"—")+'</td><td>'+esc(r.status)+'</td><td>'+esc(r.error||"—")+'</td><td>'+(r.status==="candidate"?btn("confirm-key","人工核验并保存",r.host_id):"—")+'</td></tr>').join("");
+   detail=await api("/host-keys/batches/"+encodeURIComponent(state.batchId));
+   const batch=detail.batch;
+   intro+='<p class="muted">批次 '+esc(batch.id)+' · '+esc(batch.status)+' · 进度 <strong>'+batch.completed+'/'+batch.total+'</strong></p>';
+   records=detail.items.map(r=>{
+     const statusName={candidate:"待人工确认",changed:"主机公钥发生变化",unchanged:"与已有可信公钥一致",confirmed:"已核验保存",failed:"获取失败",stale:"主机配置已变化",interrupted:"任务中断"}[r.status]||r.status;
+     const changed=r.previous_fingerprint&&r.fingerprint&&r.previous_fingerprint!==r.fingerprint;
+     const command=r.algorithm==="ssh-rsa"?"ssh-keygen -lf /etc/ssh/ssh_host_rsa_key.pub -E sha256":
+       r.algorithm==="ecdsa-sha2-nistp256"?"ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub -E sha256":
+       "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256";
+     return '<tr><td><strong>'+esc(r.name||"")+'</strong><small>资产 '+r.host_id+' · '+esc(r.address||"")+'</small></td>'+
+       '<td class="mono">'+esc(r.fingerprint||"—")+'<small>算法 '+esc(r.algorithm||"—")+'</small></td>'+
+       '<td><span class="'+(changed?"state-bad":"")+'">'+esc(statusName)+'</span>'+
+       (r.previous_fingerprint?'<small>原可信指纹：'+esc(r.previous_fingerprint)+'</small>':"")+'</td>'+
+       '<td>'+esc(r.error||"—")+(r.fingerprint?'<small>在目标可信控制台执行：<code>'+esc(command)+'</code></small>':"")+'</td>'+
+       '<td>'+((r.status==="candidate"||r.status==="changed")?btn("confirm-key","核验并保存",r.host_id):"—")+'</td></tr>';
+   }).join("");
  }
  const batchlist=batches.map(x=>'<option value="'+esc(x.id)+'" '+(state.batchId===x.id?"selected":"")+'>'+esc(x.created_at)+' · '+esc(x.status)+' · '+x.completed+'/'+x.total+'</option>').join("");
- return panel("批量获取与确认",body+'<div class="toolbar"><select id="batch-select">'+batchlist+'</select>'+btn("refresh","刷新批次")+'</div>'+
- table(["资产","待核验 SHA256 指纹","状态","错误","人工确认"],records)) ;
+ const scanButtons=btn("scan-all-unverified","扫描所有未核验主机","","primary")+
+  (detail&&detail.batch.status==="finished"?btn("retry-failed","仅重试本批失败主机"):"");
+ const results=panel("批量扫描与进度",intro+
+    '<div class="toolbar"><select id="batch-select">'+(batchlist||'<option>没有扫描记录</option>')+'</select>'+btn("refresh","刷新")+'</div>'+
+    table(["主机","候选 SHA256 指纹","核验状态","详情与核验命令","操作"],records),scanButtons);
+ const matching=detail?detail.items.filter(r=>r.status==="candidate"||r.status==="changed"): [];
+ const trust=panel("批量导入可信指纹",'<p class="muted">批量核验无需逐台点击弹窗。请先通过服务器控制台、Ansible 可信通道或已有可信资产台账取得真实 SHA256 指纹，再按「主机 ID 或 IP + 空格 + SHA256 指纹」逐行粘贴。<strong>不能直接复制本页面扫描到的指纹作为可信来源。</strong> 任意一台不匹配，整批不保存。</p>'+
+ '<p class="muted">当前批次待确认：'+matching.length+' 台</p>'+
+ '<textarea id="trusted-fingerprints" rows="7" placeholder="1 SHA256:独立可信渠道获取的指纹&#10;172.20.200.93 SHA256:独立可信渠道获取的指纹"></textarea>'+
+ '<div class="modal-actions">'+btn("confirm-batch-from-manifest","核对并保存可信指纹","","primary")+'</div>');
+ return results+trust;
 }
 async function pageDiagnostics(){
  state.hosts=await api("/hosts");
@@ -298,11 +322,46 @@ $("#content").addEventListener("click",async (e)=>{
   }else if(action==="diagnose-host"){
    state.page="diagnostics";await render();
    const selector=$("#diagnostic-form [name=host_id]");if(selector)selector.value=id;
-  }else if(action==="scan-selected"){
-   const ids=[...state.selected];
-   if(!ids.length)throw new Error("请先勾选至少一台主机");
-   const result=await api("/host-keys/scan","POST",{host_ids:ids});
-   state.selected.clear();state.batchId=result.batch_id;state.page="keys";notice("已提交 "+result.total+" 台主机的公钥握手任务，请在可信渠道逐台核对指纹");render();
+  }else if(action==="select-filtered"){
+   const boxes=[...document.querySelectorAll(".host-selected")].filter(e=>!e.closest("tr").hidden);
+   for(const item of boxes){item.checked=true;state.selected.add(Number(item.dataset.id));}
+   notice("已选择当前筛选结果："+boxes.length+" 台");
+  }else if(action==="scan-selected"||action==="scan-all-unverified"||action==="retry-failed"){
+   let body;
+   if(action==="scan-selected"){
+     const ids=[...state.selected];
+     if(!ids.length)throw new Error("请先勾选至少一台主机");
+     body={host_ids:ids};
+   }else if(action==="retry-failed"){
+     if(!state.batchId)throw new Error("没有可重试的批次");
+     body={retry_failed_batch:state.batchId};
+   }else{
+     body={unverified_only:true};
+   }
+   const result=await api("/host-keys/scan","POST",body);
+   state.selected.clear();state.batchId=result.batch_id;state.page="keys";
+   notice("已提交 "+result.total+" 台主机。请在可信渠道独立核对，再确认公钥。");
+   await render();
+  }else if(action==="confirm-batch-from-manifest"){
+   if(!state.batchId)throw new Error("请先扫描目标主机");
+   const info=await api("/host-keys/batches/"+encodeURIComponent(state.batchId));
+   const eligible=info.items.filter(r=>r.status==="candidate"||r.status==="changed");
+   const raw=($("#trusted-fingerprints")?.value||"").trim();
+   if(!raw)throw new Error("请粘贴通过独立可信渠道取得的主机指纹清单");
+   const lines=raw.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+   const entries=lines.map((line,index)=>{
+     const m=line.match(/^(\S+)\s+(SHA256:[A-Za-z0-9+/=_-]+)$/);
+     if(!m)throw new Error("第 "+(index+1)+" 行格式错误：应为「资产 ID 或 IP + 空格 + SHA256:...」");
+     const match=eligible.find(r=>String(r.host_id)===m[1]||r.address===m[1]);
+     if(!match)throw new Error("第 "+(index+1)+" 行的主机不在当前待核验批次中："+m[1]);
+     return {host_id:match.host_id,independently_verified_sha256:m[2]};
+   });
+   if(!entries.length||new Set(entries.map(x=>x.host_id)).size!==entries.length)
+     throw new Error("核验清单为空或出现重复主机");
+   if(!confirm("已通过独立可信渠道确认 "+entries.length+" 台主机的指纹？不匹配将整批拒绝。"))return;
+   const result=await api("/host-keys/confirm-batch","POST",{items:entries,confirmed:true});
+   notice("已成功保存 "+result.count+" 台主机的公钥。可返回主机资产进行 SSH 连接测试。");
+   await render();
   }else if(action==="confirm-key"){
    const h=await api("/hosts");
    const asset=h.find(x=>String(x.id)===id);
