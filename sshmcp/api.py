@@ -394,6 +394,10 @@ def scan_keys(body: ScanIn, actor=Depends(admin)):
     batch_id = secrets.token_hex(12)
     with store.db() as c:
         c.execute("INSERT INTO scan_batches(id,status,total) VALUES (?,?,?)", (batch_id, "running", len(ids)))
+        c.executemany(
+            "INSERT INTO scan_results(batch_id,host_id,status) VALUES (?,?,?)",
+            [(batch_id, hid, "queued") for hid in ids],
+        )
     SCAN_WORKERS.submit(_scan_batch, batch_id, ids)
     store.audit(actor, "host_keys_scan", batch_id, "started", "count=" + str(len(ids)))
     return {"batch_id": batch_id, "total": len(ids)}
