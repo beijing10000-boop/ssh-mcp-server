@@ -9,11 +9,26 @@ from sshmcp import diagnostics, store
 from sshmcp.main import app
 
 
-@pytest.fixture
-def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(store, "DATA_DIR", tmp_path)
-    with TestClient(app) as c:
-        yield c
+@pytest.fixture(scope="module")
+def client(tmp_path_factory):
+    # MCP Streamable HTTP session_manager may run only once per application instance.
+    old = store.DATA_DIR
+    store.DATA_DIR = tmp_path_factory.mktemp("ssh-mcp")
+    try:
+        with TestClient(app) as c:
+            yield c
+    finally:
+        store.DATA_DIR = old
+
+
+@pytest.fixture(autouse=True)
+def reset_tables(client):
+    with store.db() as c:
+        for table in (
+            "scan_results", "scan_batches", "host_key_candidates", "host_groups",
+            "hosts", "proxies", "credentials", "groups", "audit",
+        ):
+            c.execute("DELETE FROM " + table)
 
 
 def auth():
