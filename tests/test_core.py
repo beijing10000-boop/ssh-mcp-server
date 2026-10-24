@@ -23,16 +23,34 @@ def client(tmp_path_factory):
 
 @pytest.fixture(autouse=True)
 def reset_tables(client):
+    from sshmcp.auth import COOKIE, _hash
+    client.cookies.clear()
     with store.db() as c:
         for table in (
             "scan_results", "scan_batches", "host_key_candidates", "host_groups",
             "hosts", "proxies", "credentials", "groups", "audit",
+            "web_sessions", "oauth_states", "settings"
         ):
             c.execute("DELETE FROM " + table)
+    assert client.get("/api/v1/setup/status").json()["setup_required"] is True
+    setup = client.post("/api/v1/setup", json={
+        "bootstrap_token": store.token("bootstrap.token"),
+        "web_protocol": "http", "web_public_host": "127.0.0.1:9099",
+        "lark_app_id": "cli_1234567890abcdef",
+        "lark_app_secret": "dummy-app-secret",
+        "feishu_admin_open_ids": "ou_123456789",
+    })
+    assert setup.status_code == 200, setup.text
+    with store.db() as c:
+        c.execute(
+            "INSERT INTO web_sessions(token_hash,open_id,name,csrf,expires) VALUES (?,?,?,?,?)",
+            (_hash("test-session"), "ou_123456789", "已授权管理员", "unit-test-csrf", 9999999999),
+        )
+    client.cookies.set(COOKIE, "test-session")
 
 
 def auth():
-    return {"Authorization": "Bearer " + store.token("admin.token")}
+    return {"X-CSRF-Token": "unit-test-csrf"}
 
 
 def make_host(client, key=""):
@@ -45,13 +63,22 @@ def make_host(client, key=""):
 
 
 def test_auth_is_deny_by_default(client):
+    from sshmcp.auth import COOKIE
     assert client.get("/healthz").json()["ok"] is True
+    assert client.get("/api/v1/hosts", headers=auth()).status_code == 200
+    assert client.get("/api/v1/auth/me").json()["role"] == "super_admin"
+    # With a session cookie but no CSRF header, mutations are denied.
+    assert client.post("/api/v1/hosts", json={}).status_code == 403
+    client.cookies.clear()
     assert client.get("/api/v1/hosts").status_code == 401
+    assert client.get("/api/v1/auth/me").status_code == 401
     assert client.get("/mcp").status_code == 401
     assert client.post("/mcp", json={}).status_code == 401
-    assert client.get("/api/v1/hosts", headers={"Authorization": "Bearer invalid"}).status_code == 401
-    assert client.get("/api/v1/hosts", headers=auth()).status_code == 200
-    assert store.token("admin.token") != store.token("mcp.token")
+    # Neither bootstrap nor the now-deprecated admin token can log into Web.
+    assert client.get("/api/v1/hosts", headers={"Authorization": "Bearer " + store.token("bootstrap.token")}).status_code == 401
+    assert client.get("/api/v1/hosts", headers={"Authorization": "Bearer " + store.token("mcp.token")}).status_code == 401
+    client.cookies.set(COOKIE, "test-session")
+    assert client.get("/api/v1/hosts").status_code == 200
 
 
 def test_target_scope_and_no_arbitrary_shell():
@@ -162,3 +189,58 @@ def test_mcp_streamable_http_handshake_and_tools(client):
     assert "ssh_test_connection" in names
     assert "ssh_diagnose_disk" in names
     assert "execute_shell" not in names
+
+
+def test_setup_token_is_single_use_and_app_secret_encrypted(client):
+    assert client.get("/api/v1/setup/status").json()["setup_required"] is False
+    attempt = client.post("/api/v1/setup", json={
+        "bootstrap_token": store.token("bootstrap.token"), "web_protocol": "http",
+        "web_public_host": "127.0.0.1:9099", "lark_app_id": "cli_1234567890abcdef",
+        "lark_app_secret": "dummy-app-secret", "feishu_admin_open_ids": "ou_wrong",
+    })
+    assert attempt.status_code == 409
+    with store.db() as c:
+        row = c.execute("SELECT value,encrypted FROM settings WHERE key='lark_app_secret'").fetchone()
+        assert row["encrypted"] == 1
+        assert "dummy-app-secret" not in row["value"]
+    assert store.setting("lark_app_secret") == "dummy-app-secret"
+
+
+def test_csrf_and_admin_revoke(client):
+    assert client.put("/api/v1/settings/admins", json={"open_ids":"ou_123456789"}).status_code == 403
+    assert client.put("/api/v1/settings/admins", headers=auth(), json={"open_ids":"ou_someone_else"}).status_code == 422
+    assert client.put("/api/v1/settings/admins", headers=auth(), json={"open_ids":"ou_123456789,ou_someone_else"}).status_code == 200
+    assert client.get("/api/v1/settings/feishu").json()["lark_app_secret_configured"] is True
+    assert "lark_app_secret" not in client.get("/api/v1/settings/feishu").text
+    store.save_settings({"feishu_admin_open_ids":"ou_someone_else"})
+    assert client.get("/api/v1/hosts").status_code == 401
+
+
+def test_feishu_oauth_authorized_and_unauthorized(client, monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+    from sshmcp import auth as module
+    client.cookies.clear()
+
+    async def rejected_profile(code):
+        return {"open_id": "ou_not_registered", "name": "陌生用户"}
+    monkeypatch.setattr(module, "exchange_profile", rejected_profile)
+    start = client.get("/api/v1/auth/login", follow_redirects=False)
+    assert start.status_code == 302
+    assert start.headers["location"].startswith("https://open.feishu.cn/")
+    params = parse_qs(urlsplit(start.headers["location"]).query)
+    assert params["redirect_uri"] == ["http://127.0.0.1:9099/api/v1/auth/callback"]
+    state = params["state"][0]
+    denied = client.get("/api/v1/auth/callback", params={"code": "fake", "state": state}, follow_redirects=False)
+    assert denied.status_code == 403
+    # OAuth state may not be reused after denial.
+    assert client.get("/api/v1/auth/callback", params={"code": "fake", "state": state}, follow_redirects=False).status_code == 403
+
+    async def accepted_profile(code):
+        return {"open_id": "ou_123456789", "name": "系统管理员"}
+    monkeypatch.setattr(module, "exchange_profile", accepted_profile)
+    start = client.get("/api/v1/auth/login", follow_redirects=False)
+    state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]
+    accepted = client.get("/api/v1/auth/callback", params={"code": "fake", "state": state}, follow_redirects=False)
+    assert accepted.status_code == 303, accepted.text
+    assert client.get("/api/v1/auth/me").json()["name"] == "系统管理员"
+    assert client.get("/api/v1/hosts").status_code == 200
