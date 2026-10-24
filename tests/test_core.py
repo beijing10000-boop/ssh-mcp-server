@@ -443,3 +443,45 @@ def test_api_directory_input_and_network_results(client, monkeypatch):
         "action":"directory", "directory_root":"/etc/shadow",
     })
     assert invalid.status_code==422
+
+
+def test_remote_connection_awk_pipeline_on_fixture():
+    """Execute the actual static awk aggregation against representative ss output."""
+    import subprocess
+    source=diagnostics.PEER_CONNECTIONS_CMD
+    script=source[source.index("ss -H -t -a -n | awk"):]
+    scripted_input=(
+        "printf '%s\\n' "
+        "'ESTAB 0 0 10.0.0.10:80 172.20.1.3:55000' "
+        "'ESTAB 0 0 10.0.0.10:80 172.20.1.3:55001' "
+        "'CLOSE-WAIT 0 0 [::1]:80 [fd00::12]:5555' "
+        "'ESTAB 0 0 10.0.0.10:80 172.20.1.4:55002'"
+    )
+    script=script.replace("ss -H -t -a -n",scripted_input)
+    proc=subprocess.run(["/bin/sh","-c",script],capture_output=True,text=True,timeout=5)
+    assert proc.returncode == 0, proc.stderr
+    parsed=insights.parse_peer_connections(proc.stdout)
+    assert parsed["ranking"][0]["peer_ip"]=="172.20.1.3"
+    assert parsed["ranking"][0]["tcp_connections"]==2
+    assert any(r["peer_ip"]=="fd00::12" for r in parsed["ranking"])
+
+
+def test_remote_tcp_sampler_awk_on_fixture_without_ssh():
+    """Validate real fixed awk script parses Linux ss -ti counter lines."""
+    import subprocess
+    source=diagnostics.PEER_TRAFFIC_CMD
+    script=source[source.index("capture_peers() {"):]
+    fixture=(
+        "printf '%s\\n' "
+        "'ESTAB 0 0 10.0.0.10:443 172.20.1.3:55000' "
+        "'    cubic bytes_sent:1500 bytes_received:900 rto:200'"
+    )
+    script=script.replace("ss -H -t -n -i state established",fixture).replace("sleep 3","true")
+    proc=subprocess.run(["/bin/sh","-c",script],capture_output=True,text=True,timeout=5)
+    assert proc.returncode == 0, proc.stderr
+    result=insights.parse_tcp_samples(proc.stdout)
+    assert result["supported"]
+    assert result["sample_a_sockets"]==1
+    assert result["sample_b_sockets"]==1
+    assert result["matched_sockets"]==1
+    assert result["ranking"][0]["peer_ip"]=="172.20.1.3"
