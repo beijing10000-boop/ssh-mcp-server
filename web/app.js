@@ -194,6 +194,14 @@ function keyEditor(){
  field("passphrase","私钥口令（可选）","","password")+
  field("private_key","完整 SSH 私钥（不回显）","","textarea",null,true,"私钥使用应用持久化的 Fernet 主密钥加密后存储。");
 }
+$("#content").addEventListener("input",(e)=>{
+ if(e.target.id==="host-filter"){
+  const needle=e.target.value.toLowerCase().trim();
+  for(const tr of document.querySelectorAll("#content tbody tr")){
+   tr.hidden = !!needle && !tr.textContent.toLowerCase().includes(needle);
+  }
+ }
+});
 $("#content").addEventListener("change",(e)=>{
  if(e.target.classList.contains("host-selected")){
   const id=Number(e.target.dataset.id);if(e.target.checked)state.selected.add(id);else state.selected.delete(id);
