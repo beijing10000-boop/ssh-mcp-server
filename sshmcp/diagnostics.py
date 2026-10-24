@@ -14,7 +14,7 @@ import threading
 import paramiko
 from paramiko import SSHException
 
-from . import store
+from . import store, insights
 
 PREFIX = "PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; LC_ALL=C; export LC_ALL=C; "
 ACTIONS = {
@@ -28,6 +28,61 @@ ACTIONS = {
     "sockets": "command -v ss >/dev/null 2>&1 && { ss -s; ss -lnt | head -n 60; } || head -n 60 /proc/net/tcp",
     "system": "uname -sr; cat /proc/uptime /proc/loadavg; date -u '+%Y-%m-%dT%H:%M:%SZ'",
 }
+
+# Static scripts only: no user-provided IP, shell, or filesystem path enters awk.
+PEER_CONNECTIONS_CMD = r"""
+if ! command -v ss >/dev/null 2>&1; then
+  printf 'CAPABILITY_MISSING:ss\n'
+  exit 69
+fi
+ss -H -t -a -n | awk '
+  NF >= 5 {
+    peer=$5
+    if (substr(peer,1,1)=="[") {
+      sub(/^\[/,"",peer); sub(/\]:[^:]*$/,"",peer)
+    } else {
+      sub(/:[^:]*$/,"",peer)
+    }
+    if (peer=="*" || peer=="0.0.0.0" || peer=="::" || peer=="") next
+    count[peer]++
+    if ($1=="ESTAB") established[peer]++
+  }
+  END { for (peer in count) print peer "\t" count[peer] "\t" (established[peer]+0) }
+' | sort -k2,2nr | head -n 50
+"""
+PEER_TRAFFIC_CMD = r"""
+if ! command -v ss >/dev/null 2>&1; then
+  printf 'CAPABILITY_MISSING:ss\n'
+  exit 69
+fi
+capture_peers() {
+  ss -H -t -n -i state established | awk '
+    function emit() {
+      if (local!="" && peer!="" && sent!="" && received!="")
+        print local "\t" peer "\t" sent "\t" received
+    }
+    $1=="ESTAB" {
+      emit()
+      local=$4; peer=$5; sent=""; received=""
+      next
+    }
+    {
+      for (i=1;i<=NF;i++) {
+        if ($i ~ /^bytes_sent:[0-9]+$/) { split($i, item, ":"); sent=item[2] }
+        if ($i ~ /^bytes_received:[0-9]+$/) { split($i, item, ":"); received=item[2] }
+      }
+    }
+    END { emit() }
+  '
+}
+printf '__SAMPLE_A__\n'
+capture_peers
+sleep 3
+printf '__SAMPLE_B__\n'
+capture_peers
+"""
+INSIGHT_ACTIONS = {"directory", "peer_connections", "peer_traffic"}
+
 SERVICE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$")
 REDACTION = re.compile(r"(?i)\\b(password|passwd|token|secret|api[_-]?key|authorization)\\b(\\s*[:=]\\s*)([^\\s,;]+)")
 
@@ -48,9 +103,27 @@ _ACTIVE_HOSTS = set()
 _ACTIVE_LOCK = threading.Lock()
 
 
-def command_for(action: str, service: str | None = None, minutes: int = 30) -> str:
+def command_for(action: str, service: str | None = None, minutes: int = 30, directory_root: str | None = None) -> str:
     if isinstance(minutes, bool) or not isinstance(minutes, int) or not 1 <= minutes <= 120:
         raise ValueError("日志时间窗口必须在 1 到 120 分钟内")
+    if action == "directory":
+        if service or directory_root not in insights.DIRECTORY_ROOTS:
+            raise ValueError("请选择允许扫描的固定根目录；不接受任意文件路径")
+        # timeout + nice: avoid unbounded disk scans; no files are written.
+        return PREFIX + (
+            "if ! command -v timeout >/dev/null 2>&1; then "
+            "printf 'CAPABILITY_MISSING:timeout\\n'; exit 69; fi; "
+            "timeout -k 1 8 nice -n 19 du -B1 -x -d 1 -- "
+            + shlex.quote(directory_root)
+        )
+    if directory_root is not None:
+        raise ValueError("该诊断动作不接受目录参数")
+    if action == "peer_connections":
+        if service: raise ValueError("连接排行不接受服务名")
+        return PREFIX + PEER_CONNECTIONS_CMD
+    if action == "peer_traffic":
+        if service: raise ValueError("IP 流量采样不接受服务名")
+        return PREFIX + PEER_TRAFFIC_CMD
     if action in ACTIONS:
         if service:
             raise ValueError("此诊断动作不接受服务名")
@@ -135,7 +208,7 @@ def _route(host: dict):
     return jump, tunnel
 
 
-def execute(host_id: int, action: str, service: str | None = None, minutes: int = 30) -> dict:
+def execute(host_id: int, action: str, service: str | None = None, minutes: int = 30, directory_root: str | None = None) -> dict:
     if not _GLOBAL_SSH_LIMIT.acquire(blocking=False):
         raise SSHDiagnosticError("SSH 诊断并发已达上限（4），请稍后重试")
     with _ACTIVE_LOCK:
@@ -144,19 +217,21 @@ def execute(host_id: int, action: str, service: str | None = None, minutes: int 
             raise SSHDiagnosticError("该主机已有一项诊断正在执行，请稍后重试")
         _ACTIVE_HOSTS.add(host_id)
     try:
-        return _execute_inner(host_id, action, service, minutes)
+        return _execute_inner(host_id, action, service, minutes, directory_root)
     finally:
         with _ACTIVE_LOCK:
             _ACTIVE_HOSTS.discard(host_id)
         _GLOBAL_SSH_LIMIT.release()
 
 
-def _execute_inner(host_id: int, action: str, service: str | None = None, minutes: int = 30) -> dict:
+def _execute_inner(host_id: int, action: str, service: str | None = None, minutes: int = 30, directory_root: str | None = None) -> dict:
     host = store.get_host(host_id)
     if not host.get("host_key"):
         raise SSHDiagnosticError("未核验 SSH 主机公钥；请先批量获取并确认 SHA256 指纹")
-    command = command_for(action, service, minutes)
+    command = command_for(action, service, minutes, directory_root)
     if host.get("mode") == "gateway":
+        if action in INSIGHT_ACTIONS:
+            raise SSHDiagnosticError("当前 B 模式强制命令网关尚未支持此诊断动作；请使用已批准的 A 模式主机")
         if not host.get("gateway_approved"):
             raise SSHDiagnosticError("受限网关模式尚未经管理员批准")
         command = "aiops-v1 " + action + " " + str(minutes) + (" " + service if service else "")
@@ -169,13 +244,14 @@ def _execute_inner(host_id: int, action: str, service: str | None = None, minute
         chan.settimeout(6)
         chan.exec_command(command)
         stdout, stderr = bytearray(), bytearray()
+        output_limit = 262144 if action == "peer_traffic" else 32768
         deadline = time.monotonic() + 20
         truncated = False
         while True:
             if time.monotonic() > deadline:
                 raise SSHDiagnosticError("SSH 诊断执行超时（20秒）")
             for ready, recv, dest, limit in (
-                (chan.recv_ready, chan.recv, stdout, 32768),
+                (chan.recv_ready, chan.recv, stdout, output_limit),
                 (chan.recv_stderr_ready, chan.recv_stderr, stderr, 2048),
             ):
                 if ready():
@@ -189,16 +265,31 @@ def _execute_inner(host_id: int, action: str, service: str | None = None, minute
                 break
             time.sleep(0.03)
         code = None if truncated else chan.recv_exit_status()
-        output = redact_output(stdout[:32768].decode("utf-8", "replace"))
+        output = redact_output(stdout[:output_limit].decode("utf-8", "replace"))
         error = redact_output(stderr[:2048].decode("utf-8", "replace"))
         if host.get("mode") == "gateway" and not output.startswith("AIOPS_GATEWAY_V1\n"):
             raise SSHDiagnosticError("目标未返回受限网关标识，请核验 authorized_keys 强制命令")
-        return {
+        result = {
             "host_id": host_id, "host": host["name"], "action": action,
-            "status": "partial" if truncated or code not in (0, None) or error else "success",
+            "status": "partial" if truncated or code != 0 or error else "success",
             "exit_code": code, "output": output, "stderr": error,
             "truncated": truncated, "duration_ms": int((time.monotonic() - began) * 1000),
         }
+        if action in INSIGHT_ACTIONS:
+            if action == "directory":
+                data = insights.parse_directory(output, directory_root)
+            elif action == "peer_connections":
+                data = insights.parse_peer_connections(output)
+            else:
+                data = insights.parse_tcp_samples(output)
+                if not data["supported"] or data["matched_sockets"] == 0:
+                    result["status"] = "partial"
+                    data["notes"].append("没有可比较的 TCP 连接字节计数；请确认目标支持 ss -ti，且采样期间存在持续的 TCP 会话。")
+            if truncated or code != 0:
+                data["notes"].append("命令执行失败、超时或输出超限：当前排行不完整，不可据此判定全局 Top IP / Top 目录。")
+            result["data"] = data
+            result["output"] = ""  # Avoid leaking raw socket/directory inventory to LLM.
+        return result
     except paramiko.BadHostKeyException:
         raise SSHDiagnosticError("SSH 主机公钥与已登记公钥不一致，已拒绝连接") from None
     except paramiko.AuthenticationException:
