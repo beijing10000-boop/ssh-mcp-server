@@ -219,30 +219,62 @@ def _execute_inner(host_id: int, action: str, service: str | None = None, minute
 
 
 def scan_host_key(host_id: int) -> dict:
-    """只做服务器 SSH 握手，不认证，不执行诊断命令。结果为候选，绝不自动授权。"""
+    """Batch-safe candidate discovery. A handshake is not a trust decision."""
     host = store.get_host(host_id)
+    signature = store.scan_signature(host)
     jump = transport = None
     try:
         jump, tunnel = _route(host) if host.get("proxy_id") else (None, None)
-        if tunnel is not None:
-            transport = paramiko.Transport(tunnel)
-        else:
-            transport = paramiko.Transport((host["address"], int(host["port"])))
+        transport = (
+            paramiko.Transport(tunnel)
+            if tunnel is not None
+            else paramiko.Transport((host["address"], int(host["port"])))
+        )
         transport.banner_timeout = 6
+        # Prefer an existing pinned key algorithm to avoid false key-change alarms
+        # when a server offers multiple host-key algorithms.
+        if host.get("host_key"):
+            known_type = store.validate_hostkey(host["host_key"]).split()[0]
+            preferred = {
+                "ssh-ed25519": "ssh-ed25519",
+                "ecdsa-sha2-nistp256": "ecdsa-sha2-nistp256",
+                "ssh-rsa": "rsa-sha2-512",
+            }.get(known_type)
+            if preferred:
+                options = transport.get_security_options()
+                options.key_types = tuple(
+                    [preferred] + [alg for alg in options.key_types if alg != preferred]
+                )
         transport.start_client(timeout=6)
-        key = transport.get_remote_server_key()
-        candidate = store.validate_hostkey(key.get_name() + " " + key.get_base64())
-        result = {"host_id": host_id, "name": host["name"], "fingerprint": host_fingerprint(candidate)}
+        remote = transport.get_remote_server_key()
+        candidate = store.validate_hostkey(remote.get_name() + " " + remote.get_base64())
+        fingerprint = host_fingerprint(candidate)
+        previous = host_fingerprint(host["host_key"]) if host.get("host_key") else None
+        result = {
+            "host_id": host_id, "name": host["name"],
+            "fingerprint": fingerprint,
+            "algorithm": candidate.split()[0],
+            "previous_fingerprint": previous,
+        }
         with store.db() as c:
+            c.execute("BEGIN IMMEDIATE")
+            current = c.execute("SELECT * FROM hosts WHERE id=?", (host_id,)).fetchone()
+            if not current or not current["enabled"] or store.scan_signature(dict(current)) != signature:
+                return {**result, "state": "stale", "error": "主机地址、端口或跳板已变化，请重新获取"}
+            if current["host_key"] == candidate:
+                c.execute("DELETE FROM host_key_candidates WHERE host_id=?", (host_id,))
+                return {**result, "state": "unchanged"}
             c.execute(
-                "INSERT INTO host_key_candidates(host_id,key,fingerprint,collected_at) "
-                "VALUES (?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(host_id) DO UPDATE SET "
-                "key=excluded.key,fingerprint=excluded.fingerprint,collected_at=CURRENT_TIMESTAMP",
-                (host_id, candidate, result["fingerprint"]),
+                "INSERT INTO host_key_candidates(host_id,key,fingerprint,source_signature,collected_at) "
+                "VALUES (?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(host_id) DO UPDATE SET "
+                "key=excluded.key,fingerprint=excluded.fingerprint,"
+                "source_signature=excluded.source_signature,collected_at=CURRENT_TIMESTAMP",
+                (host_id, candidate, fingerprint, signature),
             )
-        return {**result, "state": "candidate", "previous_fingerprint": host_fingerprint(host["host_key"]) if host.get("host_key") else None}
+        return {**result, "state": "changed" if previous else "candidate"}
     except (OSError, SSHException, ValueError) as exc:
-        return {"host_id": host_id, "name": host["name"], "state": "failed", "error": type(exc).__name__}
+        return {"host_id": host_id, "name": host["name"], "state": "failed",
+                "error": type(exc).__name__}
     finally:
         if transport is not None:
             transport.close()
