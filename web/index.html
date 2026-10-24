@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="color-scheme" content="light dark"/>
+  <title>Linux 智能诊断 MCP 服务器</title>
+  <link rel="stylesheet" href="/static/app.css"/>
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <div id="login" class="login-wrap">
+    <div class="login-card">
+      <div class="logo">⌘</div>
+      <div class="eyebrow">SSH MCP SERVER · v0.1.0</div>
+      <h1>Linux 智能诊断</h1>
+      <p class="muted">独立的 SSH MCP 服务 · 中文运维控制台</p>
+      <form id="login-form">
+        <label for="admin-token">管理员访问令牌</label>
+        <input id="admin-token" type="password" autocomplete="off" required placeholder="输入首次启动生成的 admin.token"/>
+        <button type="submit" class="btn primary stretch">安全登录 →</button>
+      </form>
+      <p id="login-error" class="error" role="alert" hidden></p>
+      <p class="micro">令牌仅保存在本浏览器当前标签页的会话中。首次部署请从服务器安全读取。</p>
+    </div>
+  </div>
+  <div id="app" class="shell" hidden>
+    <aside class="sidebar">
+      <div class="brand"><span class="symbol">⌘</span><div><strong>SSH MCP</strong><small>Linux 智能诊断</small></div></div>
+      <div class="nav-caption">工作台</div>
+      <nav id="nav">
+        <button class="nav-link active" data-page="overview">▦ <span>运维总览</span></button>
+        <button class="nav-link" data-page="hosts">▤ <span>主机资产</span></button>
+        <button class="nav-link" data-page="groups">▧ <span>主机组</span></button>
+        <button class="nav-link" data-page="credentials">⌑ <span>SSH 凭据</span></button>
+        <button class="nav-link" data-page="proxies">⇄ <span>跳板管理</span></button>
+        <button class="nav-link" data-page="keys">◇ <span>主机公钥核验</span></button>
+        <button class="nav-link" data-page="diagnostics">✧ <span>只读诊断</span></button>
+        <button class="nav-link" data-page="audit">◴ <span>操作审计</span></button>
+      </nav>
+      <div class="sidebar-foot">
+        <span class="indicator"></span> 端口 9099 · 独立服务
+        <button class="text-button" id="logout">退出登录</button>
+      </div>
+    </aside>
+    <main class="workspace">
+      <header class="topbar">
+        <div><span class="eyebrow">LINUX OPERATIONS / STANDALONE MCP</span><h1 id="page-title">运维总览</h1></div>
+        <div class="top-actions"><span class="pill">只读诊断</span><button id="reload" class="btn subtle">刷新</button></div>
+      </header>
+      <div id="notice" class="notice" role="status" hidden></div>
+      <section id="content" aria-live="polite"></section>
+    </main>
+  </div>
+  <dialog id="editor">
+    <form id="editor-form">
+      <div class="modal-title"><div><span class="eyebrow">SSH MCP / 管理</span><h2 id="editor-heading">编辑</h2></div><button class="close" type="button" id="editor-close" aria-label="关闭弹窗">×</button></div>
+      <div id="editor-fields" class="fields"></div>
+      <p id="editor-feedback" role="alert" class="inline-error" hidden></p>
+      <div class="modal-actions"><button type="button" class="btn subtle" id="editor-cancel">取消</button><button type="submit" class="btn primary">保存</button></div>
+    </form>
+  </dialog>
+</body>
+</html>
