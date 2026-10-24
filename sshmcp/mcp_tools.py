@@ -94,9 +94,27 @@ def ssh_diagnose_logs(host_id: int, service: str, minutes: int = 30) -> dict:
     return _run(host_id, "logs", service=service, minutes=minutes)
 
 
-def _run(host_id: int, action: str, service: str | None = None, minutes: int = 30) -> dict:
+@mcp.tool()
+def ssh_diagnose_directory_usage(host_id: int, root: str = "/data") -> dict:
+    """只读扫描指定白名单根目录下一层子目录的磁盘占用排行，支持 /、/data、/var、/var/log、/var/lib、/opt、/home、/tmp、/usr；8 秒超时，结果可能不完整。"""
+    return _run(host_id, "directory", directory_root=root)
+
+
+@mcp.tool()
+def ssh_diagnose_peer_connections(host_id: int) -> dict:
+    """统计当前 Linux TCP 连接按远端 IP 排名，以及其中已建立连接的数量；不表示流量。"""
+    return _run(host_id, "peer_connections")
+
+
+@mcp.tool()
+def ssh_diagnose_peer_traffic(host_id: int) -> dict:
+    """近 3 秒持续 TCP 会话按远端 IP 的发送/接收字节增量排行。仅在 ss -ti 计数可用时有效；不包含 UDP、短连接及转发流量，也不是历史流量。"""
+    return _run(host_id, "peer_traffic")
+
+
+def _run(host_id: int, action: str, service: str | None = None, minutes: int = 30, directory_root: str | None = None) -> dict:
     try:
-        result = diagnostics.execute(host_id, action, service, minutes)
+        result = diagnostics.execute(host_id, action, service, minutes, directory_root=directory_root)
         store.audit("mcp", action, str(host_id), result["status"], "exit=" + str(result["exit_code"]))
         return result
     except Exception as exc:
