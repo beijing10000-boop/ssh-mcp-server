@@ -10,6 +10,19 @@ DIRECTORY_ROOTS = (
     "/", "/data", "/var", "/var/log", "/var/lib", "/opt", "/home", "/tmp", "/usr",
 )
 
+
+def validate_directory_root(root: str | None) -> str:
+    """Accept bounded absolute paths under whitelisted roots; reject path traversal."""
+    if not isinstance(root, str) or len(root) > 120:
+        raise ValueError("目录路径长度不正确")
+    if root == "/":
+        return root
+    if not re.fullmatch(r"/(?:data|var|opt|home|tmp|usr)(?:/[A-Za-z0-9._-]+){0,6}", root):
+        raise ValueError("目录须位于 /data、/var、/opt、/home、/tmp 或 /usr 下")
+    if any(segment in (".", "..") for segment in root.split("/")):
+        raise ValueError("目录路径禁止 . 或 .. 等跳转")
+    return root
+
 _SS_COUNTER = re.compile(r"^(bytes_sent|bytes_received):([0-9]+)$")
 _SAMPLE_MARKER = re.compile(r"^__SAMPLE_([AB])__$")
 
