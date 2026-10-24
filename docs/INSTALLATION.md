@@ -74,3 +74,38 @@ docker compose logs -f ssh-mcp
 ## 七、部署边界
 
 此版本没有对旧 AI Ops Platform 进行自动迁移或删除。请在测试目标通过诊断、核验、审计和 MCP 工具验证后，再安排旧执行器切换。新项目与现有 Zabbix MCP 服务完全独立。
+
+## 八、批量主机公钥：实际可用的推荐流程
+
+新版本 Web「主机公钥核验」支持一次扫描未核验主机、4 台并发、持久化进度、仅重试失败、按算法显示新旧指纹，以及批量导入可信指纹后一并确认。主机 IP/端口/跳板变更会自动清除旧身份绑定；过期扫描结果不可确认。
+
+**不需要逐台登录服务器复制主机公钥。** 如果你已经使用 Ansible，通过事先独立核实的 SSH 主机身份访问 Linux，可以在 Ansible 控制机运行：
+
+```bash
+cd /data/ssh-mcp-server
+ANSIBLE_HOST_KEY_CHECKING=True ansible-playbook \
+  -i /etc/ansible/hosts scripts/trusted-host-fingerprints.yml \
+  --limit linux --forks 10
+```
+
+请将上面的 `/etc/ansible/hosts` 和 `--limit linux` 替换成你实际的 Inventory 和主机组。如果 SSH 未设置经过可信核验的 `known_hosts`，该来源**不能**被视为独立可信来源；不要为求通过而设置 `host_key_checking=False`。
+
+该 Playbook 使用 `raw`，**目标端无需 Python/Agent**；输出位于执行目录的 `trusted-host-fingerprints.txt`，格式例如：
+
+```text
+172.20.200.93 ssh-ed25519 SHA256:示例指纹
+172.20.200.93 ssh-rsa SHA256:示例指纹
+172.20.200.94 ssh-ed25519 SHA256:示例指纹
+```
+
+接下来，在新 SSH MCP Web「主机公钥核验」：
+
+1. 点击「扫描所有未核验主机」，读取候选主机公钥和指纹；
+2. 将独立可信来源生成的 `trusted-host-fingerprints.txt` **文本内容**粘贴到「批量导入可信指纹」；
+3. 平台按主机 IP 与主机密钥算法匹配，仅确认指纹完全相同的候选，其他算法或其他主机的行会跳过；
+4. 任一主机指纹不一致，整批取消并保持原公钥不变；
+5. 通过后到「主机资产」点击「测试」，再进行诊断。
+
+只扫描网络握手、公钥未经独立验证时不允许直接视为可信。已经正确绑定且公钥相同的主机标为「与已有可信公钥一致」，不会重复要求确认。
+
+**不要把可信资产清单上传到公共 GitHub 仓库。**
