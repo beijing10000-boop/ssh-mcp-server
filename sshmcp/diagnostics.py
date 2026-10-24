@@ -107,8 +107,9 @@ def command_for(action: str, service: str | None = None, minutes: int = 30, dire
     if isinstance(minutes, bool) or not isinstance(minutes, int) or not 1 <= minutes <= 120:
         raise ValueError("日志时间窗口必须在 1 到 120 分钟内")
     if action == "directory":
-        if service or directory_root not in insights.DIRECTORY_ROOTS:
-            raise ValueError("请选择允许扫描的固定根目录；不接受任意文件路径")
+        if service:
+            raise ValueError("目录诊断不接受服务名称")
+        directory_root = insights.validate_directory_root(directory_root)
         # timeout + nice: avoid unbounded disk scans; no files are written.
         return PREFIX + (
             "if ! command -v timeout >/dev/null 2>&1; then "
