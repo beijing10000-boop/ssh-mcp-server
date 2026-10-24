@@ -1,0 +1,204 @@
+{
+  "fixture": "isolated local database and simulated diagnostic output",
+  "checks": [
+    {
+      "width": 1280,
+      "page": "overview",
+      "ok": true
+    },
+    {
+      "width": 1280,
+      "page": "hosts",
+      "ok": true
+    },
+    {
+      "width": 1280,
+      "page": "groups",
+      "ok": true
+    },
+    {
+      "width": 1280,
+      "page": "credentials",
+      "ok": true
+    },
+    {
+      "width": 1280,
+      "page": "proxies",
+      "ok": true
+    },
+    {
+      "width": 1280,
+      "page": "keys",
+      "ok": true
+    },
+    {
+      "width": 1280,
+      "page": "diagnostics",
+      "ok": true
+    },
+    {
+      "width": 1280,
+      "page": "history",
+      "ok": true
+    },
+    {
+      "width": 1280,
+      "page": "clients",
+      "ok": true
+    },
+    {
+      "width": 1280,
+      "page": "audit",
+      "ok": true
+    },
+    {
+      "width": 1280,
+      "page": "feishu",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "overview",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "hosts",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "groups",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "credentials",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "proxies",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "keys",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "diagnostics",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "history",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "clients",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "audit",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "feishu",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "overview",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "hosts",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "groups",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "credentials",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "proxies",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "keys",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "diagnostics",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "history",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "clients",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "audit",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "feishu",
+      "ok": true
+    },
+    {
+      "workflow": "server pagination, group filter and all matching selection",
+      "ok": true
+    },
+    {
+      "workflow": "asset validation appears in modal and root saves",
+      "ok": true
+    },
+    {
+      "workflow": "direct jump page loads credentials",
+      "ok": true
+    },
+    {
+      "workflow": "background diagnosis, saved report and reload",
+      "ok": true
+    },
+    {
+      "workflow": "running diagnosis cancellation",
+      "ok": true
+    },
+    {
+      "workflow": "real MCP SDK initialize, exact host mapping, diagnostic and stale revision rejection",
+      "ok": true
+    },
+    {
+      "workflow": "scoped client token shown once and revocation enforced",
+      "ok": true
+    },
+    {
+      "workflow": "theme toggle",
+      "ok": true
+    }
+  ],
+  "javascript_errors": [],
+  "http_5xx": []
+}
