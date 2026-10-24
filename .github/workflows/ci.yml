@@ -20,6 +20,6 @@ jobs:
       - name: JavaScript 语法检查
         run: node --check web/app.js
       - name: 执行单元与接口测试
-        run: pytest -q
+        run: python -m pytest -q
       - name: Docker 构建
         run: docker build -t ssh-mcp-server:ci .
