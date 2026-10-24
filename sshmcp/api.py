@@ -83,6 +83,7 @@ class RunIn(BaseModel):
     action: str
     service: str | None = None
     minutes: int = Field(default=30, ge=1, le=120)
+    directory_root: str | None = None
 
 
 def safe_host_input(item: HostIn) -> dict:
@@ -310,12 +311,12 @@ def host_test(host_id: int, actor=Depends(admin)):
 
 @router.post("/hosts/{host_id}/diagnose")
 def host_diagnose(host_id: int, body: RunIn, actor=Depends(admin)):
-    return _execute(host_id, body.action, body.service, body.minutes, actor)
+    return _execute(host_id, body.action, body.service, body.minutes, actor, body.directory_root)
 
 
-def _execute(host_id, action, service, minutes, actor):
+def _execute(host_id, action, service, minutes, actor, directory_root=None):
     try:
-        result = diagnostics.execute(host_id, action, service, minutes)
+        result = diagnostics.execute(host_id, action, service, minutes, directory_root=directory_root)
         with store.db() as c:
             if action == "connection":
                 c.execute("UPDATE hosts SET last_status=? WHERE id=?", (result["status"], host_id))
