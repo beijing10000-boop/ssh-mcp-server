@@ -515,6 +515,11 @@ def test_safe_directory_roots_and_bounded_commands():
     assert "du -B1 -x -d 1" in diagnostics.command_for(
         "directory", directory_root="/var/log"
     )
+    for root in ("/root", "/root/.cache", "/root/.ssh"):
+        command = diagnostics.command_for("directory", directory_root=root)
+        assert "timeout -k 1 8" in command
+        assert "du -B1 -x -d 1" in command
+        assert command.endswith(" -- " + root)
     assert "ss -H -t -a -n" in diagnostics.command_for("peer_connections")
     assert "sleep 3" in diagnostics.command_for("peer_traffic")
     for invalid in (
@@ -522,7 +527,10 @@ def test_safe_directory_roots_and_bounded_commands():
         "/data/../etc",
         "/data/./mysql",
         "/data;id",
-        "/root",
+        "/root/../etc",
+        "/root/./.ssh",
+        "/root;whoami",
+        "/root//.ssh",
         "data",
         "/data/" + "x" * 150,
     ):
