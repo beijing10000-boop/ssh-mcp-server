@@ -25,11 +25,11 @@ curl -fsS http://127.0.0.1:9099/healthz
 首次启动自动在**持久数据卷**中创建两个独立随机令牌和加密主密钥：
 
 ```bash
-docker compose exec ssh-mcp cat /app/data/admin.token
+docker compose exec ssh-mcp cat /app/data/bootstrap.token
 docker compose exec ssh-mcp cat /app/data/mcp.token
 ```
 
-第一个用于 Web 登录，第二个用于其他 MCP 客户端的 `Authorization: Bearer <token>`。**不要复制到公开聊天、环境变量、日志或仓库中**。
+第一个仅用于首次在 /setup 填写飞书 App ID、App Secret、Web 地址和管理员 Open ID，之后 Web 使用飞书登录；第二个用于其他 MCP 客户端的 `Authorization: Bearer <token>`。**不要复制到公开聊天、环境变量、日志或仓库中**。
 
 ## 三、内网客户端访问
 
@@ -43,7 +43,8 @@ WEB_BIND_IP=你的服务器可信内网IP
 
 ## 四、Web 配置顺序
 
-1. 登录 Web，创建「SSH 凭据」，粘贴 SSH 私钥（仅加密存储，不回显）。
+1. 首次访问 /setup，填写一次性 Token、飞书应用 App ID、App Secret、管理员 Open ID、Web 外部地址，并在飞书开放平台登记对应 /api/v1/auth/callback 回调地址；保存后使用飞书登录。
+2. 登录 Web，创建「SSH 凭据」，粘贴 SSH 私钥（仅加密存储，不回显）。
 2. 创建主机组（可选）。
 3. 「主机资产 → 新增主机」，填内网 IP、端口、账号（可以是 root 或普通账号）、凭据和可选 Zabbix Host ID。
 4. 勾选主机，「批量获取选中主机公钥」，后台并行 SSH 握手。
@@ -60,7 +61,7 @@ docker compose logs -f ssh-mcp
 
 ## 五、备份与升级
 
-数据卷中 `ssh-mcp.sqlite3` + `master.key` + `admin.token` + `mcp.token` 必须成套备份；加密主密钥一旦丢失无法解密数据库中的 SSH 私钥。
+数据卷中 `ssh-mcp.sqlite3` + `master.key` + `bootstrap.token` + `mcp.token` 必须成套备份；加密主密钥一旦丢失无法解密数据库中的 SSH 私钥。
 
 升级前先暂停新的 SSH 任务并备份，`git pull --ff-only && docker compose up -d --build`。**不可执行 `docker compose down -v`**，否则会删除持久数据卷。
 
