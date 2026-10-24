@@ -5,7 +5,7 @@ import paramiko
 import pytest
 from fastapi.testclient import TestClient
 
-from sshmcp import diagnostics, store
+from sshmcp import diagnostics, store, insights
 from sshmcp.main import app
 
 
@@ -188,6 +188,9 @@ def test_mcp_streamable_http_handshake_and_tools(client):
     names = {x["name"] for x in listing.json()["result"]["tools"]}
     assert "ssh_test_connection" in names
     assert "ssh_diagnose_disk" in names
+    assert "ssh_diagnose_directory_usage" in names
+    assert "ssh_diagnose_peer_connections" in names
+    assert "ssh_diagnose_peer_traffic" in names
     assert "execute_shell" not in names
 
 
@@ -349,3 +352,94 @@ def test_bulk_scan_by_filter_and_retry_failed(client, monkeypatch):
     response=client.post("/api/v1/host-keys/scan",headers=auth(),json={"unverified_only":True})
     assert response.status_code==202,response.text
     assert response.json()["total"]==2
+
+
+def test_safe_directory_roots_and_bounded_commands():
+    assert "timeout -k 1 8" in diagnostics.command_for("directory", directory_root="/data/mysql")
+    assert "du -B1 -x -d 1" in diagnostics.command_for("directory", directory_root="/var/log")
+    assert "ss -H -t -a -n" in diagnostics.command_for("peer_connections")
+    assert "sleep 3" in diagnostics.command_for("peer_traffic")
+    for invalid in (
+        "/etc/shadow", "/data/../etc", "/data/./mysql",
+        "/data;id", "/root", "data", "/data/" + "x"*150,
+    ):
+        with pytest.raises(ValueError):
+            diagnostics.command_for("directory", directory_root=invalid)
+    for action in ("peer_connections", "peer_traffic"):
+        with pytest.raises(ValueError):
+            diagnostics.command_for(action, directory_root="/data")
+        with pytest.raises(ValueError):
+            diagnostics.command_for(action, service="evil")
+    with pytest.raises(ValueError):
+        diagnostics.command_for("directory", service=";id", directory_root="/data")
+
+
+def test_parse_biggest_directories_with_bytes():
+    parsed=insights.parse_directory(
+        "2048\t/data/logs\n4096\t/data/mysql\n8192\t/data\n",
+        "/data",
+    )
+    assert parsed["scanned_root_bytes"] == 8192
+    assert [x["directory"] for x in parsed["top_directories"]] == ["/data/mysql", "/data/logs"]
+    assert parsed["top_directories"][0]["bytes"] == 4096
+
+
+def test_per_ip_connections_sorting():
+    parsed=insights.parse_peer_connections(
+        "172.20.1.3\t10\t7\n172.20.1.4\t22\t10\n"
+        "172.20.1.5;rm\t999\t999\n"
+    )
+    assert parsed["ranking"][0] == {
+        "peer_ip": "172.20.1.4", "tcp_connections": 22, "established_connections": 10
+    }
+    assert len(parsed["ranking"]) == 2
+
+
+def test_tcp_traffic_uses_matched_socket_deltas_only():
+    lines=(
+        "__SAMPLE_A__\n"
+        "10.0.0.5:443\t172.20.1.3:53000\t1000\t2000\n"
+        "10.0.0.5:22\t172.20.1.4:53001\t100\t200\n"
+        "10.0.0.5:22\t172.20.1.4:53002\t500\t1000\n"
+        "__SAMPLE_B__\n"
+        "10.0.0.5:443\t172.20.1.3:53000\t4000\t2600\n"
+        "10.0.0.5:22\t172.20.1.4:53001\t200\t900\n"
+        "10.0.0.5:22\t172.20.1.6:53009\t9999999\t999999\n"
+    )
+    parsed=insights.parse_tcp_samples(lines, sample_seconds=3)
+    assert parsed["supported"]
+    assert parsed["matched_sockets"] == 2
+    assert parsed["ranking"][0]["peer_ip"] == "172.20.1.3"
+    assert parsed["ranking"][0]["total_bytes"] == 3600
+    assert parsed["ranking"][0]["avg_bytes_per_second"] == 1200
+    assert parsed["ranking"][1]["peer_ip"] == "172.20.1.4"
+    assert parsed["ranking"][1]["received_bytes"] == 700
+    assert len(parsed["ranking"]) == 2
+    assert not insights.parse_tcp_samples("CAPABILITY_MISSING:ss")["supported"]
+
+
+def test_api_directory_input_and_network_results(client, monkeypatch):
+    """API must not make network calls for malformed root and must format structured output."""
+    import sshmcp.api as api_module
+    seen=[]
+    def fake_exec(host_id, action, service=None, minutes=30, directory_root=None):
+        seen.append((host_id, action, directory_root))
+        # Exactly the production server-side validation, before any remote shell.
+        diagnostics.command_for(action, service=service, minutes=minutes, directory_root=directory_root)
+        return {
+            "host_id": host_id, "action": action, "status": "success",
+            "exit_code": 0, "output": "", "stderr": "",
+            "data": insights.parse_directory("100\t/data/a\n200\t/data\n", "/data"),
+        }
+    monkeypatch.setattr(api_module.diagnostics, "execute", fake_exec)
+    hid=make_host(client, "ssh-rsa " + paramiko.RSAKey.generate(1024).get_base64())
+    okay=client.post(f"/api/v1/hosts/{hid}/diagnose", headers=auth(), json={
+        "action":"directory", "directory_root":"/data",
+    })
+    assert okay.status_code==200, okay.text
+    assert seen[-1]==(hid,"directory","/data")
+    assert okay.json()["data"]["top_directories"][0]["bytes"]==100
+    invalid=client.post(f"/api/v1/hosts/{hid}/diagnose", headers=auth(), json={
+        "action":"directory", "directory_root":"/etc/shadow",
+    })
+    assert invalid.status_code==422
