@@ -1,0 +1,42 @@
+---
+# 可信公钥指纹清单：从已完成 SSH 主机身份校验的 Ansible 连接中获取。
+# 必须运行 ANSIBLE_HOST_KEY_CHECKING=True；禁止为了采集而关闭 host-key checking。
+# raw 模块不依赖目标 Linux 安装 Python，也不会写入目标服务器。
+- name: 通过可信 Ansible SSH 会话读取目标服务器的主机公钥指纹
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: 获取 Ed25519 / RSA / ECDSA 主机密钥 SHA256 指纹
+      ansible.builtin.raw: |
+        for entry in "ed25519 ssh-ed25519" "rsa ssh-rsa" "ecdsa ecdsa-sha2-nistp256"; do
+          set -- $entry
+          key="/etc/ssh/ssh_host_${1}_key.pub"
+          if test -r "$key" && command -v ssh-keygen >/dev/null 2>&1; then
+            fingerprint=$(ssh-keygen -lf "$key" -E sha256 | awk 'NR==1 {print $2}')
+            case "$fingerprint" in
+              SHA256:*) printf '%s %s\n' "$2" "$fingerprint" ;;
+            esac
+          fi
+        done
+      register: trusted_host_fingerprints
+      changed_when: false
+      failed_when: false
+
+    - name: 写入控制节点上的可信指纹清单（不包含主机私钥）
+      ansible.builtin.copy:
+        dest: "./trusted-host-fingerprints.txt"
+        mode: "0600"
+        content: |
+          {% for host in ansible_play_hosts_all | sort %}
+          {% set result = hostvars[host].trusted_host_fingerprints | default({}) %}
+          {% if result.rc | default(1) == 0 %}
+          {% for line in result.stdout_lines | default([]) %}
+          {% if line.startswith('ssh-') or line.startswith('ecdsa-') %}
+          {{ hostvars[host].ansible_host | default(host) }} {{ line | trim }}
+          {% endif %}
+          {% endfor %}
+          {% endif %}
+          {% endfor %}
+      delegate_to: localhost
+      become: false
+      run_once: true
