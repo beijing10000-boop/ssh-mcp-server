@@ -1,6 +1,7 @@
 """持久化 SQLite + 加密凭据 + 双令牌，禁止将敏感信息写入日志。"""
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import os
@@ -107,6 +108,7 @@ def init_db():
           host_id INTEGER PRIMARY KEY REFERENCES hosts(id) ON DELETE CASCADE,
           key TEXT NOT NULL,
           fingerprint TEXT NOT NULL,
+          source_signature TEXT NOT NULL DEFAULT '',
           collected_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS scan_batches(
@@ -121,6 +123,8 @@ def init_db():
           host_id INTEGER NOT NULL,
           status TEXT NOT NULL,
           fingerprint TEXT,
+          algorithm TEXT,
+          previous_fingerprint TEXT,
           error TEXT,
           PRIMARY KEY(batch_id,host_id)
         );
@@ -130,6 +134,14 @@ def init_db():
             c.execute("ALTER TABLE hosts ADD COLUMN mode TEXT NOT NULL DEFAULT 'standard'")
         if "gateway_approved" not in cols:
             c.execute("ALTER TABLE hosts ADD COLUMN gateway_approved INTEGER NOT NULL DEFAULT 0")
+        candidates = {r["name"] for r in c.execute("PRAGMA table_info(host_key_candidates)")}
+        if "source_signature" not in candidates:
+            c.execute("ALTER TABLE host_key_candidates ADD COLUMN source_signature TEXT NOT NULL DEFAULT ''")
+        results = {r["name"] for r in c.execute("PRAGMA table_info(scan_results)")}
+        if "algorithm" not in results:
+            c.execute("ALTER TABLE scan_results ADD COLUMN algorithm TEXT")
+        if "previous_fingerprint" not in results:
+            c.execute("ALTER TABLE scan_results ADD COLUMN previous_fingerprint TEXT")
         c.execute("UPDATE scan_batches SET status='interrupted' WHERE status='running'")
 
 
@@ -254,3 +266,16 @@ def save_settings(values: dict[str, str], encrypted: set[str] | None = None):
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value,encrypted=excluded.encrypted",
                 (key, seal(value) if key in encrypted else value, int(key in encrypted)),
             )
+
+
+def scan_signature(host: dict) -> str:
+    """Stable snapshot of SSH endpoint identity; no secret/key stored in snapshot."""
+    material = json.dumps(
+        {
+            "id": host["id"], "address": host["address"],
+            "port": host["port"], "proxy_id": host.get("proxy_id"),
+            "enabled": host.get("enabled"),
+        },
+        ensure_ascii=False, sort_keys=True,
+    )
+    return hashlib.sha256(material.encode()).hexdigest()
