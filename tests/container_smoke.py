@@ -60,6 +60,9 @@ try:
         except urllib.error.HTTPError as exc:
             assert exc.code == status
     docker("restart", name)
+    # Docker may reassign an ephemeral published port when restarting a container.
+    port = docker("port", name, "9099/tcp").split(":")[-1]
+    base = "http://127.0.0.1:" + port
     healthy()
     assert before == docker("exec", name, "python", "-c", code)
     docker(
@@ -72,6 +75,9 @@ try:
     print(
         "Container healthy; UID 10001; private files; auth enforced; volume and identity preserved after restart"
     )
+except BaseException:
+    subprocess.run(["docker", "logs", "--tail", "80", name], check=False)
+    raise
 finally:
     subprocess.run(["docker", "rm", "-f", name], capture_output=True)
     subprocess.run(["docker", "volume", "rm", volume], capture_output=True)
