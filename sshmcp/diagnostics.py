@@ -9,6 +9,7 @@ import re
 import shlex
 import socket
 import time
+import threading
 
 import paramiko
 from paramiko import SSHException
@@ -38,6 +39,13 @@ def redact_output(text: str) -> str:
 
 class SSHDiagnosticError(RuntimeError):
     pass
+
+
+# One application process runs at most four SSH actions concurrently and never
+# executes two diagnostics on the same registered host at the same time.
+_GLOBAL_SSH_LIMIT = threading.BoundedSemaphore(4)
+_ACTIVE_HOSTS = set()
+_ACTIVE_LOCK = threading.Lock()
 
 
 def command_for(action: str, service: str | None = None, minutes: int = 30) -> str:
@@ -128,6 +136,22 @@ def _route(host: dict):
 
 
 def execute(host_id: int, action: str, service: str | None = None, minutes: int = 30) -> dict:
+    if not _GLOBAL_SSH_LIMIT.acquire(blocking=False):
+        raise SSHDiagnosticError("SSH 诊断并发已达上限（4），请稍后重试")
+    with _ACTIVE_LOCK:
+        if host_id in _ACTIVE_HOSTS:
+            _GLOBAL_SSH_LIMIT.release()
+            raise SSHDiagnosticError("该主机已有一项诊断正在执行，请稍后重试")
+        _ACTIVE_HOSTS.add(host_id)
+    try:
+        return _execute_inner(host_id, action, service, minutes)
+    finally:
+        with _ACTIVE_LOCK:
+            _ACTIVE_HOSTS.discard(host_id)
+        _GLOBAL_SSH_LIMIT.release()
+
+
+def _execute_inner(host_id: int, action: str, service: str | None = None, minutes: int = 30) -> dict:
     host = store.get_host(host_id)
     if not host.get("host_key"):
         raise SSHDiagnosticError("未核验 SSH 主机公钥；请先批量获取并确认 SHA256 指纹")
