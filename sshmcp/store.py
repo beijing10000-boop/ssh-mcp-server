@@ -63,6 +63,8 @@ def init_db():
           proxy_id INTEGER REFERENCES proxies(id),
           zabbix_hostid TEXT,
           enabled INTEGER NOT NULL DEFAULT 1,
+          mode TEXT NOT NULL DEFAULT 'standard',
+          gateway_approved INTEGER NOT NULL DEFAULT 0,
           last_status TEXT NOT NULL DEFAULT 'untested',
           updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
@@ -90,7 +92,28 @@ def init_db():
           fingerprint TEXT NOT NULL,
           collected_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS scan_batches(
+          id TEXT PRIMARY KEY,
+          status TEXT NOT NULL,
+          total INTEGER NOT NULL,
+          completed INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS scan_results(
+          batch_id TEXT NOT NULL REFERENCES scan_batches(id),
+          host_id INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          fingerprint TEXT,
+          error TEXT,
+          PRIMARY KEY(batch_id,host_id)
+        );
         """)
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(hosts)")}
+        if "mode" not in cols:
+            c.execute("ALTER TABLE hosts ADD COLUMN mode TEXT NOT NULL DEFAULT 'standard'")
+        if "gateway_approved" not in cols:
+            c.execute("ALTER TABLE hosts ADD COLUMN gateway_approved INTEGER NOT NULL DEFAULT 0")
+        c.execute("UPDATE scan_batches SET status='interrupted' WHERE status='running'")
 
 
 @contextmanager
