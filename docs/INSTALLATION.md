@@ -115,7 +115,7 @@ ANSIBLE_HOST_KEY_CHECKING=True ansible-playbook \
 
 ## 九、目录空间及 IP 连接排行
 
-Web「只读诊断」新增「目录空间排行」「远端 IP 连接数排行」「远端 IP 流量采样」，并以中文表格展示 Top 排名与限制说明。无需在每台目标 Linux 安装 Agent；其中 IP 排名需要目标主机具备 `ss`，目录扫描需要 `du` 与 `timeout`。
+Web「只读诊断」新增「目录空间排行」「远端 IP 连接数排行」「远端 IP 流量采样」，并以中文表格展示 Top 排名与限制说明。无需在每台目标 Linux 安装 Agent；其中 IP 排名需要目标主机具备 `ss`，目录扫描需要 `du` 与 `timeout`。目录空间排行支持 `/root` 及其子目录（需要目标 SSH 账号具备读取权限），仍限制为单层、限时的只读空间统计。
 
 说明与限制参见 [目录与 IP 流量分析](INSIGHTS.md)。三项新功能暂仅支持 A 标准免 Agent 模式，B 强制命令网关会明确提示尚未支持。
 
