@@ -152,6 +152,12 @@ def host_update(host_id: int, body: HostIn, actor=Depends(admin)):
         item = safe_host_input(body)
         gids = item.pop("group_ids")
         with store.db() as c:
+            previous = c.execute("SELECT host_key FROM hosts WHERE id=?", (host_id,)).fetchone()
+            if previous is None:
+                raise ValueError("主机不存在")
+            # Blank field in an edit form must not silently erase a trusted key.
+            if not item["host_key"]:
+                item["host_key"] = previous["host_key"]
             columns = ",".join(k + "=?" for k in item)
             cur = c.execute(
                 "UPDATE hosts SET " + columns + ",last_status='untested',updated_at=CURRENT_TIMESTAMP WHERE id=?",
