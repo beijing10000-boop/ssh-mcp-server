@@ -274,7 +274,7 @@ def scan_signature(host: dict) -> str:
         {
             "id": host["id"], "address": host["address"],
             "port": host["port"], "proxy_id": host.get("proxy_id"),
-            "enabled": host.get("enabled"),
+            "enabled": host.get("enabled"), "host_key": host.get("host_key", ""),
         },
         ensure_ascii=False, sort_keys=True,
     )
