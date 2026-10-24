@@ -37,6 +37,9 @@
 | ssh_diagnose_system | 运行时长/内核 |
 | ssh_diagnose_service | 指定合法 systemd 服务状态 |
 | ssh_diagnose_logs | 指定合法 systemd 服务最近有限时间范围日志 |
+| ssh_diagnose_directory_usage | 白名单目录下一级空间排行，8 秒限时，支持逐层深入 |
+| ssh_diagnose_peer_connections | 当前远端 IP TCP 连接数 Top 50 |
+| ssh_diagnose_peer_traffic | 约 3 秒同一 TCP socket 的发送、接收字节增量 Top 30 |
 
 所有主机操作**仅接受登记的数字 host_id**。即使模型请求任意 IP 或 shell 命令，服务端也没有对应工具，SSH 执行器更会拒绝无效动作。
 
@@ -52,3 +55,6 @@
 5. 联调确认无误后禁用旧执行器，避免重复 SSH 任务。
 
 切换前，本 MCP 可以独立使用 MCP Inspector 等受信客户端做测试。
+
+
+新增诊断数据的覆盖条件请参阅 [目录与 IP 流量分析](INSIGHTS.md)。不要把一次 TCP 采样误写成全协议或历史 IP 流量统计。
