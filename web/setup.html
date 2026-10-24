@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+ <meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+ <meta name="color-scheme" content="light dark"/>
+ <title>首次初始化 · Linux 智能诊断 MCP 服务器</title>
+ <link rel="stylesheet" href="/static/app.css"/>
+ <script defer src="/static/setup.js"></script>
+</head>
+<body class="setup-screen">
+  <main class="setup-card">
+    <div class="logo">⌘</div>
+    <div class="eyebrow">SSH MCP SERVER · 首次部署</div>
+    <h1>初始化系统</h1>
+    <p class="intro">首次启动时，使用一次性初始化凭据绑定飞书应用、登录域名及管理员 Open ID。成功保存后，初始化接口永久关闭；日常登录只能使用授权飞书账号。</p>
+    <form id="setup-form">
+      <div class="fields">
+       <div class="wide"><label for="bootstrap_token">一次性初始化 Token</label><input type="password" id="bootstrap_token" name="bootstrap_token" autocomplete="off" required maxlength="512"/><p class="help">在服务器执行 docker compose exec ssh-mcp cat /app/data/bootstrap.token 获取；不是长期登录凭据。</p></div>
+       <div><label for="web_protocol">Web 访问协议</label><select id="web_protocol" name="web_protocol"><option value="http">HTTP · 仅限隔离内网联调</option><option value="https">HTTPS · 正式部署推荐</option></select></div>
+       <div><label for="web_public_host">Web 外部访问地址</label><input id="web_public_host" name="web_public_host" required placeholder="172.20.200.94:9099"/><p class="help">只填主机名或 IP 与可选端口，不包含 http:// 和路径。</p></div>
+       <div><label for="lark_app_id">飞书应用 App ID</label><input id="lark_app_id" name="lark_app_id" required placeholder="cli_xxxxxxxxxxxxxx"/></div>
+       <div><label for="lark_app_secret">飞书应用 App Secret</label><input type="password" id="lark_app_secret" name="lark_app_secret" autocomplete="off" required/></div>
+       <div class="wide"><label for="feishu_admin_open_ids">超级管理员 Open ID</label><textarea id="feishu_admin_open_ids" name="feishu_admin_open_ids" required placeholder="ou_xxxxxxxxxxxxx" rows="2"></textarea><p class="help">多个管理员使用英文逗号隔开。必须包含你自己的飞书 Open ID；未授权用户无法登录。</p></div>
+      </div>
+      <div id="setup-feedback" class="inline-error" role="alert" hidden></div>
+      <div class="modal-actions"><a class="btn subtle" href="/">返回登录</a><button type="submit" class="btn primary" id="setup-submit">保存并完成初始化 →</button></div>
+    </form>
+    <p class="micro">请先在飞书开发者后台将回调地址登记为：http(s)://你的服务器地址:9099/api/v1/auth/callback；并确保应用具有所需的身份认证权限。</p>
+  </main>
+</body>
+</html>
