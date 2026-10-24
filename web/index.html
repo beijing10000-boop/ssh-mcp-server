@@ -12,16 +12,13 @@
   <div id="login" class="login-wrap">
     <div class="login-card">
       <div class="logo">⌘</div>
-      <div class="eyebrow">SSH MCP SERVER · v0.1.0</div>
+      <div class="eyebrow">SSH MCP SERVER · 飞书身份认证</div>
       <h1>Linux 智能诊断</h1>
-      <p class="muted">独立的 SSH MCP 服务 · 中文运维控制台</p>
-      <form id="login-form">
-        <label for="admin-token">管理员访问令牌</label>
-        <input id="admin-token" type="password" autocomplete="off" required placeholder="输入首次启动生成的 admin.token"/>
-        <button type="submit" class="btn primary stretch">安全登录 →</button>
-      </form>
+      <p class="muted">独立 SSH MCP 服务 · 企业级身份验证</p>
+      <a href="/api/v1/auth/login" class="btn primary stretch login-link">使用飞书账号登录 →</a>
       <p id="login-error" class="error" role="alert" hidden></p>
-      <p class="micro">令牌仅保存在本浏览器当前标签页的会话中。首次部署请从服务器安全读取。</p>
+      <p class="micro">仅在初始化时指定的飞书管理员可以登录。</p>
+      <a href="/setup" class="setup-link">首次部署？进入初始化向导</a>
     </div>
   </div>
   <div id="app" class="shell" hidden>
@@ -40,7 +37,7 @@
       </nav>
       <div class="sidebar-foot">
         <span class="indicator"></span> 端口 9099 · 独立服务
-        <button class="text-button" id="logout">退出登录</button>
+        <span id="whoami"></span><button class="text-button" id="logout">退出飞书登录</button>
       </div>
     </aside>
     <main class="workspace">
