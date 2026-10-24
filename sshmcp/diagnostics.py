@@ -28,6 +28,12 @@ ACTIONS = {
     "system": "uname -sr; cat /proc/uptime /proc/loadavg; date -u '+%Y-%m-%dT%H:%M:%SZ'",
 }
 SERVICE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$")
+REDACTION = re.compile(r"(?i)\\b(password|passwd|token|secret|api[_-]?key|authorization)\\b(\\s*[:=]\\s*)([^\\s,;]+)")
+
+
+def redact_output(text: str) -> str:
+    """Minimize accidental secret exfiltration in tool outputs."""
+    return REDACTION.sub(lambda m: m.group(1) + m.group(2) + "[REDACTED]", text)
 
 
 class SSHDiagnosticError(RuntimeError):
@@ -159,8 +165,8 @@ def execute(host_id: int, action: str, service: str | None = None, minutes: int 
                 break
             time.sleep(0.03)
         code = None if truncated else chan.recv_exit_status()
-        output = stdout[:32768].decode("utf-8", "replace")
-        error = stderr[:2048].decode("utf-8", "replace")
+        output = redact_output(stdout[:32768].decode("utf-8", "replace"))
+        error = redact_output(stderr[:2048].decode("utf-8", "replace"))
         if host.get("mode") == "gateway" and not output.startswith("AIOPS_GATEWAY_V1\n"):
             raise SSHDiagnosticError("目标未返回受限网关标识，请核验 authorized_keys 强制命令")
         return {
