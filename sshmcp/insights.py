@@ -15,6 +15,7 @@ DIRECTORY_ROOTS = (
     "/var/lib",
     "/opt",
     "/home",
+    "/root",
     "/tmp",
     "/usr",
 )
@@ -27,9 +28,9 @@ def validate_directory_root(root: str | None) -> str:
     if root == "/":
         return root
     if not re.fullmatch(
-        r"/(?:data|var|opt|home|tmp|usr)(?:/[A-Za-z0-9._-]+){0,6}", root
+        r"/(?:data|var|opt|home|root|tmp|usr)(?:/[A-Za-z0-9._-]+){0,6}", root
     ):
-        raise ValueError("目录须位于 /data、/var、/opt、/home、/tmp 或 /usr 下")
+        raise ValueError("目录须位于 /data、/var、/opt、/home、/root、/tmp 或 /usr 下")
     if any(segment in (".", "..") for segment in root.split("/")):
         raise ValueError("目录路径禁止 . 或 .. 等跳转")
     return root
