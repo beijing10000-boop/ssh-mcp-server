@@ -57,13 +57,26 @@ class GroupIn(BaseModel):
 
 
 class ScanIn(BaseModel):
-    host_ids: list[int] = Field(min_length=1, max_length=1000)
+    host_ids: list[int] = Field(default_factory=list, max_length=1000)
+    query: str = Field(default="", max_length=160)
+    retry_failed_batch: str | None = Field(default=None, max_length=64)
+    unverified_only: bool = False
 
 
 class ConfirmIn(BaseModel):
     host_id: int
     independently_verified_sha256: str
     confirmed: bool
+
+
+class BatchConfirmedKey(BaseModel):
+    host_id: int
+    independently_verified_sha256: str = Field(min_length=20, max_length=120)
+
+
+class ConfirmBatchIn(BaseModel):
+    items: list[BatchConfirmedKey] = Field(min_length=1, max_length=1000)
+    confirmed: bool = False
 
 
 class RunIn(BaseModel):
@@ -145,11 +158,21 @@ def host_update(host_id: int, body: HostIn, actor=Depends(admin)):
         item = safe_host_input(body)
         gids = item.pop("group_ids")
         with store.db() as c:
-            previous = c.execute("SELECT host_key FROM hosts WHERE id=?", (host_id,)).fetchone()
+            previous = c.execute("SELECT address,port,proxy_id,host_key FROM hosts WHERE id=?", (host_id,)).fetchone()
             if previous is None:
                 raise ValueError("主机不存在")
-            # Blank field in an edit form must not silently erase a trusted key.
-            if not item["host_key"]:
+            # A pinned host key belongs to a specific endpoint, not to an arbitrary
+            # asset row. Moving an IP, SSH port, or proxy requires re-verification.
+            endpoint_changed = (
+                item["address"] != previous["address"]
+                or item["port"] != previous["port"]
+                or item["proxy_id"] != previous["proxy_id"]
+            )
+            if endpoint_changed:
+                if item["host_key"]:
+                    raise ValueError("SSH 目标已变更；请清空主机公钥，并重新执行独立核验")
+                item["host_key"] = ""
+            elif not item["host_key"]:
                 item["host_key"] = previous["host_key"]
             columns = ",".join(k + "=?" for k in item)
             cur = c.execute(
@@ -161,7 +184,8 @@ def host_update(host_id: int, body: HostIn, actor=Depends(admin)):
             c.execute("DELETE FROM host_groups WHERE host_id=?", (host_id,))
             for gid in set(gids):
                 c.execute("INSERT INTO host_groups(host_id,group_id) VALUES (?,?)", (host_id, gid))
-            c.execute("DELETE FROM host_key_candidates WHERE host_id=?", (host_id,))
+            if endpoint_changed or item["host_key"] != previous["host_key"]:
+                c.execute("DELETE FROM host_key_candidates WHERE host_id=?", (host_id,))
         store.audit(actor, "host_update", str(host_id), "success")
         return {"id": host_id}
     except Exception as exc:
@@ -317,8 +341,12 @@ def _scan_batch(batch_id: str, ids: list[int]):
                 value = {"state": "failed", "error": type(exc).__name__}
             with store.db() as c:
                 c.execute(
-                    "INSERT OR REPLACE INTO scan_results(batch_id,host_id,status,fingerprint,error) VALUES (?,?,?,?,?)",
-                    (batch_id, hid, value.get("state", "failed"), value.get("fingerprint"), value.get("error")),
+                    "INSERT OR REPLACE INTO scan_results("
+                    "batch_id,host_id,status,fingerprint,algorithm,previous_fingerprint,error"
+                    ") VALUES (?,?,?,?,?,?,?)",
+                    (batch_id, hid, value.get("state", "failed"), value.get("fingerprint"),
+                     value.get("algorithm"), value.get("previous_fingerprint"),
+                     value.get("error")),
                 )
                 c.execute("UPDATE scan_batches SET completed=completed+1 WHERE id=?", (batch_id,))
     with store.db() as c:
@@ -328,6 +356,35 @@ def _scan_batch(batch_id: str, ids: list[int]):
 @router.post("/host-keys/scan", status_code=202)
 def scan_keys(body: ScanIn, actor=Depends(admin)):
     ids = list(dict.fromkeys(body.host_ids))
+    if body.retry_failed_batch:
+        if ids or body.query.strip():
+            raise HTTPException(422, "失败重试与指定主机/搜索条件不能同时使用")
+        with store.db() as c:
+            batch = c.execute("SELECT 1 FROM scan_batches WHERE id=?", (body.retry_failed_batch,)).fetchone()
+            if not batch:
+                raise HTTPException(404, "待重试批次不存在")
+            ids = [r[0] for r in c.execute(
+                "SELECT r.host_id FROM scan_results r JOIN hosts h ON h.id=r.host_id "
+                "WHERE r.batch_id=? AND h.enabled=1 AND r.status IN ('failed','stale','interrupted')",
+                (body.retry_failed_batch,),
+            )]
+    elif not ids:
+        search = body.query.strip().lower()
+        with store.db() as c:
+            all_rows = c.execute(
+                "SELECT id,name,address,zabbix_hostid,host_key FROM hosts WHERE enabled=1 ORDER BY id"
+            ).fetchall()
+        ids = [
+            row["id"] for row in all_rows
+            if (not search or any(search in str(row[k] or "").lower()
+                                  for k in ("name","address","zabbix_hostid")))
+            and (not body.unverified_only or not row["host_key"])
+        ]
+    ids = list(dict.fromkeys(ids))
+    if not ids:
+        raise HTTPException(422, "没有符合条件的可扫描主机")
+    if len(ids) > 1000:
+        raise HTTPException(422, "每批最多扫描 1000 台主机；请缩小筛选范围")
     with store.db() as c:
         actual = c.execute(
             "SELECT COUNT(*) FROM hosts WHERE id IN (" + ",".join("?" for _ in ids) + ") AND enabled=1", ids
@@ -361,27 +418,59 @@ def batch_detail(batch_id: str, actor=Depends(admin)):
     return {"batch": dict(batch), "items": [dict(r) for r in rows]}
 
 
+def _save_confirmed_key(c, item: BatchConfirmedKey):
+    row = c.execute(
+        "SELECT key,fingerprint,source_signature FROM host_key_candidates WHERE host_id=?",
+        (item.host_id,),
+    ).fetchone()
+    host = c.execute("SELECT * FROM hosts WHERE id=? AND enabled=1", (item.host_id,)).fetchone()
+    if not row or not host:
+        raise HTTPException(422, f"主机 {item.host_id} 没有有效的待核验公钥")
+    if not row["source_signature"] or row["source_signature"] != store.scan_signature(dict(host)):
+        raise HTTPException(409, f"主机 {item.host_id} SSH 目标已发生变化，请重新扫描")
+    if not secrets.compare_digest(row["fingerprint"], item.independently_verified_sha256.strip()):
+        raise HTTPException(422, f"主机 {item.host_id} 可信指纹与扫描结果不一致")
+    c.execute(
+        "UPDATE hosts SET host_key=?,last_status='untested',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        (row["key"], item.host_id),
+    )
+    c.execute(
+        "UPDATE scan_results SET status='confirmed' "
+        "WHERE host_id=? AND fingerprint=? AND status IN ('candidate','changed')",
+        (item.host_id, row["fingerprint"]),
+    )
+    c.execute("DELETE FROM host_key_candidates WHERE host_id=?", (item.host_id,))
+    return row["fingerprint"]
+
+
 @router.post("/host-keys/confirm")
 def confirm_key(body: ConfirmIn, actor=Depends(admin)):
+    result = confirm_batch(ConfirmBatchIn(
+        items=[BatchConfirmedKey(
+            host_id=body.host_id,
+            independently_verified_sha256=body.independently_verified_sha256,
+        )],
+        confirmed=body.confirmed,
+    ), actor)
+    return {"ok": True, "count": result["count"]}
+
+
+@router.post("/host-keys/confirm-batch")
+def confirm_batch(body: ConfirmBatchIn, actor=Depends(admin)):
     if not body.confirmed:
-        raise HTTPException(422, "必须由管理员在可信渠道核验后确认")
+        raise HTTPException(422, "必须在可信渠道独立核验所有主机公钥后确认")
+    ids = [item.host_id for item in body.items]
+    if len(ids) != len(set(ids)):
+        raise HTTPException(422, "批量核验包含重复的主机 ID")
     with store.db() as c:
-        row = c.execute(
-            "SELECT key,fingerprint FROM host_key_candidates WHERE host_id=?", (body.host_id,)
-        ).fetchone()
-        if not row:
-            raise HTTPException(404, "没有待确认主机公钥")
-        if not secrets.compare_digest(row["fingerprint"], body.independently_verified_sha256.strip()):
-            raise HTTPException(422, "核验指纹与候选公钥不一致，禁止保存")
-        changed = c.execute(
-            "UPDATE hosts SET host_key=?,last_status='untested',updated_at=CURRENT_TIMESTAMP WHERE id=?",
-            (row["key"], body.host_id),
-        )
-        if not changed.rowcount:
-            raise HTTPException(404, "资产不存在")
-        c.execute("DELETE FROM host_key_candidates WHERE host_id=?", (body.host_id,))
-    store.audit(actor, "host_key_confirm", str(body.host_id), "success", row["fingerprint"])
-    return {"ok": True}
+        c.execute("BEGIN IMMEDIATE")
+        # Transactional batch: any mismatch means zero keys are confirmed.
+        verified = [
+            (item.host_id, _save_confirmed_key(c, item)) for item in body.items
+        ]
+    for hid, fingerprint in verified:
+        store.audit(actor, "host_key_confirm", str(hid), "success", fingerprint)
+    return {"ok": True, "count": len(verified)}
 
 
 @router.get("/audit")
