@@ -60,3 +60,21 @@ def test_adapter_fails_closed_without_arbitrary_tools_or_shell():
     session.error = True
     with pytest.raises(IntegrationError):
         asyncio.run(adapter.diagnose(binding, "cpu"))
+
+
+@pytest.mark.parametrize(
+    "action,tool",
+    [
+        ("log_errors", "ssh_diagnose_system_errors"),
+        ("oom", "ssh_diagnose_oom"),
+        ("mount_health", "ssh_diagnose_mounts"),
+    ],
+)
+def test_adapter_routes_new_observations(action, tool):
+    session = Session({"host_id": 7, "action": action, "status": "success"})
+    asyncio.run(
+        SSHMCPAdapter(session).diagnose(HostBinding("101", 7, 4), action, minutes=5)
+    )
+    assert session.calls[0][0] == tool
+    if action in {"log_errors", "oom"}:
+        assert session.calls[0][1]["minutes"] == 5

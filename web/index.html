@@ -6,6 +6,7 @@
     <meta name="color-scheme" content="light dark" />
     <title>Linux 智能诊断 MCP 服务器</title>
     <link rel="stylesheet" href="/static/app.css" />
+    <script defer src="/static/inventory.js"></script>
     <script defer src="/static/app.js"></script>
   </head>
   <body>
@@ -30,12 +31,15 @@
           <div><strong>SSH MCP</strong><small>Linux 智能诊断</small></div>
         </div>
         <div class="nav-caption">工作台</div>
-        <nav id="nav">
+        <nav id="nav" aria-label="主导航">
           <button class="nav-link active" data-page="overview">
             ▦ <span>运维总览</span>
           </button>
           <button class="nav-link" data-page="hosts">
             ▤ <span>主机资产</span>
+          </button>
+          <button class="nav-link" data-page="zabbix">
+            ⇣ <span>Zabbix 资产同步</span>
           </button>
           <button class="nav-link" data-page="groups">
             ▧ <span>主机组</span>

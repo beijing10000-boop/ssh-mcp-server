@@ -48,6 +48,7 @@ class HostIn(BaseModel):
     mode: str = "standard"
     gateway_approved: bool = False
     group_ids: list[int] = Field(default_factory=list, max_length=50)
+    asset_type: str = "linux"
 
 
 class ProxyIn(BaseModel):
@@ -105,6 +106,10 @@ def safe_host_input(item: HostIn) -> dict:
         raise ValueError("Zabbix Host ID 必须是数字字符串")
     if x["mode"] not in {"standard", "gateway"}:
         raise ValueError("未知诊断模式")
+    if x["asset_type"] not in {"linux", "windows", "network", "other"}:
+        raise ValueError("资产类型无效")
+    if x["asset_type"] != "linux":
+        x["enabled"] = False
     if x["mode"] == "gateway" and not x["gateway_approved"]:
         raise ValueError("受限网关模式必须经管理员审核目标强制命令配置")
     return x
@@ -124,6 +129,21 @@ def _host_view(row) -> dict:
     else:
         v["host_fingerprint"] = None
     v["group_ids"] = store.groups_for(v["id"])
+    v["readiness"] = (
+        "unsupported"
+        if v["asset_type"] != "linux"
+        else "disabled"
+        if not v["enabled"]
+        else "missing_credential"
+        if not v["credential_id"]
+        else "unverified"
+        if not v["has_host_key"]
+        else "failed"
+        if v["last_status"] in {"failed", "partial"}
+        else "verified"
+        if v["last_status"] == "success"
+        else "untested"
+    )
     return v
 
 
@@ -139,6 +159,9 @@ def overview(actor=Depends(admin)):
         ready = c.execute(
             "SELECT COUNT(*) FROM hosts WHERE host_key!='' AND credential_id IS NOT NULL AND enabled=1"
         ).fetchone()[0]
+        verified = c.execute(
+            "SELECT COUNT(*) FROM hosts WHERE asset_type='linux' AND enabled=1 AND host_key!='' AND credential_id IS NOT NULL AND last_status='success'"
+        ).fetchone()[0]
         groups = c.execute("SELECT COUNT(*) FROM groups").fetchone()[0]
         failed = c.execute(
             "SELECT COUNT(*) FROM audit WHERE outcome='failed' AND created_at>=datetime('now','-1 day')"
@@ -146,9 +169,10 @@ def overview(actor=Depends(admin)):
     return {
         "hosts": hosts,
         "ready": ready,
+        "verified": verified,
         "groups": groups,
         "failed_actions": failed,
-        "version": "0.2.0",
+        "version": "0.3.0",
     }
 
 

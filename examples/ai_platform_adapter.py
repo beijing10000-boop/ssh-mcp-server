@@ -19,6 +19,8 @@ from mcp.client.streamable_http import streamablehttp_client
 TOOLS = {
     "connection": "ssh_test_connection",
     "directory": "ssh_diagnose_directory_usage",
+    "mount_health": "ssh_diagnose_mounts",
+    "log_errors": "ssh_diagnose_system_errors",
     **{
         action: "ssh_diagnose_" + action
         for action in (
@@ -40,6 +42,16 @@ TOOLS = {
             "logs",
             "kernel",
             "containers",
+            "pressure",
+            "resource_limits",
+            "block_devices",
+            "time_sync",
+            "tcp_states",
+            "service_inventory",
+            "timers",
+            "oom",
+            "container_stats",
+            "security_status",
         )
     },
 }
@@ -122,7 +134,7 @@ class SSHMCPAdapter:
             args["service"] = service
         elif service is not None:
             raise IntegrationError("该动作不接受服务参数")
-        if action in {"logs", "kernel"}:
+        if action in {"logs", "kernel", "log_errors", "oom"}:
             args["minutes"] = minutes
         if action == "directory":
             if (

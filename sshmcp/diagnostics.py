@@ -11,12 +11,13 @@ import shlex
 import socket
 import time
 import threading
+from datetime import datetime, timezone
 from contextlib import suppress
 
 import paramiko
 from paramiko import SSHException
 
-from . import store, insights
+from . import store, insights, operations
 
 PREFIX = "PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; LC_ALL=C; export LC_ALL=C; "
 ACTIONS = {
@@ -39,7 +40,7 @@ ACTIONS = {
     "capabilities": (
         "printf '[当前账号 UID]\\n'; id -u; printf '[系统]\\n'; uname -sr; "
         "printf '[采集命令]\\n'; for tool in vmstat iostat free df du nice timeout ss ip "
-        'systemctl journalctl docker podman; do if command -v "$tool" >/dev/null 2>&1; '
+        'systemctl journalctl docker podman findmnt lsblk timedatectl chronyc getenforce; do if command -v "$tool" >/dev/null 2>&1; '
         "then printf '%s available\\n' \"$tool\"; else printf '%s unavailable\\n' \"$tool\"; fi; done"
     ),
     "failed_services": (
@@ -57,6 +58,7 @@ ACTIONS = {
         'printf \'%s\\n\' "$rows" | head -n 60; exit "$status"'
     ),
 }
+ACTIONS.update(operations.SCRIPTS)
 
 # Static scripts only: no user-provided IP, shell, or filesystem path enters awk.
 PEER_CONNECTIONS_CMD = r"""
@@ -111,6 +113,7 @@ printf '__SAMPLE_B__\n'
 capture_peers
 """
 INSIGHT_ACTIONS = {"directory", "peer_connections", "peer_traffic"}
+STANDARD_ONLY = INSIGHT_ACTIONS | operations.NEW_ACTIONS
 
 SERVICE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$")
 REDACTION = re.compile(
@@ -177,6 +180,10 @@ def command_for(
         if service:
             raise ValueError("此诊断动作不接受服务名")
         return PREFIX + ACTIONS[action]
+    if action in operations.WINDOW_ACTIONS:
+        if service:
+            raise ValueError("此诊断动作不接受服务名")
+        return PREFIX + operations.window_script(action, minutes)
     if action == "kernel":
         if service:
             raise ValueError("内核告警不接受服务名")
@@ -333,7 +340,7 @@ def _execute_inner(
         raise SSHDiagnosticError("未核验 SSH 主机公钥；请先批量获取并确认 SHA256 指纹")
     command = command_for(action, service, minutes, directory_root)
     if host.get("mode") == "gateway":
-        if action in INSIGHT_ACTIONS:
+        if action in STANDARD_ONLY:
             raise SSHDiagnosticError(
                 "当前 B 模式强制命令网关尚未支持此诊断动作；请使用已批准的 A 模式主机"
             )
@@ -392,6 +399,17 @@ def _execute_inner(
             raise SSHDiagnosticError(
                 "目标未返回受限网关标识，请核验 authorized_keys 强制命令"
             )
+        if action == "connection" and code == 0:
+            lines = output.removeprefix("AIOPS_GATEWAY_V1\n").splitlines()
+            if (
+                len(lines) < 3
+                or lines[0] != "AIOPS_SSH_OK"
+                or not lines[1].isdigit()
+                or lines[2] != "Linux"
+            ):
+                raise SSHDiagnosticError(
+                    "远程连接测试未返回预期 Linux 身份信息，请检查 SSH 强制命令或资产类型"
+                )
         result = {
             "host_id": host_id,
             "host": host["name"],
@@ -404,6 +422,8 @@ def _execute_inner(
             "stderr": error,
             "truncated": truncated,
             "duration_ms": int((time.monotonic() - began) * 1000),
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "evidence": "SSH 实时只读采集；空结果和单次快照不能排除历史故障",
         }
         if action in INSIGHT_ACTIONS:
             if action == "directory":

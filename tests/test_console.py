@@ -2,25 +2,15 @@
 
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
-import io
 import json
 import os
 import subprocess
 import time
 
-import paramiko
 import pytest
 
 from sshmcp import diagnostics, jobs, store
 from test_core import auth
-
-
-@pytest.fixture(scope="session")
-def key_pair():
-    key = paramiko.RSAKey.generate(2048)
-    stream = io.StringIO()
-    key.write_private_key(stream)
-    return stream.getvalue(), "ssh-rsa " + key.get_base64()
 
 
 def ready_host(client, key_pair, address="10.20.0.10", group=None, zabbix="101"):
@@ -65,6 +55,8 @@ def mcp_call(client, token, name, arguments=None):
     if response.status_code != 200:
         return response.status_code, response.json()
     result = response.json()["result"]
+    if result.get("isError"):
+        return 200, result
     return 200, result.get("structuredContent") or json.loads(
         result["content"][0]["text"]
     )

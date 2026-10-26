@@ -28,6 +28,23 @@ store.save_settings(
     },
     encrypted={"lark_app_secret"},
 )
+if os.getenv("SSHMCP_ZABBIX_FIXTURE"):
+    store.save_settings(
+        {
+            "zabbix_mcp_config": json.dumps(
+                {
+                    "url": os.environ["SSHMCP_ZABBIX_FIXTURE"],
+                    "token": "isolated-upstream-token",
+                    "server": "",
+                    "transport": "http",
+                    "verify_tls": True,
+                    "batch_size": 20,
+                    "interval_ms": 200,
+                }
+            )
+        },
+        encrypted={"zabbix_mcp_config"},
+    )
 key = paramiko.RSAKey.generate(2048)
 stream = io.StringIO()
 key.write_private_key(stream)

@@ -157,6 +157,38 @@ def init_db():
             c.execute(
                 "ALTER TABLE hosts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"
             )
+        if "asset_type" not in cols:
+            c.execute(
+                "ALTER TABLE hosts ADD COLUMN asset_type TEXT NOT NULL DEFAULT 'linux'"
+            )
+        c.executescript("""
+        CREATE TABLE IF NOT EXISTS zabbix_groups(
+          zabbix_groupid TEXT PRIMARY KEY,
+          group_id INTEGER NOT NULL UNIQUE REFERENCES groups(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS zabbix_memberships(
+          host_id INTEGER NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+          group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+          PRIMARY KEY(host_id,group_id)
+        );
+        CREATE TABLE IF NOT EXISTS zabbix_sync_runs(
+          id TEXT PRIMARY KEY, actor TEXT NOT NULL, status TEXT NOT NULL,
+          source TEXT NOT NULL, options TEXT NOT NULL,
+          total INTEGER NOT NULL DEFAULT 0, completed INTEGER NOT NULL DEFAULT 0,
+          error TEXT NOT NULL DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          completed_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS zabbix_sync_items(
+          run_id TEXT NOT NULL REFERENCES zabbix_sync_runs(id) ON DELETE CASCADE,
+          hostid TEXT NOT NULL, data TEXT NOT NULL, outcome TEXT NOT NULL DEFAULT 'pending',
+          host_id INTEGER REFERENCES hosts(id),
+          PRIMARY KEY(run_id,hostid)
+        );
+        """)
+        c.execute(
+            "UPDATE zabbix_sync_runs SET status='failed',error='服务重启，资产发现中断；请重新拉取',"
+            "completed_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running')"
+        )
         c.executescript("""
         CREATE TABLE IF NOT EXISTS mcp_clients(
           id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, token_hash TEXT NOT NULL UNIQUE,
@@ -305,6 +337,8 @@ def get_host(host_id: int) -> dict:
         item = c.execute("SELECT * FROM hosts WHERE id=?", (host_id,)).fetchone()
     if not item or not item["enabled"]:
         raise ValueError("目标主机未登记或已被禁用")
+    if item["asset_type"] != "linux":
+        raise ValueError("该资产尚不支持 Linux SSH 诊断")
     return dict(item)
 
 

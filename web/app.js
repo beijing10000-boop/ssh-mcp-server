@@ -30,10 +30,16 @@ const state = {
   auditStatus: "all",
   manifest: "",
   tools: [],
+  zabbixGroups: [],
+  zabbixSelected: new Set(),
+  zabbixPage: 1,
+  zabbixGroupIds: new Set(),
+  toolCategory: "全部",
 };
 const titles = {
   overview: "运维总览",
   hosts: "主机资产",
+  zabbix: "Zabbix 资产同步",
   groups: "主机组",
   credentials: "SSH 凭据管理",
   proxies: "SSH 跳板管理",
@@ -58,6 +64,13 @@ const statuses = {
   untested: "尚未测试",
   interrupted: "已中断",
   finished: "已完成",
+  preview: "等待登记",
+  registered: "已登记",
+  missing_credential: "待绑定凭据",
+  unverified: "待核验公钥",
+  verified: "SSH 验证通过",
+  unsupported: "仅登记资产",
+  disabled: "已停用",
 };
 const date = (s) =>
   s
@@ -275,22 +288,22 @@ async function pageOverview() {
   ]);
   const ratio = o.hosts ? Math.round((o.ready / o.hosts) * 100) : 0;
   const cards = [
-    ["登记资产", o.hosts, "Linux 主机"],
-    ["诊断已就绪", o.ready, "已核验公钥并绑定凭据"],
+    ["登记资产", o.hosts, "已登记的主机与设备"],
+    ["SSH 验证通过", o.verified, "已完成连接与 Linux 身份测试"],
     ["主机组", o.groups, "资产分组与 MCP 授权"],
     ["24 小时失败操作", o.failed_actions, "查看审计定位原因"],
   ];
   return (
     '<section class="welcome"><div><div class="eyebrow">YOUR INFRASTRUCTURE, IN FOCUS</div><h2>让每次排查，都有据可查。</h2><p>从主机快照到问题线索，在受控范围内完成诊断。</p><div class="actions">' +
     btn("open-diagnostics", "开始诊断", "", "primary") +
-    btn("open-hosts", "管理主机") +
-    '</div></div><div class="readiness"><span>资产就绪率</span><strong>' +
+    btn("open-zabbix", "从 Zabbix 同步资产") +
+    '</div></div><div class="readiness"><span>SSH 配置完成率</span><strong>' +
     ratio +
     '<small>%</small></strong><progress value="' +
     o.ready +
     '" max="' +
     Math.max(1, o.hosts) +
-    '" aria-label="资产就绪率"></progress></div></section>' +
+    '" aria-label="SSH 配置完成率"></progress></div></section>' +
     '<div class="stat-grid">' +
     cards
       .map(
@@ -367,18 +380,13 @@ async function pageHosts() {
         esc(h.mode === "gateway" ? "B · 受限网关" : "A · 免 Agent") +
         "</td>" +
         "<td>" +
-        (!h.enabled
-          ? badge("已停用")
-          : '<span class="' +
-            (h.has_host_key ? "state-ok" : "state-bad") +
-            '">' +
-            (h.has_host_key ? "公钥已核验" : "待核验公钥") +
-            "</span>") +
+        badge(h.readiness || "untested") +
         "<small>" +
         esc(
-          !h.credential_id
-            ? "未绑定凭据"
-            : statuses[h.last_status] || h.last_status,
+          h.group_ids
+            .map((id) => groups.find((g) => g.id === id)?.name)
+            .filter(Boolean)
+            .join(" · ") || "未分组",
         ) +
         "</small></td>" +
         '<td><div class="actions">' +
@@ -390,7 +398,7 @@ async function pageHosts() {
     )
     .join("");
   return panel(
-    "Linux 主机资产",
+    "主机与设备资产",
     '<form id="host-search-form" class="toolbar"><input id="host-filter" aria-label="搜索主机" value="' +
       esc(state.hostQuery) +
       '" placeholder="主机名称、IP 或 Zabbix Host ID"/><select id="host-group" aria-label="筛选主机组"><option value="">全部主机组</option>' +
@@ -409,7 +417,11 @@ async function pageHosts() {
       '</select><select id="host-status" aria-label="筛选主机状态">' +
       [
         ["all", "全部状态"],
-        ["ready", "可诊断"],
+        ["ready", "已配置 SSH"],
+        ["verified", "SSH 验证通过"],
+        ["missing_credential", "待绑定凭据"],
+        ["untested", "待测试"],
+        ["unsupported", "仅登记资产"],
         ["unverified", "待核验公钥"],
         ["failed", "测试失败"],
         ["disabled", "已停用"],
@@ -431,7 +443,9 @@ async function pageHosts() {
       " 台</span>" +
       btn("select-filtered", "全选筛选结果") +
       btn("clear-selected", "清空") +
+      btn("bind-selected", "绑定 SSH") +
       btn("scan-selected", "获取公钥") +
+      btn("test-selected", "测试 SSH") +
       btn("diagnose-selected", "批量诊断") +
       btn("enable-selected", "启用") +
       btn("disable-selected", "停用", "", "danger") +
@@ -448,7 +462,8 @@ async function pageHosts() {
         rows,
       ) +
       pagination("host", data),
-    btn("import-hosts", "批量导入") +
+    btn("open-zabbix", "从 Zabbix 同步") +
+      btn("import-hosts", "表格导入") +
       btn("new-host", "登记主机", "", "primary"),
   );
 }
@@ -689,13 +704,31 @@ async function pageDiagnostics() {
   const [hosts, tools] = await Promise.all([api("/hosts"), api("/tools")]);
   state.tools = tools;
   const ready = hosts.filter(
-    (h) => h.enabled && h.has_host_key && h.credential_id,
+    (h) =>
+      h.asset_type === "linux" &&
+      h.enabled &&
+      h.has_host_key &&
+      h.credential_id,
   );
   state.diagnosticHosts = ready;
   const options = ready.map((h) => [h.id, h.name + " · " + h.address]);
   return (
     '<div class="page-intro"><p>选择目标与诊断方式。任务在后台执行，离开页面后仍可在历史中查看。</p>' +
     btn("open-history", "查看诊断历史") +
+    "</div>" +
+    '<div class="tool-categories" aria-label="按诊断场景筛选">' +
+    ["全部", ...new Set(tools.map((t) => t.category))]
+      .map(
+        (c) =>
+          '<button class="category-chip ' +
+          (state.toolCategory === c ? "active" : "") +
+          '" data-action="tool-category" data-id="' +
+          esc(c) +
+          '">' +
+          esc(c) +
+          "</button>",
+      )
+      .join("") +
     "</div>" +
     panel(
       "创建诊断任务",
@@ -712,7 +745,13 @@ async function pageDiagnostics() {
           "诊断类型",
           "health",
           "text",
-          tools.map((t) => [t.id, t.name]),
+          tools
+            .filter(
+              (t) =>
+                state.toolCategory === "全部" ||
+                t.category === state.toolCategory,
+            )
+            .map((t) => [t.id, t.name]),
         ) +
         (state.selected.size
           ? '<div class="wide"><label class="check"><input type="checkbox" name="use_selected" ' +
@@ -742,15 +781,22 @@ async function pageDiagnostics() {
     ) +
     '<div class="capability-grid">' +
     tools
+      .filter(
+        (t) =>
+          state.toolCategory === "全部" || t.category === state.toolCategory,
+      )
       .map(
         (t) =>
-          '<div class="capability"><span class="capability-icon">' +
+          '<button class="capability" data-action="choose-tool" data-id="' +
+          esc(t.id) +
+          '"><span class="capability-icon">' +
           (t.sensitive ? "◇" : "⌘") +
           "</span><div><strong>" +
           esc(t.name) +
           "</strong><small>" +
-          (t.sensitive ? "按授权范围采集，注意数据边界" : "固定只读采集") +
-          "</small></div></div>",
+          (t.standard_only ? "标准 SSH 模式 · " : "") +
+          (t.sensitive ? "按授权范围采集" : "固定只读采集") +
+          "</small></div></button>",
       )
       .join("") +
     "</div>"
@@ -1053,8 +1099,8 @@ function updateDiagnosticInputs() {
   if (!form) return;
   const action = getForm(form, "action");
   for (const [name, visible] of [
-    ["service", ["logs", "service"].includes(action)],
-    ["minutes", ["logs", "kernel"].includes(action)],
+    ["service", !!state.tools.find((t) => t.id === action)?.service_required],
+    ["minutes", !!state.tools.find((t) => t.id === action)?.window_required],
     ["directory_root", action === "directory"],
   ]) {
     const item = form.elements.namedItem(name);
@@ -1151,6 +1197,11 @@ async function render() {
   const [page, id] = location.hash.slice(1).split("/");
   state.page = page || "overview";
   if (state.page === "job") state.jobId = id || "";
+  if (state.page === "zabbix" && id && state.zabbixRun !== id) {
+    state.zabbixRun = id;
+    state.zabbixPage = 1;
+    state.zabbixSelected.clear();
+  }
   if (state.page === "history") state.batchFilter = id || "";
   if (state.page === "keys" && id && state.batchId !== id) {
     state.batchId = id;
@@ -1169,6 +1220,7 @@ async function render() {
     const pages = {
       overview: pageOverview,
       hosts: pageHosts,
+      zabbix: pageZabbix,
       groups: pageGroups,
       credentials: pageCredentials,
       proxies: pageProxies,
@@ -1184,12 +1236,21 @@ async function render() {
     if (version !== generation) return;
     $("#content").innerHTML = html;
     if (state.page === "diagnostics") updateDiagnosticInputs();
+    if (state.page === "zabbix" && state.zabbixPolling) {
+      for (const form of document.querySelectorAll(
+        "#zabbix-connection-form,#zabbix-discover-form",
+      ))
+        form
+          .querySelectorAll("input,select,button")
+          .forEach((el) => (el.disabled = true));
+    }
     updateSelection();
     const pending =
       (state.page === "job" &&
         ["queued", "running"].includes(state.currentJob?.status)) ||
       (state.page === "history" && state.pollHistory) ||
-      (state.page === "keys" && state.keyDetail?.batch.status === "running");
+      (state.page === "keys" && state.keyDetail?.batch.status === "running") ||
+      (state.page === "zabbix" && state.zabbixPolling);
     if (pending) timer = setTimeout(render, 3000);
   } catch (e) {
     if (version === generation)
@@ -1308,6 +1369,12 @@ function hostFields(h = {}) {
     .join("");
   return (
     field("name", "资产名称", h.name || "") +
+    field("asset_type", "资产类型", h.asset_type || "linux", "text", [
+      ["linux", "Linux 服务器"],
+      ["windows", "Windows 服务器（仅登记）"],
+      ["network", "网络设备（仅登记）"],
+      ["other", "其他（仅登记）"],
+    ]) +
     field("address", "内网 IP 地址", h.address || "") +
     field("port", "SSH 端口", h.port || 22, "number") +
     field("username", "SSH 用户名", h.username || "root") +
@@ -1354,6 +1421,7 @@ function hostFields(h = {}) {
 function hostBody(form) {
   return {
     name: getForm(form, "name"),
+    asset_type: getForm(form, "asset_type"),
     address: getForm(form, "address"),
     port: Number(getForm(form, "port")),
     username: getForm(form, "username"),
@@ -1389,6 +1457,16 @@ $("#content").addEventListener("input", (e) => {
 });
 
 $("#content").addEventListener("change", (e) => {
+  if (e.target.classList.contains("zabbix-group-check")) {
+    if (e.target.checked) state.zabbixGroupIds.add(e.target.value);
+    else state.zabbixGroupIds.delete(e.target.value);
+  }
+  if (e.target.classList.contains("zabbix-host-check")) {
+    if (e.target.checked) state.zabbixSelected.add(e.target.value);
+    else state.zabbixSelected.delete(e.target.value);
+    const count = $("#zabbix-selected-count");
+    if (count) count.textContent = "已选 " + state.zabbixSelected.size + " 台";
+  }
   if (e.target.name === "action") updateDiagnosticInputs();
   if (e.target.classList.contains("host-selected")) {
     const id = Number(e.target.dataset.id);
@@ -1413,6 +1491,12 @@ $("#content").addEventListener("change", (e) => {
   updateSelection();
 });
 $("#content").addEventListener("submit", async (e) => {
+  if (e.target.id.startsWith("zabbix-")) {
+    e.preventDefault();
+    e.target.dataset.submitter = e.submitter?.name || "";
+    await submitZabbixForm(e.target);
+    return;
+  }
   if (e.target.id === "feishu-admins-form") {
     e.preventDefault();
     const button = e.target.querySelector("button[type=submit]");
@@ -1491,6 +1575,22 @@ document.addEventListener("click", async (e) => {
     id = b.dataset.id;
   b.disabled = true;
   try {
+    if (action.startsWith("zabbix-")) {
+      await zabbixAction(action, id);
+      return;
+    }
+    if (action === "tool-category") {
+      state.toolCategory = id;
+      await render();
+      return;
+    }
+    if (action === "choose-tool") {
+      const form = $("#diagnostic-form");
+      form.elements.action.value = id;
+      updateDiagnosticInputs();
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
     if (action === "refresh") {
       render();
       return;
@@ -1564,22 +1664,86 @@ document.addEventListener("click", async (e) => {
       go("diagnostics");
       return;
     }
+    if (action === "bind-selected") {
+      if (!state.selected.size) throw Error("请先选择需要绑定的 Linux 主机");
+      if (!state.credentials.length) throw Error("请先在 SSH 凭据页面添加私钥");
+      openModal(
+        "批量绑定 SSH 访问",
+        field(
+          "credential_id",
+          "SSH 凭据",
+          state.credentials[0]?.id,
+          "text",
+          state.credentials.map((c) => [c.id, c.name]),
+        ) +
+          field("username", "SSH 用户名", "root") +
+          field("port", "SSH 端口", 22, "number") +
+          field("proxy_id", "跳板", "", "text", [
+            ["", "直连"],
+            ...state.proxies.map((p) => [p.id, p.name]),
+          ]) +
+          '<p class="notice wide">应用到所选全部 Linux 主机。端口或跳板发生变化时，需要重新核验公钥；凭据变更后需要重新测试 SSH。</p>',
+        (form) =>
+          api("/hosts/bulk-access", "POST", {
+            host_ids: [...state.selected],
+            credential_id: Number(getForm(form, "credential_id")),
+            username: getForm(form, "username"),
+            port: Number(getForm(form, "port")),
+            proxy_id: numberOrNull(getForm(form, "proxy_id")),
+          }),
+      );
+      return;
+    }
+    if (action === "test-selected") {
+      if (!state.selected.size || state.selected.size > 100)
+        throw Error("请选择 1–100 台已绑定凭据并核验公钥的主机");
+      const r = await api("/jobs", "POST", {
+        host_ids: [...state.selected],
+        action: "connection",
+      });
+      go("history/" + r.batch_id);
+      return;
+    }
     if (action === "import-hosts") {
       openModal(
-        "批量导入 Linux 主机",
+        "从表格登记主机",
         field(
-          "hosts",
-          "主机 JSON 数组",
-          "[]",
+          "rows",
+          "粘贴 Excel 表格内容",
+          "",
           "textarea",
           null,
           true,
-          "每批最多 1000 台。字段：name、address、username、credential_id、zabbix_hostid、group_ids 等；公钥可以留空，任意校验失败会整批回滚。",
-        ),
-        (form) =>
-          api("/hosts/import", "POST", {
-            hosts: JSON.parse(getForm(form, "hosts")),
-          }),
+          "每行：主机名称、内网 IP、Zabbix Host ID（可留空）。从 Excel 复制三列并粘贴，使用制表符分隔；最多 1000 行。",
+        ) +
+          field("username", "SSH 用户名", "root") +
+          field("credential_id", "统一 SSH 凭据", "", "text", [
+            ["", "稍后绑定"],
+            ...state.credentials.map((c) => [c.id, c.name]),
+          ]),
+        (form) => {
+          const rows = getForm(form, "rows")
+            .trim()
+            .split(/\r?\n/)
+            .filter(Boolean);
+          if (!rows.length || rows.length > 1000)
+            throw Error("请粘贴 1–1000 行资产");
+          const hosts = rows.map((line, index) => {
+            const cells = line.split("\t").map((x) => x.trim());
+            if (cells.length < 2 || cells.length > 3)
+              throw Error(
+                "第 " + (index + 1) + " 行应为 2–3 列，使用 Excel 制表符分隔",
+              );
+            return {
+              name: cells[0],
+              address: cells[1],
+              zabbix_hostid: cells[2] || null,
+              username: getForm(form, "username"),
+              credential_id: numberOrNull(getForm(form, "credential_id")),
+            };
+          });
+          return api("/hosts/import", "POST", { hosts });
+        },
       );
       return;
     }
