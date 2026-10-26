@@ -1,5 +1,7 @@
 # 现有 AI Ops Platform 如何接入独立 SSH MCP
 
+当前接入：AI Ops Platform v0.9.0 支持 Skill 驱动查询，配合本服务 v0.4.1 的 ssh_resolve_target 按已登记 IP 直接诊断，不要求先查 Zabbix。详见 [v0.4.1 说明](RELEASE-v0.4.1.md)。下文保留早期固定剧本适配方案作为历史设计参考；其中本地资产、强制 Zabbix 优先与固定剧本不适用于新 Skill 模式。
+
 本方案针对 `beijing10000-boop/ai-ops-platform` 的 `integration/unified-platform`，检查基线为 `c6cf7021c0668cdf334927213d45014cee03cbac`。这里提供改造设计及可运行客户端示例；**未自动修改、部署或切换现有 AI 平台**。
 
 ## 1. 保留 Zabbix 连接，增加 SSH 专用连接

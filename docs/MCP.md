@@ -30,6 +30,7 @@
 | MCP 工具 | 说明 |
 | --- | --- |
 | ssh_list_hosts | 只列出已登记、已启用、已审核公钥的主机 |
+| ssh_resolve_target | 按已登记内网 IP 精确解析授权 Linux 主机，返回 SSH host_id、address、revision；不依赖 Zabbix |
 | ssh_resolve_host | 按 Zabbix Host ID 精确定位唯一授权主机，返回主机 ID 与版本 |
 | ssh_test_connection | 验证 SSH 身份、认证和固定命令 |
 | ssh_diagnose_health | 负载、内存、Swap、文件系统、inode 与高 CPU 进程综合快照 |

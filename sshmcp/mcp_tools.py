@@ -15,7 +15,7 @@ mcp = FastMCP(
     "Linux SSH 智能诊断",
     instructions=(
         "本服务仅对预先登记和核验的内网 Linux 主机执行固定只读诊断。"
-        "禁止臆测主机 ID，先通过 ssh_list_hosts 获取。"
+        "禁止臆测主机 ID，先通过 ssh_resolve_target、ssh_resolve_host 或 ssh_list_hosts 精确核验。"
         "不能传入任意网络地址、Shell 命令或执行修复。"
     ),
     stateless_http=True,
@@ -71,7 +71,7 @@ def offload(fn):
 def ssh_list_hosts(
     query: str = "", offset: int = 0, limit: int = 100, group_id: int | None = None
 ) -> list[dict]:
-    """列出当前启用且已经审核的 Linux SSH 主机，返回 ID、名称、Host ID 与连接状态，不暴露密钥。"""
+    """列出当前启用且已经审核的 Linux SSH 主机，返回 ID、名称、登记 IP、Host ID、版本与连接状态，不暴露密钥。"""
     if (
         len(query) > 160
         or type(offset) is not int
@@ -109,7 +109,7 @@ def ssh_list_hosts(
         values.extend(who["group_ids"])
     with store.db() as c:
         rows = c.execute(
-            "SELECT id,name,zabbix_hostid,last_status,revision FROM hosts WHERE "
+            "SELECT id,name,address,zabbix_hostid,last_status,revision FROM hosts WHERE "
             + " AND ".join(clauses)
             + " ORDER BY id LIMIT ? OFFSET ?",
             (*values, limit, offset),
@@ -140,6 +140,43 @@ def ssh_list_hosts(
 
 @mcp.tool(annotations=READ_ONLY)
 @offload
+def ssh_resolve_target(address: str) -> dict:
+    """按已登记内网 IP 精确定位授权 Linux 主机；只读资产库，不连接任意地址，不依赖 Zabbix。"""
+    address = store.private_ip(address)
+    with store.db() as c:
+        row = c.execute(
+            "SELECT id,name,address,zabbix_hostid,revision,enabled,host_key,credential_id,asset_type FROM hosts WHERE address=?",
+            (address,),
+        ).fetchone()
+    if not row or not access.host_allowed(row["id"]):
+        return {
+            "status": "failed",
+            "error": "主机不存在、未就绪或不在当前客户端授权范围内",
+        }
+    host = dict(row)
+    if (
+        not host["enabled"]
+        or host["asset_type"] != "linux"
+        or not host["host_key"]
+        or not host["credential_id"]
+    ):
+        return {
+            "status": "failed",
+            "error": "主机不存在、未就绪或不在当前客户端授权范围内",
+        }
+    return {
+        "status": "success",
+        "host_id": host["id"],
+        "name": host["name"],
+        "address": host["address"],
+        "zabbix_hostid": host["zabbix_hostid"],
+        "revision": host["revision"],
+        "device_type": "linux",
+    }
+
+
+@mcp.tool(annotations=READ_ONLY)
+@offload
 def ssh_resolve_host(zabbix_hostid: str) -> dict:
     """按数字 Zabbix Host ID 精确查找授权主机；禁止使用名称或 IP 推测关联，重复映射会拒绝。"""
     return _resolve_host(zabbix_hostid)
@@ -152,7 +189,7 @@ def _resolve_host(zabbix_hostid):
         raise ValueError("Zabbix Host ID 格式无效")
     with store.db() as c:
         rows = c.execute(
-            "SELECT id,name,zabbix_hostid,revision,enabled,host_key,credential_id FROM hosts WHERE zabbix_hostid=?",
+            "SELECT id,name,address,zabbix_hostid,revision,enabled,host_key,credential_id,asset_type FROM hosts WHERE zabbix_hostid=?",
             (zabbix_hostid,),
         ).fetchall()
     if len(rows) != 1:
@@ -160,6 +197,7 @@ def _resolve_host(zabbix_hostid):
     host = dict(rows[0])
     if (
         not access.host_allowed(host["id"])
+        or host["asset_type"] != "linux"
         or not host["enabled"]
         or not host["host_key"]
         or not host["credential_id"]
@@ -169,6 +207,8 @@ def _resolve_host(zabbix_hostid):
         "status": "success",
         "host_id": host["id"],
         "name": host["name"],
+        "address": host["address"],
+        "device_type": "linux",
         "zabbix_hostid": host["zabbix_hostid"],
         "revision": host["revision"],
     }
