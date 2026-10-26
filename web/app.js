@@ -35,6 +35,7 @@ const state = {
   zabbixPage: 1,
   zabbixGroupIds: new Set(),
   toolCategory: "全部",
+  settingsTab: "zabbix",
 };
 const titles = {
   overview: "运维总览",
@@ -47,9 +48,8 @@ const titles = {
   diagnostics: "诊断工作台",
   history: "诊断历史",
   job: "诊断详情",
-  clients: "MCP 接入",
   audit: "操作审计",
-  feishu: "飞书管理",
+  settings: "系统配置",
 };
 let timer = null;
 let generation = 0;
@@ -83,6 +83,7 @@ const badge = (s) =>
 const actionName = (action) =>
   state.tools.find((t) => t.id === action)?.name || action;
 function go(page) {
+  if (["clients", "feishu"].includes(page)) page = "settings/" + page;
   if (location.hash === "#" + page) render();
   else location.hash = page;
 }
@@ -326,7 +327,7 @@ async function pageOverview() {
     panel(
       "独立运行，按需协作",
       '<div class="connection-card"><span class="service-mark">MCP</span><div><strong>AI 平台 → SSH MCP → Linux</strong><p class="muted">只向授权主机执行固定诊断。AI 客户端无需接触 SSH 私钥。</p><code>/mcp · Streamable HTTP</code></div></div><div class="actions">' +
-        btn("open-clients", "管理 MCP 接入") +
+        btn("open-settings/clients", "管理 MCP 接入") +
         btn("open-keys", "查看公钥核验") +
         "</div>",
     ) +
@@ -1191,11 +1192,55 @@ async function pageFeishu() {
       '</div><div class="modal-actions"><button type="submit" class="btn primary">保存管理员名单</button></div></form>',
   );
 }
+async function pageSettings() {
+  const tab = state.settingsTab;
+  const tabs =
+    '<nav class="settings-tabs" aria-label="系统配置分类">' +
+    [
+      ["zabbix", "Zabbix MCP"],
+      ["clients", "MCP 接入"],
+      ["feishu", "飞书配置"],
+    ]
+      .map(
+        ([id, title]) =>
+          '<button class="category-chip ' +
+          (tab === id ? "active" : "") +
+          '" data-action="settings-tab" data-id="' +
+          id +
+          '" aria-pressed="' +
+          (tab === id) +
+          '">' +
+          title +
+          "</button>",
+      )
+      .join("") +
+    "</nav>";
+  const content =
+    tab === "clients"
+      ? await pageClients()
+      : tab === "feishu"
+        ? await pageFeishu()
+        : zabbixConnectionPanel((await api("/zabbix/config")).config);
+  return (
+    '<div class="page-intro"><p>集中管理 Zabbix MCP 连接、SSH MCP 接入授权与飞书登录配置。</p></div>' +
+    tabs +
+    content
+  );
+}
+
 async function render() {
   clearTimeout(timer);
   const version = ++generation;
   const [page, id] = location.hash.slice(1).split("/");
+  if (["clients", "feishu"].includes(page)) {
+    location.replace("#settings/" + page);
+    return;
+  }
   state.page = page || "overview";
+  if (state.page === "settings")
+    state.settingsTab = ["zabbix", "clients", "feishu"].includes(id)
+      ? id
+      : state.settingsTab;
   if (state.page === "job") state.jobId = id || "";
   if (state.page === "zabbix" && id && state.zabbixRun !== id) {
     state.zabbixRun = id;
@@ -1228,18 +1273,15 @@ async function render() {
       diagnostics: pageDiagnostics,
       history: pageHistory,
       job: pageJob,
-      clients: pageClients,
       audit: pageAudit,
-      feishu: pageFeishu,
+      settings: pageSettings,
     };
     const html = await (pages[state.page] || pageOverview)();
     if (version !== generation) return;
     $("#content").innerHTML = html;
     if (state.page === "diagnostics") updateDiagnosticInputs();
     if (state.page === "zabbix" && state.zabbixPolling) {
-      for (const form of document.querySelectorAll(
-        "#zabbix-connection-form,#zabbix-discover-form",
-      ))
+      for (const form of document.querySelectorAll("#zabbix-discover-form"))
         form
           .querySelectorAll("input,select,button")
           .forEach((el) => (el.disabled = true));
@@ -1442,6 +1484,20 @@ function keyEditor() {
     field("name", "凭据名称", "诊断专用 SSH 密钥") +
     field("passphrase", "私钥口令（可选）", "", "password") +
     field(
+      "key_source",
+      "私钥提供方式",
+      "file",
+      "text",
+      [
+        ["file", "上传密钥文件"],
+        ["paste", "粘贴私钥内容"],
+      ],
+      true,
+    ) +
+    '<div class="wide credential-upload"><label for="ssh-private-key-file">SSH 私钥文件</label>' +
+    '<input id="ssh-private-key-file" name="key_file" type="file" required aria-describedby="key-file-status">' +
+    '<p id="key-file-status" class="help" role="status">支持 OpenSSH / PEM 私钥，包括无后缀文件、.pem、.key；最大 16 KB。加密私钥需填写口令。</p></div>' +
+    field(
       "private_key",
       "完整 SSH 私钥（不回显）",
       "",
@@ -1452,6 +1508,71 @@ function keyEditor() {
     )
   );
 }
+
+function updateCredentialInputs() {
+  const form = $("#editor-form");
+  const source = form.elements.namedItem("key_source");
+  if (!source) return;
+  const fromFile = source.value === "file";
+  for (const [name, visible] of [
+    ["key_file", fromFile],
+    ["private_key", !fromFile],
+  ]) {
+    const item = form.elements.namedItem(name);
+    item.closest("div").hidden = !visible;
+    item.disabled = !visible;
+    item.required = visible;
+  }
+}
+
+async function credentialBody(form, existingName) {
+  const name = existingName || getForm(form, "name");
+  const passphrase = getForm(form, "passphrase");
+  let material = getForm(form, "private_key");
+  if (getForm(form, "key_source") === "file") {
+    const file = form.elements.namedItem("key_file").files?.[0];
+    if (!file) throw Error("请选择 SSH 私钥文件");
+    if (!file.size || file.size > 16000)
+      throw Error("密钥文件不能为空，大小不能超过 16 KB（16000 字节）");
+    if (/\.pub$/i.test(file.name))
+      throw Error("请选择私钥文件，.pub 是公钥文件，不能用于 SSH 登录");
+    material = await file.text();
+  }
+  material = material
+    .replace(/^\uFEFF/, "")
+    .replace(/\r\n/g, "\n")
+    .trim();
+  if (/^PuTTY-User-Key-File-/i.test(material))
+    throw Error("暂不支持 PuTTY .ppk，请先导出为 OpenSSH 私钥");
+  if (
+    material.length < 64 ||
+    material.length > 16000 ||
+    !/^-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/.test(material)
+  )
+    throw Error("私钥格式无效，请选择 OpenSSH 或 PEM 格式的 SSH 私钥");
+  return { name, passphrase, private_key: material };
+}
+
+function clearCredentialFeedback() {
+  if (!$("#editor-form [name=key_source]")) return;
+  $("#editor-feedback").hidden = true;
+  $("#editor-feedback").textContent = "";
+}
+$("#editor-fields").addEventListener("input", clearCredentialFeedback);
+$("#editor-fields").addEventListener("change", (e) => {
+  clearCredentialFeedback();
+  if (e.target.name === "key_source") updateCredentialInputs();
+  if (e.target.name === "key_file") {
+    const file = e.target.files?.[0];
+    $("#key-file-status").textContent = file
+      ? "已选择：" +
+        file.name +
+        " · " +
+        formatSize(file.size) +
+        "。保存时校验私钥与口令。"
+      : "请选择 OpenSSH / PEM 私钥文件，最大 16 KB。";
+  }
+});
 $("#content").addEventListener("input", (e) => {
   if (e.target.id === "trusted-fingerprints") state.manifest = e.target.value;
 });
@@ -1575,6 +1696,10 @@ document.addEventListener("click", async (e) => {
     id = b.dataset.id;
   b.disabled = true;
   try {
+    if (action === "settings-tab") {
+      go("settings/" + id);
+      return;
+    }
     if (action.startsWith("zabbix-")) {
       await zabbixAction(action, id);
       return;
@@ -1875,18 +2000,18 @@ document.addEventListener("click", async (e) => {
       await render();
     } else if (action === "new-credential" || action === "rotate-credential") {
       const prev = state.credentials.find((x) => String(x.id) === id);
-      openModal(prev ? "轮换 SSH 私钥" : "新增 SSH 凭据", keyEditor(), (form) =>
-        api(
-          "/credentials" + (prev ? "/" + prev.id : ""),
-          prev ? "PUT" : "POST",
-          {
-            name: prev?.name || getForm(form, "name"),
-            passphrase: getForm(form, "passphrase"),
-            private_key: getForm(form, "private_key"),
-          },
-        ),
+      openModal(
+        prev ? "轮换 SSH 私钥" : "新增 SSH 凭据",
+        keyEditor(),
+        async (form) =>
+          api(
+            "/credentials" + (prev ? "/" + prev.id : ""),
+            prev ? "PUT" : "POST",
+            await credentialBody(form, prev?.name),
+          ),
       );
       if (prev) $("#editor-fields input[name=name]").value = prev.name;
+      updateCredentialInputs();
     } else if (action === "new-proxy" || action === "edit-proxy") {
       const proxy = state.proxies.find((p) => String(p.id) === id) || {};
       openModal(

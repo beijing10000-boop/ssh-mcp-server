@@ -48,6 +48,11 @@
     },
     {
       "width": 1280,
+      "page": "settings",
+      "ok": true
+    },
+    {
+      "width": 1280,
       "page": "clients",
       "ok": true
     },
@@ -108,6 +113,11 @@
     },
     {
       "width": 1440,
+      "page": "settings",
+      "ok": true
+    },
+    {
+      "width": 1440,
       "page": "clients",
       "ok": true
     },
@@ -168,6 +178,11 @@
     },
     {
       "width": 1920,
+      "page": "settings",
+      "ok": true
+    },
+    {
+      "width": 1920,
       "page": "clients",
       "ok": true
     },
@@ -179,6 +194,10 @@
     {
       "width": 1920,
       "page": "feishu",
+      "ok": true
+    },
+    {
+      "workflow": "legacy MCP and Feishu links resolve to unified system settings",
       "ok": true
     },
     {
@@ -210,6 +229,10 @@
       "ok": true
     },
     {
+      "workflow": "Zabbix settings and connection verification share system settings; asset sync retains registration workflow",
+      "ok": true
+    },
+    {
       "workflow": "real MCP handshake, initMAX notice, adaptive batches, preview, Linux registration and unverified keys",
       "ok": true
     },
@@ -219,6 +242,18 @@
     },
     {
       "workflow": "diagnostic category and parameter guidance",
+      "ok": true
+    },
+    {
+      "workflow": "key file upload rejects oversized files, public keys and invalid passphrases without saving credentials",
+      "ok": true
+    },
+    {
+      "workflow": "encrypted OpenSSH/PEM key upload accepts an extensionless BOM/CRLF file and clears modal data after save",
+      "ok": true
+    },
+    {
+      "workflow": "credential rotation supports file upload and pasted private keys remain supported",
       "ok": true
     },
     {

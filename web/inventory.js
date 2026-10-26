@@ -49,16 +49,8 @@ async function saveZabbixConnection() {
   await api("/zabbix/config", "PUT", body);
   form.elements.token.value = "";
 }
-async function pageZabbix() {
-  const [settings, runs, credentials, proxies] = await Promise.all([
-    api("/zabbix/config"),
-    api("/zabbix/runs"),
-    api("/credentials"),
-    api("/proxies"),
-  ]);
-  state.credentials = credentials;
-  state.proxies = proxies;
-  const cfg = settings.config || {
+function zabbixConnectionPanel(config) {
+  const cfg = config || {
     url: "",
     server: "",
     transport: "http",
@@ -66,47 +58,9 @@ async function pageZabbix() {
     batch_size: 20,
     interval_ms: 400,
   };
-  if (!state.zabbixRun && runs.items.length) state.zabbixRun = runs.items[0].id;
-  const detail = state.zabbixRun
-    ? await api("/zabbix/runs/" + state.zabbixRun + "?page=" + state.zabbixPage)
-    : null;
-  state.zabbixPolling =
-    !!detail && ["queued", "running"].includes(detail.run.status);
-  state.zabbixPreview = detail;
-  const steps = [
-    "连接 Zabbix MCP",
-    "选择主机组",
-    "预览并登记",
-    detail?.run.status === "registered"
-      ? "下一步：核验与测试 SSH"
-      : "核验与测试 SSH",
-  ];
-  const progress =
-    '<ol class="sync-steps">' +
-    steps
-      .map(
-        (s, i) =>
-          '<li class="' +
-          ((i === 0 && settings.config) ||
-          (i === 1 && state.zabbixGroups.length) ||
-          (i === 2 && detail?.run.status === "registered")
-            ? "complete"
-            : "") +
-          '"><span>' +
-          (i + 1) +
-          "</span>" +
-          s +
-          "</li>",
-      )
-      .join("") +
-    "</ol>";
-  const connection = panel(
-    "Zabbix MCP 连接",
-    '<details class="connection-settings" ' +
-      (!settings.config ? "open" : "") +
-      "><summary>" +
-      (settings.config ? "已配置 · " + esc(cfg.url) : "配置资产来源") +
-      '</summary><form id="zabbix-connection-form"><div class="fields">' +
+  return panel(
+    "Zabbix MCP 连接配置",
+    '<p class="intro">配置资产来源、认证和分批读取参数。保存后可验证 MCP 连接及读取权限。</p><form id="zabbix-connection-form"><div class="fields">' +
       field(
         "url",
         "MCP 地址",
@@ -161,7 +115,69 @@ async function pageZabbix() {
       field("verify_tls", "校验 HTTPS 证书", cfg.verify_tls, "checkbox") +
       '</div><div class="modal-actions"><button type="submit" class="btn">保存连接</button>' +
       btn("zabbix-test", "验证连接与读取权限", "", "primary") +
-      '</div></form></details><div id="zabbix-feedback" class="notice" role="status" hidden></div>',
+      '</div></form><div id="zabbix-feedback" class="notice" role="status" hidden></div>',
+  );
+}
+
+async function pageZabbix() {
+  const [settings, runs, credentials, proxies] = await Promise.all([
+    api("/zabbix/config"),
+    api("/zabbix/runs"),
+    api("/credentials"),
+    api("/proxies"),
+  ]);
+  state.credentials = credentials;
+  state.proxies = proxies;
+  if (!state.zabbixRun && runs.items.length) state.zabbixRun = runs.items[0].id;
+  const detail = state.zabbixRun
+    ? await api("/zabbix/runs/" + state.zabbixRun + "?page=" + state.zabbixPage)
+    : null;
+  state.zabbixPolling =
+    !!detail && ["queued", "running"].includes(detail.run.status);
+  state.zabbixPreview = detail;
+  const steps = [
+    "连接 Zabbix MCP",
+    "选择主机组",
+    "预览并登记",
+    detail?.run.status === "registered"
+      ? "下一步：核验与测试 SSH"
+      : "核验与测试 SSH",
+  ];
+  const progress =
+    '<ol class="sync-steps">' +
+    steps
+      .map(
+        (s, i) =>
+          '<li class="' +
+          ((i === 0 && settings.config) ||
+          (i === 1 && state.zabbixGroups.length) ||
+          (i === 2 && detail?.run.status === "registered")
+            ? "complete"
+            : "") +
+          '"><span>' +
+          (i + 1) +
+          "</span>" +
+          s +
+          "</li>",
+      )
+      .join("") +
+    "</ol>";
+  const connection = panel(
+    "资产来源",
+    '<div class="settings-source"><div><strong>' +
+      (settings.config ? "已配置 Zabbix MCP" : "尚未配置 Zabbix MCP") +
+      '</strong><p class="muted">' +
+      (settings.config
+        ? esc(settings.config.url)
+        : "先到系统配置保存 MCP 地址和令牌，再返回此处选择分组和登记资产。") +
+      '</p></div><div class="actions">' +
+      btn(
+        "open-settings/zabbix",
+        "系统配置",
+        "",
+        settings.config ? "" : "primary",
+      ) +
+      "</div></div>",
   );
   const types = state.zabbixTypes || ["linux"];
   const discover = panel(

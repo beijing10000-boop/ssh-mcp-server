@@ -2,7 +2,7 @@
 
 > 独立部署、中文优先、免 Agent 的 Linux SSH 诊断服务。默认 Web/MCP 端口 **9099**。
 
-**当前版本：v0.3.0（待真实环境联调）**
+**当前版本：v0.3.1（待真实环境联调）**
 
 从 Zabbix MCP 分批发现 Linux 资产，保留 Host ID 与主机组；通过页面预览登记、绑定凭据、公钥核验与 SSH 测试完成接入。提供 32 类只读诊断、39 个 MCP 工具、后台批量任务与客户端范围授权。
 
@@ -22,7 +22,7 @@
 - Web/API 使用飞书管理员会话、HttpOnly Cookie 与 CSRF 校验；MCP 使用独立客户端令牌，支持主机组、动作范围、到期与撤销。
 - SSH **只允许已登记的内网 IP**、已登记 SSH 凭据、经管理员确认的主机公钥。
 - 严格 SSH 主机公钥校验，批量获取只能产生候选结果，不自动信任。
-- 固定只读诊断动作，无执行任意 Shell 的 MCP 工具，不支持文件上传、下载或自动修复。
+- 固定只读诊断动作，MCP 仅开放服务端白名单；SSH 凭据支持上传私钥文件，私钥验证后加密保存。
 - SSH 私钥、诊断请求及结果加密保存；新客户端令牌只显示一次，数据库仅保存哈希。
 - `root` 可以使用标准诊断模式，但 **root 本身并非只读账户**。固定命令不能保证操作系统层面绝对只读。
 - 默认只绑定回环地址。公网使用须额外配置 HTTPS、访问控制、可信代理和来源 IP 限制；不要直接暴露 HTTP。
@@ -44,19 +44,21 @@ docker compose logs --tail=50 ssh-mcp
 docker compose exec ssh-mcp cat /app/data/bootstrap.token
 ```
 
-完成飞书初始化后，在 Web「MCP 接入」为 AI 平台签发专用令牌。原始 `/app/data/mcp.token` 继续兼容旧客户端；迁移完成后可在 Web 停用。不要将令牌发到聊天窗口、工单、公开日志或 GitHub。
+完成飞书初始化后，在 Web「系统配置 → MCP 接入」为 AI 平台签发专用令牌。原始 `/app/data/mcp.token` 继续兼容旧客户端；迁移完成后可在 Web 停用。不要将令牌发到聊天窗口、工单、公开日志或 GitHub。
 
 需开放给可信内网时，在项目目录创建 `.env`，并设置 `WEB_BIND_IP=内网绑定IP`；建议同时通过防火墙限制允许访问的源地址。
 
-请先阅读 [v0.3 优化与升级说明](docs/RELEASE-v0.3.md)，以及 [安装部署](docs/INSTALLATION.md)、[v0.2 升级与验证](docs/RELEASE-v0.2.md)、[架构评估](docs/ARCHITECTURE.md)、[AI 平台改造方案](docs/AI-PLATFORM-INTEGRATION.md)、[MCP 接入](docs/MCP.md)、[安全说明](docs/SECURITY.md)、[目录与 IP 流量分析](docs/INSIGHTS.md)。
+配置入口见 [v0.3.1 系统配置说明](docs/RELEASE-v0.3.1.md)。请先阅读 [v0.3 优化与升级说明](docs/RELEASE-v0.3.md)，以及 [安装部署](docs/INSTALLATION.md)、[v0.2 升级与验证](docs/RELEASE-v0.2.md)、[架构评估](docs/ARCHITECTURE.md)、[AI 平台改造方案](docs/AI-PLATFORM-INTEGRATION.md)、[MCP 接入](docs/MCP.md)、[安全说明](docs/SECURITY.md)、[目录与 IP 流量分析](docs/INSIGHTS.md)。
 
 ## 核心能力
 
 | 能力 | 说明 |
 | --- | --- |
+| 系统配置 | Zabbix MCP 连接、SSH MCP 客户端授权与飞书登录集中管理 |
 | 中文 Web | 深浅主题、资产分页/搜索/分组筛选、跨页选择、任务与审计分页 |
 | 批量管理 | 最多 1000 台表格粘贴/API 原子导入、批量启停、按筛选选择；失败整批回滚 |
 | Zabbix 资产同步 | MCP 连接验证、Linux 筛选、精简 ID 索引、自适应详情拆批、原始分组和 Host ID 关联、登记预览 |
+| SSH 凭据 | 上传 OpenSSH/PEM 私钥文件或粘贴内容，支持私钥口令与轮换，验证后加密保存 |
 | 接入验证 | 批量绑定 SSH 凭据、账号和跳板；公钥核验后批量测试，清楚显示逐台准备状态 |
 | 主机公钥获取 | 支持批量探测 + SHA256 指纹审核确认，绝不自动信任 |
 | SSH 诊断 | 32 类固定诊断；包含 PSI、OOM、NTP、服务/timer、块设备、挂载、安全组件与容器资源 |

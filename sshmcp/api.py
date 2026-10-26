@@ -172,7 +172,7 @@ def overview(actor=Depends(admin)):
         "verified": verified,
         "groups": groups,
         "failed_actions": failed,
-        "version": "0.3.0",
+        "version": "0.3.1",
     }
 
 
