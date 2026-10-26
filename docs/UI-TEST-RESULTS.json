@@ -197,6 +197,10 @@
       "ok": true
     },
     {
+      "workflow": "operational dashboard funnel navigation and four SVG navigation groups",
+      "ok": true
+    },
+    {
       "workflow": "legacy MCP and Feishu links resolve to unified system settings",
       "ok": true
     },
@@ -218,6 +222,10 @@
     },
     {
       "workflow": "search Host ID and choose explicit target list",
+      "ok": true
+    },
+    {
+      "workflow": "findings severity, threshold bars, collapsed raw output, HTTP copy fallback and download",
       "ok": true
     },
     {
@@ -265,6 +273,10 @@
       "ok": true
     },
     {
+      "workflow": "scenario template exposes fixed triage and required parameters",
+      "ok": true
+    },
+    {
       "workflow": "diagnostic category and parameter guidance",
       "ok": true
     },
@@ -282,6 +294,20 @@
     },
     {
       "workflow": "theme toggle",
+      "ok": true
+    },
+    {
+      "width": 390,
+      "workflow": "responsive history cards and diagnostic details",
+      "ok": true
+    },
+    {
+      "width": 768,
+      "workflow": "responsive history cards and diagnostic details",
+      "ok": true
+    },
+    {
+      "workflow": "mobile navigation and compact table preference",
       "ok": true
     }
   ],

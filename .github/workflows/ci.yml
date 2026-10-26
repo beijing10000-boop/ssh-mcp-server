@@ -33,6 +33,7 @@ jobs:
           node --check web/setup.js
           node --check web/inventory.js
           node --check web/interactions.js
+          node --check web/presentation.js
           /bin/sh -n gateway/aiops-diagnostic-gateway
       - name: 接口、权限与真实 SSH 协议回归
         run: python -m pytest -q

@@ -94,7 +94,7 @@ try:
         page.on("response", lambda r: failed.append(r.url) if r.status >= 500 else None)
         page.on("dialog", lambda d: d.accept())
         page.goto(base + "/__ui_login")
-        page.locator(".welcome").wait_for()
+        page.locator("#overview-dashboard").wait_for()
 
         def navigate(name):
             settings_tab = {
@@ -141,6 +141,22 @@ try:
                 ), (width, name)
                 checks.append({"width": width, "page": name, "ok": True})
         page.set_viewport_size({"width": 1440, "height": 1080})
+        assert page.locator("#nav .nav-caption").count() == 4
+        assert page.locator("#nav .nav-link svg").count() == 11
+        navigate("overview")
+        assert page.locator(".welcome").count() == 0
+        page.locator('[data-action="funnel-filter"][data-id="ready"]').click()
+        page.locator("#host-status").wait_for()
+        assert (
+            "status=ready" in page.url
+            and page.locator("#host-status").input_value() == "ready"
+        )
+        checks.append(
+            {
+                "workflow": "operational dashboard funnel navigation and four SVG navigation groups",
+                "ok": True,
+            }
+        )
         assert (
             page.locator('#nav [data-page="clients"],#nav [data-page="feishu"]').count()
             == 0
@@ -231,11 +247,33 @@ try:
         )
         page.get_by_label("诊断类型", exact=True).select_option("memory_processes")
         assert page.locator("#diagnostic-form [name=service]").is_hidden()
+        page.get_by_label("诊断类型", exact=True).select_option("health")
         page.locator("#diagnostic-form button[type=submit]").click()
         page.get_by_role("heading", name="采集结果", exact=True).wait_for()
+        page.locator(".metric-card").first.wait_for()
+        assert page.locator(".finding.critical").count() > 0
+        assert page.locator("#raw-evidence").get_attribute("open") is None
+        page.locator("#raw-evidence summary").click()
         page.get_by_text(
             "隔离界面测试结果，不代表生产观测。", exact=False
         ).first.wait_for()
+        page.evaluate(
+            "Object.defineProperty(navigator,'clipboard',{value:undefined,configurable:true})"
+        )
+        page.locator('[data-action="copy-raw"]').click()
+        page.get_by_text("原始输出已复制", exact=True).wait_for()
+        with page.expect_download() as download_info:
+            page.locator('[data-action="download-result"]').click()
+        downloaded = json.loads(Path(download_info.value.path()).read_text())
+        assert (
+            downloaded["result"]["findings"] and downloaded["actor"] == "ou_ui_fixture"
+        )
+        checks.append(
+            {
+                "workflow": "findings severity, threshold bars, collapsed raw output, HTTP copy fallback and download",
+                "ok": True,
+            }
+        )
         job_url = page.url
         page.reload()
         page.get_by_role("heading", name="采集结果", exact=True).wait_for()
@@ -422,6 +460,29 @@ try:
         assert page.locator("#diagnostic-form [name=action]").input_value() == "oom"
         assert page.locator("#diagnostic-form [name=minutes]").is_visible()
         assert page.locator("#diagnostic-form [name=service]").is_hidden()
+        page.locator(
+            '[data-action="scenario-template"][data-id="service_down"]'
+        ).click()
+        page.locator('#diagnostic-form [name="service"]').wait_for()
+        assert (
+            page.locator('#diagnostic-form [name="action"]').input_value() == "triage"
+        )
+        assert (
+            page.locator('#diagnostic-form [name="symptom"]').input_value()
+            == "service_down"
+        )
+        assert (
+            "最多 60 秒"
+            in page.locator(
+                '[data-action="choose-tool"][data-id="triage"]'
+            ).inner_text()
+        )
+        checks.append(
+            {
+                "workflow": "scenario template exposes fixed triage and required parameters",
+                "ok": True,
+            }
+        )
         checks.append(
             {"workflow": "diagnostic category and parameter guidance", "ok": True}
         )
@@ -551,6 +612,45 @@ try:
         page.wait_for_timeout(200)
         page.screenshot(path=str(OUT / "clients-dark-1440.png"), full_page=True)
         checks.append({"workflow": "theme toggle", "ok": True})
+        page.locator("#theme-toggle").click()
+        for width in (390, 768):
+            page.set_viewport_size({"width": width, "height": 844})
+            page.goto(base + "/#history")
+            page.locator("#content .job-history tbody tr").first.wait_for()
+            assert page.evaluate("document.documentElement.scrollWidth<=innerWidth"), (
+                width
+            )
+            page.screenshot(
+                path=str(OUT / ("history-mobile-" + str(width) + ".png")),
+                full_page=True,
+            )
+            page.goto(job_url)
+            page.get_by_role("heading", name="采集结果", exact=True).wait_for()
+            page.locator(".metric-card").first.wait_for()
+            assert page.evaluate("document.documentElement.scrollWidth<=innerWidth"), (
+                width
+            )
+            assert page.locator(".execution-meta").is_visible()
+            page.screenshot(
+                path=str(OUT / ("job-mobile-" + str(width) + ".png")), full_page=True
+            )
+            checks.append(
+                {
+                    "width": width,
+                    "workflow": "responsive history cards and diagnostic details",
+                    "ok": True,
+                }
+            )
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.locator("#menu-toggle").click()
+        page.locator('#nav [data-page="hosts"]').click()
+        page.get_by_role("heading", name="主机与设备资产", exact=True).wait_for()
+        assert not page.locator(".sidebar").is_visible()
+        page.locator("#density-toggle").click()
+        assert page.locator("html").get_attribute("data-density") == "compact"
+        checks.append(
+            {"workflow": "mobile navigation and compact table preference", "ok": True}
+        )
         assert errors == [], errors
         assert failed == [], failed
         browser.close()
