@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from . import store, access, jobs, console_api, zabbix
+from . import store, access, jobs, console_api, zabbix, maintenance
 from .api import router
 from .auth import router as auth_router, trusted_origin
 from .mcp_tools import mcp
@@ -23,7 +24,13 @@ mcp_app = mcp.streamable_http_app()
 async def lifespan(app: FastAPI):
     store.init_db()
     async with mcp.session_manager.run():
-        yield
+        task = asyncio.create_task(maintenance.periodic())
+        try:
+            yield
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
 
 app = FastAPI(
@@ -40,6 +47,7 @@ app.include_router(access.router)
 app.include_router(jobs.router)
 app.include_router(console_api.router)
 app.include_router(zabbix.router)
+app.include_router(maintenance.router)
 
 
 @app.middleware("http")

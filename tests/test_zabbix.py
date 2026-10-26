@@ -224,7 +224,7 @@ def test_changed_ip_invalidates_key_and_queued_revision(client, key_pair):
         client.post(
             "/api/v1/jobs",
             headers=auth(),
-            json={"host_ids": [hid], "action": "connection"},
+            json={"host_ids": [hid], "action": "connection", "strict": True},
         ).status_code
         == 422
     )
@@ -254,7 +254,7 @@ def test_mixed_assets_no_ip_conflict_and_manual_adoption(client, key_pair):
         client.post(
             "/api/v1/jobs",
             headers=auth(),
-            json={"host_ids": [win["id"]], "action": "health"},
+            json={"host_ids": [win["id"]], "action": "health", "strict": True},
         ).status_code
         == 422
     )
@@ -324,7 +324,7 @@ def test_new_scripts_fixed_bounded_and_gateway_rejects(client, key_pair):
         client.post(
             "/api/v1/jobs",
             headers=auth(),
-            json={"host_ids": [hid], "action": "container_stats"},
+            json={"host_ids": [hid], "action": "container_stats", "strict": True},
         ).status_code
         == 422
     )
