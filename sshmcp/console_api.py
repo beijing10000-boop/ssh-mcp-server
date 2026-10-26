@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 
 from . import store
-from .api import HostIn, ProxyIn, GroupIn, _host_view, safe_host_input, fail
+from .api import HostIn, ProxyIn, GroupIn, host_with_groups, safe_host_input, fail
 from .auth import admin
 
 router = APIRouter(prefix="/api/v1")
@@ -51,11 +51,13 @@ def listing(
     with store.db() as c:
         total = c.execute("SELECT COUNT(*) FROM hosts" + where, args).fetchone()[0]
         rows = c.execute(
-            "SELECT * FROM hosts" + where + " ORDER BY id DESC LIMIT ? OFFSET ?",
+            "SELECT h.*,(SELECT GROUP_CONCAT(group_id) FROM host_groups WHERE host_id=h.id) AS joined_groups FROM hosts h"
+            + where
+            + " ORDER BY id DESC LIMIT ? OFFSET ?",
             (*args, page_size, (page - 1) * page_size),
         ).fetchall()
     return {
-        "items": [_host_view(row) for row in rows],
+        "items": [host_with_groups(row) for row in rows],
         "total": total,
         "page": page,
         "page_size": page_size,

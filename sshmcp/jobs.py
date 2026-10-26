@@ -21,6 +21,7 @@ class RunIn(BaseModel):
     service: str | None = Field(default=None, max_length=64)
     minutes: StrictInt = Field(default=30, ge=1, le=120)
     directory_root: str | None = Field(default=None, max_length=200)
+    strict: bool = False
 
 
 def _request(action, service=None, minutes=30, directory_root=None):
@@ -34,37 +35,50 @@ def _request(action, service=None, minutes=30, directory_root=None):
 
 
 def create(
-    host_ids, request, actor, source="web", *, background=True, expected_revisions=None
+    host_ids,
+    request,
+    actor,
+    source="web",
+    *,
+    background=True,
+    expected_revisions=None,
+    strict=False,
 ):
     ids = list(dict.fromkeys(host_ids))
     if not ids or len(ids) > 100 or any(type(i) is not int or i < 1 for i in ids):
         raise ValueError("请选择 1–100 台主机")
     request = _request(**request)
-    batch_id, jobs = uuid.uuid4().hex, []
+    batch_id, jobs, accepted, skipped = uuid.uuid4().hex, [], [], []
     with store.db() as c:
         c.execute("BEGIN IMMEDIATE")
         pending = c.execute(
             "SELECT COUNT(*) FROM diagnostic_jobs WHERE status IN ('queued','running')"
         ).fetchone()[0]
-        if pending + len(ids) > 200:
-            raise ValueError("待执行任务已达上限，请等待现有任务完成")
         for host_id in ids:
             row = c.execute(
                 "SELECT * FROM hosts WHERE id=? AND enabled=1", (host_id,)
             ).fetchone()
+            reason = None
             if not row or not row["host_key"] or not row["credential_id"]:
-                raise ValueError(f"主机 {host_id} 未启用、未核验公钥或未绑定凭据")
-            if row["asset_type"] != "linux":
-                raise ValueError(f"资产 {host_id} 不是 Linux，不能执行 SSH 诊断")
-            if (
+                reason = "主机未启用、未核验公钥或未绑定凭据"
+            elif row["asset_type"] != "linux":
+                reason = "资产不是 Linux，不能执行 SSH 诊断"
+            elif (
                 row["mode"] == "gateway"
                 and request["action"] in diagnostics.STANDARD_ONLY
             ):
-                raise ValueError("此动作需要标准 SSH 模式；受限网关尚不支持")
-            if expected_revisions is not None and row[
+                reason = "此动作需要标准 SSH 模式；受限网关尚不支持"
+            elif expected_revisions is not None and row[
                 "revision"
             ] != expected_revisions.get(host_id):
-                raise ValueError("主机配置已变更，请重新解析映射并确认诊断目标")
+                reason = "主机配置已变更，请重新解析映射并确认诊断目标"
+            elif pending + len(jobs) >= 200:
+                reason = "待执行任务已达上限，请等待现有任务完成"
+            if reason:
+                if strict:
+                    raise ValueError(f"主机 {host_id}: {reason}")
+                skipped.append({"host_id": host_id, "reason": reason})
+                continue
             ident = uuid.uuid4().hex
             c.execute(
                 "INSERT INTO diagnostic_jobs(id,batch_id,host_id,host_name,host_revision,actor,source,action,request) "
@@ -82,10 +96,11 @@ def create(
                 ),
             )
             jobs.append(ident)
+            accepted.append({"host_id": host_id, "job_id": ident})
     for ident in jobs:
         if background:
             try:
-                POOL.submit(work, ident)
+                POOL.submit(work, ident, True)
             except RuntimeError:
                 with store.db() as c:
                     c.execute(
@@ -101,7 +116,13 @@ def create(
         "success",
         f"count={len(jobs)};action={request['action']}",
     )
-    return {"batch_id": batch_id, "job_ids": jobs, "total": len(jobs)}
+    return {
+        "batch_id": batch_id,
+        "job_ids": jobs,
+        "total": len(jobs),
+        "accepted": accepted,
+        "skipped": skipped,
+    }
 
 
 def cancelled(ident):
@@ -112,7 +133,37 @@ def cancelled(ident):
     return row is None or bool(row[0])
 
 
-def work(ident):
+def authorize(job):
+    if job["source"] == "web":
+        from .auth import admins
+
+        if job["actor"] not in admins():
+            raise PermissionError("提交者已失去管理权限")
+    else:
+        # Background MCP tasks must re-check live scope, expiry and revoke
+        # state; a credential may change while its task waits in the queue.
+        from . import access
+        import time
+
+        client_id = job["actor"].removeprefix("mcp:")
+        if client_id == "legacy":
+            if not access.legacy_enabled():
+                raise PermissionError("原始 MCP 令牌已停用")
+        else:
+            with store.db() as c:
+                current = c.execute(
+                    "SELECT * FROM mcp_clients WHERE id=? AND enabled=1 AND expires_at>?",
+                    (client_id, int(time.time())),
+                ).fetchone()
+                if not current or job["action"] not in json.loads(current["actions"]):
+                    raise PermissionError("MCP 客户端已撤销、到期或动作不再授权")
+                if not current["all_hosts"] and not set(
+                    store.groups_for(job["host_id"])
+                ) & set(json.loads(current["group_ids"])):
+                    raise PermissionError("主机已不在 MCP 客户端授权范围内")
+
+
+def work(ident, background=False):
     with store.db() as c:
         c.execute("BEGIN IMMEDIATE")
         if not c.execute(
@@ -126,40 +177,14 @@ def work(ident):
     request = json.loads(store.unseal(job["request"]))
     error = ""
     try:
-        if job["source"] == "web":
-            from .auth import admins
-
-            if job["actor"] not in admins():
-                raise PermissionError("提交者已失去管理权限")
-        else:
-            # Background MCP tasks must re-check live scope, expiry and revoke
-            # state; a credential may change while its task waits in the queue.
-            from . import access
-            import time
-
-            client_id = job["actor"].removeprefix("mcp:")
-            if client_id == "legacy":
-                if not access.legacy_enabled():
-                    raise PermissionError("原始 MCP 令牌已停用")
-            else:
-                with store.db() as c:
-                    current = c.execute(
-                        "SELECT * FROM mcp_clients WHERE id=? AND enabled=1 AND expires_at>?",
-                        (client_id, int(time.time())),
-                    ).fetchone()
-                    if not current or job["action"] not in json.loads(
-                        current["actions"]
-                    ):
-                        raise PermissionError("MCP 客户端已撤销、到期或动作不再授权")
-                    if not current["all_hosts"] and not set(
-                        store.groups_for(job["host_id"])
-                    ) & set(json.loads(current["group_ids"])):
-                        raise PermissionError("主机已不在 MCP 客户端授权范围内")
+        authorize(job)
         result = diagnostics.execute(
             job["host_id"],
             **request,
             cancelled=lambda: cancelled(ident),
             expected_revision=job["host_revision"],
+            background=background,
+            preflight=lambda: authorize(job),
         )
         status = result["status"]
     except Exception as exc:
@@ -217,6 +242,7 @@ def run_inline(
         actor,
         source,
         background=False,
+        strict=True,
         expected_revisions={host_id: expected_revision}
         if expected_revision is not None
         else None,
@@ -246,7 +272,12 @@ def detail(ident):
 @router.post("", status_code=202)
 def submit(body: RunIn, actor=Depends(admin)):
     try:
-        return create(body.host_ids, body.model_dump(exclude={"host_ids"}), actor)
+        return create(
+            body.host_ids,
+            body.model_dump(exclude={"host_ids", "strict"}),
+            actor,
+            strict=body.strict,
+        )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from None
 

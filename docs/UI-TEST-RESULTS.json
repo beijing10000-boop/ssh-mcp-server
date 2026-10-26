@@ -217,6 +217,10 @@
       "ok": true
     },
     {
+      "workflow": "polling preserves nodes and focus without loading flash",
+      "ok": true
+    },
+    {
       "workflow": "running diagnosis cancellation",
       "ok": true
     },
@@ -226,6 +230,10 @@
     },
     {
       "workflow": "scoped client token shown once and revocation enforced",
+      "ok": true
+    },
+    {
+      "workflow": "retention policy saves from system settings",
       "ok": true
     },
     {

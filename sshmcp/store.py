@@ -12,6 +12,7 @@ import secrets
 import sqlite3
 import tempfile
 from contextlib import contextmanager
+from functools import lru_cache
 
 from cryptography.fernet import Fernet
 import base64
@@ -49,6 +50,7 @@ def ensure_secret(filename: str, creator) -> bytes:
 def init_db():
     DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     ensure_secret("master.key", Fernet.generate_key)
+    _fernet.cache_clear()
     # Bootstrap credential is one-time only; not accepted by normal Web login.
     ensure_secret("bootstrap.token", lambda: secrets.token_urlsafe(48).encode())
     ensure_secret("mcp.token", lambda: secrets.token_urlsafe(36).encode())
@@ -239,6 +241,7 @@ def db():
     c = sqlite3.connect(str(DATA_DIR / "ssh-mcp.sqlite3"), timeout=10)
     (DATA_DIR / "ssh-mcp.sqlite3").chmod(0o600)
     c.row_factory = sqlite3.Row
+    c.execute("PRAGMA journal_mode=WAL")
     c.execute("PRAGMA foreign_keys=ON")
     c.execute("PRAGMA busy_timeout=10000")
     try:
@@ -255,20 +258,17 @@ def token(name: str) -> str:
     return (DATA_DIR / name).read_text().strip()
 
 
+@lru_cache(maxsize=8)
+def _fernet(directory: Path) -> Fernet:
+    return Fernet(ensure_secret("master.key", Fernet.generate_key))
+
+
 def seal(plaintext: str) -> str:
-    return (
-        Fernet(ensure_secret("master.key", Fernet.generate_key))
-        .encrypt(plaintext.encode())
-        .decode()
-    )
+    return _fernet(DATA_DIR.resolve()).encrypt(plaintext.encode()).decode()
 
 
 def unseal(ciphertext: str) -> str:
-    return (
-        Fernet(ensure_secret("master.key", Fernet.generate_key))
-        .decrypt(ciphertext.encode())
-        .decode()
-    )
+    return _fernet(DATA_DIR.resolve()).decrypt(ciphertext.encode()).decode()
 
 
 def private_ip(value: str) -> str:

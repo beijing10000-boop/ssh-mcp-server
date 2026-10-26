@@ -223,6 +223,20 @@ try:
         navigate("diagnostics")
         page.get_by_label("诊断类型", exact=True).select_option("io")
         page.locator("#diagnostic-form button[type=submit]").click()
+        page.locator('[data-action="cancel-job"]').wait_for()
+        page.evaluate(
+            "window.pollButton=document.querySelector('[data-action=cancel-job]'); window.pollButton.focus()"
+        )
+        page.wait_for_timeout(3400)
+        assert page.evaluate(
+            "window.pollButton === document.activeElement && window.pollButton.isConnected"
+        )
+        checks.append(
+            {
+                "workflow": "polling preserves nodes and focus without loading flash",
+                "ok": True,
+            }
+        )
         page.locator('[data-action="cancel-job"]').click()
         page.get_by_text("已取消", exact=True).wait_for()
         checks.append({"workflow": "running diagnosis cancellation", "ok": True})
@@ -276,7 +290,17 @@ try:
         page.locator('[data-action="open-settings/zabbix"]').click()
         page.locator("#zabbix-connection-form").wait_for()
         assert page.locator('#nav [data-page="settings"].active').count() == 1
-        assert page.locator(".settings-tabs button").count() == 3
+        assert page.locator(".settings-tabs button").count() == 4
+        page.locator('[data-action="settings-tab"][data-id="retention"]').click()
+        page.locator("#retention-form").wait_for()
+        page.get_by_label("诊断结果（天）", exact=True).fill("45")
+        page.locator("#retention-form button[type=submit]").click()
+        page.get_by_text("保留策略已保存", exact=True).wait_for()
+        checks.append(
+            {"workflow": "retention policy saves from system settings", "ok": True}
+        )
+        page.locator('[data-action="settings-tab"][data-id="zabbix"]').click()
+        page.locator("#zabbix-connection-form").wait_for()
         page.locator('[data-action="zabbix-test"]').click()
         page.locator("#zabbix-feedback").get_by_text(
             "MCP 握手、主机组读取和主机计数均已通过", exact=False

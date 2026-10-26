@@ -56,7 +56,7 @@ SCRIPTS = {
         "printf '[AppArmor]\\n'; if [ -r /sys/module/apparmor/parameters/enabled ]; then "
         "cat /sys/module/apparmor/parameters/enabled; else printf 'unavailable\\n'; fi; "
         "printf '[防火墙服务状态，非规则审计]\\n'; if command -v systemctl >/dev/null 2>&1; then "
-        'for unit in firewalld nftables ufw; do systemctl is-active "$unit" || true; done; '
+        'for unit in firewalld nftables ufw; do printf "%s: " "$unit"; systemctl is-active "$unit" || true; done; '
         "else printf 'CAPABILITY_MISSING:systemctl\\n'; fi"
     ),
 }

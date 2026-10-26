@@ -139,9 +139,18 @@ class SSHDiagnosticError(RuntimeError):
 
 # One application process runs at most four SSH actions concurrently and never
 # executes two diagnostics on the same registered host at the same time.
-_GLOBAL_SSH_LIMIT = threading.BoundedSemaphore(4)
 _ACTIVE_HOSTS = set()
-_ACTIVE_LOCK = threading.Lock()
+_SLOTS = threading.Condition()
+_BACKGROUND_ACTIVE = 0
+
+
+def slot_usage():
+    with _SLOTS:
+        return {
+            "active": len(_ACTIVE_HOSTS),
+            "capacity": 4,
+            "background": _BACKGROUND_ACTIVE,
+        }
 
 
 def command_for(
@@ -297,15 +306,29 @@ def execute(
     *,
     cancelled=lambda: False,
     expected_revision=None,
+    background=False,
+    preflight=lambda: None,
 ) -> dict:
-    if not _GLOBAL_SSH_LIMIT.acquire(blocking=False):
-        raise SSHDiagnosticError("SSH 诊断并发已达上限（4），请稍后重试")
-    with _ACTIVE_LOCK:
-        if host_id in _ACTIVE_HOSTS:
-            _GLOBAL_SSH_LIMIT.release()
-            raise SSHDiagnosticError("该主机已有一项诊断正在执行，请稍后重试")
+    global _BACKGROUND_ACTIVE
+    deadline = time.monotonic() + (180 if background else 2)
+    with _SLOTS:
+        while (
+            len(_ACTIVE_HOSTS) >= 4
+            or host_id in _ACTIVE_HOSTS
+            or (background and _BACKGROUND_ACTIVE >= 3)
+        ):
+            if cancelled():
+                raise SSHDiagnosticError("任务已取消")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SSHDiagnosticError(
+                    "SSH 诊断繁忙：等待名额或同主机任务超时，请稍后重试"
+                )
+            _SLOTS.wait(min(remaining, 0.2))
         _ACTIVE_HOSTS.add(host_id)
+        _BACKGROUND_ACTIVE += int(background)
     try:
+        preflight()
         return _execute_inner(
             host_id,
             action,
@@ -316,9 +339,10 @@ def execute(
             expected_revision=expected_revision,
         )
     finally:
-        with _ACTIVE_LOCK:
+        with _SLOTS:
             _ACTIVE_HOSTS.discard(host_id)
-        _GLOBAL_SSH_LIMIT.release()
+            _BACKGROUND_ACTIVE -= int(background)
+            _SLOTS.notify_all()
 
 
 def _execute_inner(

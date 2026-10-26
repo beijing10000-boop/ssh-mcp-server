@@ -115,7 +115,7 @@ def safe_host_input(item: HostIn) -> dict:
     return x
 
 
-def _host_view(row) -> dict:
+def _host_view(row, group_ids=None) -> dict:
     v = dict(row)
     key = v.pop("host_key")
     v["has_host_key"] = bool(key)
@@ -128,7 +128,7 @@ def _host_view(row) -> dict:
             v["key_error"] = "旧公钥无效，请重新核验"
     else:
         v["host_fingerprint"] = None
-    v["group_ids"] = store.groups_for(v["id"])
+    v["group_ids"] = store.groups_for(v["id"]) if group_ids is None else group_ids
     v["readiness"] = (
         "unsupported"
         if v["asset_type"] != "linux"
@@ -145,6 +145,12 @@ def _host_view(row) -> dict:
         else "untested"
     )
     return v
+
+
+def host_with_groups(row):
+    item = dict(row)
+    ids = item.pop("joined_groups")
+    return _host_view(item, [int(x) for x in ids.split(",")] if ids else [])
 
 
 @router.get("/auth/check")
@@ -179,8 +185,10 @@ def overview(actor=Depends(admin)):
 @router.get("/hosts")
 def hosts(actor=Depends(admin)):
     with store.db() as c:
-        rows = c.execute("SELECT * FROM hosts ORDER BY id DESC LIMIT 2000").fetchall()
-    return [_host_view(x) for x in rows]
+        rows = c.execute(
+            "SELECT h.*,GROUP_CONCAT(hg.group_id) AS joined_groups FROM hosts h LEFT JOIN host_groups hg ON hg.host_id=h.id GROUP BY h.id ORDER BY h.id DESC LIMIT 2000"
+        ).fetchall()
+    return [host_with_groups(x) for x in rows]
 
 
 @router.post("/hosts", status_code=201)

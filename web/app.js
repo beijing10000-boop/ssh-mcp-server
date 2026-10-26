@@ -1192,6 +1192,27 @@ async function pageFeishu() {
       '</div><div class="modal-actions"><button type="submit" class="btn primary">保存管理员名单</button></div></form>',
   );
 }
+async function pageRetention() {
+  const r = await api("/settings/retention");
+  return panel(
+    "历史数据保留",
+    '<p class="help">每小时清理到期记录；有删除时每天最多执行一次 VACUUM。运行中的任务、凭据和已核验公钥保留。修改天数会影响下一次清理。</p><form id="retention-form"><div class="fields">' +
+      [
+        ["audit_days", "审计记录（天，最少 7）"],
+        ["diagnostic_days", "诊断结果（天）"],
+        ["scan_days", "公钥扫描历史（天）"],
+        ["zabbix_days", "资产发现预览（天）"],
+      ]
+        .map(([k, v]) => field(k, v, r[k], "number"))
+        .join("") +
+      '</div><p class="muted">最近清理：' +
+      date(r.last_cleanup) +
+      " · 最近压缩：" +
+      date(r.last_vacuum) +
+      '</p><div class="modal-actions"><button class="btn primary" type="submit">保存保留策略</button></div></form>',
+  );
+}
+
 async function pageSettings() {
   const tab = state.settingsTab;
   const tabs =
@@ -1200,6 +1221,7 @@ async function pageSettings() {
       ["zabbix", "Zabbix MCP"],
       ["clients", "MCP 接入"],
       ["feishu", "飞书配置"],
+      ["retention", "数据保留"],
     ]
       .map(
         ([id, title]) =>
@@ -1220,7 +1242,9 @@ async function pageSettings() {
       ? await pageClients()
       : tab === "feishu"
         ? await pageFeishu()
-        : zabbixConnectionPanel((await api("/zabbix/config")).config);
+        : tab === "retention"
+          ? await pageRetention()
+          : zabbixConnectionPanel((await api("/zabbix/config")).config);
   return (
     '<div class="page-intro"><p>集中管理 Zabbix MCP 连接、SSH MCP 接入授权与飞书登录配置。</p></div>' +
     tabs +
@@ -1228,7 +1252,39 @@ async function pageSettings() {
   );
 }
 
-async function render() {
+// Reconcile unchanged nodes so polling does not replace forms, focus or scroll.
+function patchNode(old, next) {
+  if (old.nodeType !== next.nodeType || old.nodeName !== next.nodeName) {
+    old.replaceWith(next);
+    return;
+  }
+  if (old.isEqualNode(next)) return;
+  if (old.nodeType === Node.TEXT_NODE) {
+    old.nodeValue = next.nodeValue;
+    return;
+  }
+  if (old.nodeType !== Node.ELEMENT_NODE) return;
+  if (
+    old.matches("input,textarea,select") ||
+    (old.contains(document.activeElement) && old.matches("form"))
+  )
+    return;
+  if (old.tagName === "DETAILS") next.open = old.open;
+  if (old.id === "content") next.id = "content";
+  for (const a of [...old.attributes])
+    if (!next.hasAttribute(a.name)) old.removeAttribute(a.name);
+  for (const a of [...next.attributes])
+    if (old.getAttribute(a.name) !== a.value) old.setAttribute(a.name, a.value);
+  const left = [...old.childNodes],
+    right = [...next.childNodes];
+  for (let i = 0; i < Math.max(left.length, right.length); i++) {
+    if (!left[i]) old.append(right[i]);
+    else if (!right[i]) left[i].remove();
+    else patchNode(left[i], right[i]);
+  }
+}
+async function render(poll = false) {
+  poll = poll === true;
   clearTimeout(timer);
   const version = ++generation;
   const [page, id] = location.hash.slice(1).split("/");
@@ -1238,7 +1294,9 @@ async function render() {
   }
   state.page = page || "overview";
   if (state.page === "settings")
-    state.settingsTab = ["zabbix", "clients", "feishu"].includes(id)
+    state.settingsTab = ["zabbix", "clients", "feishu", "retention"].includes(
+      id,
+    )
       ? id
       : state.settingsTab;
   if (state.page === "job") state.jobId = id || "";
@@ -1259,8 +1317,9 @@ async function render() {
       el.dataset.page === state.page ||
         (state.page === "job" && el.dataset.page === "history"),
     );
-  $("#content").innerHTML =
-    '<div class="loading-panel" role="status"><span class="spinner"></span>正在加载…</div>';
+  if (!poll && state.renderedRoute !== location.hash)
+    $("#content").innerHTML =
+      '<div class="loading-panel" role="status"><span class="spinner"></span>正在加载…</div>';
   try {
     const pages = {
       overview: pageOverview,
@@ -1278,7 +1337,15 @@ async function render() {
     };
     const html = await (pages[state.page] || pageOverview)();
     if (version !== generation) return;
-    $("#content").innerHTML = html;
+    const content = $("#content"),
+      scroll = document.scrollingElement.scrollTop;
+    if (poll) {
+      const next = content.cloneNode(false);
+      next.innerHTML = html;
+      patchNode(content, next);
+      document.scrollingElement.scrollTop = scroll;
+    } else content.innerHTML = html;
+    state.renderedRoute = location.hash;
     if (state.page === "diagnostics") updateDiagnosticInputs();
     if (state.page === "zabbix" && state.zabbixPolling) {
       for (const form of document.querySelectorAll("#zabbix-discover-form"))
@@ -1293,7 +1360,7 @@ async function render() {
       (state.page === "history" && state.pollHistory) ||
       (state.page === "keys" && state.keyDetail?.batch.status === "running") ||
       (state.page === "zabbix" && state.zabbixPolling);
-    if (pending) timer = setTimeout(render, 3000);
+    if (pending) timer = setTimeout(() => render(true), 3000);
   } catch (e) {
     if (version === generation)
       $("#content").innerHTML =
@@ -1652,6 +1719,22 @@ $("#content").addEventListener("submit", async (e) => {
     render();
     return;
   }
+  if (e.target.id === "retention-form") {
+    e.preventDefault();
+    try {
+      await api(
+        "/settings/retention",
+        "PUT",
+        Object.fromEntries(
+          [...new FormData(e.target).entries()].map(([k, v]) => [k, Number(v)]),
+        ),
+      );
+      notice("保留策略已保存");
+    } catch (ex) {
+      notice(ex.message, true);
+    }
+    return;
+  }
   if (e.target.id !== "diagnostic-form") return;
   e.preventDefault();
   const form = e.target,
@@ -1673,7 +1756,18 @@ $("#content").addEventListener("submit", async (e) => {
       directory_root:
         action === "directory" ? getForm(form, "directory_root").trim() : null,
     });
-    notice("已提交 " + result.total + " 项诊断任务。");
+    notice(
+      "已接受 " +
+        result.total +
+        " 项；跳过 " +
+        result.skipped.length +
+        " 项。" +
+        result.skipped
+          .map((x) => "主机 " + x.host_id + ": " + x.reason)
+          .join("；"),
+      !result.total,
+    );
+    if (!result.total) return;
     if (version === generation) {
       state.historyPage = 1;
       state.historyStatus = "all";
@@ -1826,7 +1920,17 @@ document.addEventListener("click", async (e) => {
         host_ids: [...state.selected],
         action: "connection",
       });
-      go("history/" + r.batch_id);
+      notice(
+        "接受 " +
+          r.total +
+          " 台；跳过 " +
+          r.skipped.length +
+          " 台。" +
+          r.skipped.map((x) => x.host_id + ": " + x.reason).join("；"),
+        !r.total,
+      );
+      if (r.total)
+        go(r.total === 1 ? "job/" + r.job_ids[0] : "history/" + r.batch_id);
       return;
     }
     if (action === "import-hosts") {
@@ -2054,7 +2158,8 @@ document.addEventListener("click", async (e) => {
         host_ids: [Number(id)],
         action: "connection",
       });
-      go("job/" + value.job_ids[0]);
+      if (value.total) go("job/" + value.job_ids[0]);
+      else notice(value.skipped.map((x) => x.reason).join("；"), true);
     } else if (action === "disable-host") {
       if (!confirm("确定停用资产 " + id + "？停用后 MCP 将无法诊断这台主机。"))
         return;
