@@ -18,6 +18,11 @@
     },
     {
       "width": 1280,
+      "page": "zabbix",
+      "ok": true
+    },
+    {
+      "width": 1280,
       "page": "credentials",
       "ok": true
     },
@@ -73,6 +78,11 @@
     },
     {
       "width": 1440,
+      "page": "zabbix",
+      "ok": true
+    },
+    {
+      "width": 1440,
       "page": "credentials",
       "ok": true
     },
@@ -124,6 +134,11 @@
     {
       "width": 1920,
       "page": "groups",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "zabbix",
       "ok": true
     },
     {
@@ -192,6 +207,18 @@
     },
     {
       "workflow": "scoped client token shown once and revocation enforced",
+      "ok": true
+    },
+    {
+      "workflow": "real MCP handshake, initMAX notice, adaptive batches, preview, Linux registration and unverified keys",
+      "ok": true
+    },
+    {
+      "workflow": "Zabbix preview pagination",
+      "ok": true
+    },
+    {
+      "workflow": "diagnostic category and parameter guidance",
       "ok": true
     },
     {

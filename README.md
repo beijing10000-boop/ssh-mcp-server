@@ -2,9 +2,9 @@
 
 > 独立部署、中文优先、免 Agent 的 Linux SSH 诊断服务。默认 Web/MCP 端口 **9099**。
 
-**当前版本：v0.2.0（待真实环境联调）**
+**当前版本：v0.3.0（待真实环境联调）**
 
-主机资产、公钥核验、诊断任务与 MCP 授权集中管理。新增 6 类诊断、后台批量执行、可取消的任务、加密历史和按主机组/动作授权的客户端令牌。
+从 Zabbix MCP 分批发现 Linux 资产，保留 Host ID 与主机组；通过页面预览登记、绑定凭据、公钥核验与 SSH 测试完成接入。提供 32 类只读诊断、39 个 MCP 工具、后台批量任务与客户端范围授权。
 
 ![运维总览：截图使用隔离测试资产](docs/screenshots/overview-1440.png)
 
@@ -48,21 +48,23 @@ docker compose exec ssh-mcp cat /app/data/bootstrap.token
 
 需开放给可信内网时，在项目目录创建 `.env`，并设置 `WEB_BIND_IP=内网绑定IP`；建议同时通过防火墙限制允许访问的源地址。
 
-请阅读 [安装部署](docs/INSTALLATION.md)、[v0.2 升级与验证](docs/RELEASE-v0.2.md)、[架构评估](docs/ARCHITECTURE.md)、[AI 平台改造方案](docs/AI-PLATFORM-INTEGRATION.md)、[MCP 接入](docs/MCP.md)、[安全说明](docs/SECURITY.md)、[目录与 IP 流量分析](docs/INSIGHTS.md)。
+请先阅读 [v0.3 优化与升级说明](docs/RELEASE-v0.3.md)，以及 [安装部署](docs/INSTALLATION.md)、[v0.2 升级与验证](docs/RELEASE-v0.2.md)、[架构评估](docs/ARCHITECTURE.md)、[AI 平台改造方案](docs/AI-PLATFORM-INTEGRATION.md)、[MCP 接入](docs/MCP.md)、[安全说明](docs/SECURITY.md)、[目录与 IP 流量分析](docs/INSIGHTS.md)。
 
 ## 核心能力
 
 | 能力 | 说明 |
 | --- | --- |
 | 中文 Web | 深浅主题、资产分页/搜索/分组筛选、跨页选择、任务与审计分页 |
-| 批量管理 | 最多 1000 台 JSON 原子导入、批量启停、按筛选选择；失败整批回滚 |
+| 批量管理 | 最多 1000 台表格粘贴/API 原子导入、批量启停、按筛选选择；失败整批回滚 |
+| Zabbix 资产同步 | MCP 连接验证、Linux 筛选、精简 ID 索引、自适应详情拆批、原始分组和 Host ID 关联、登记预览 |
+| 接入验证 | 批量绑定 SSH 凭据、账号和跳板；公钥核验后批量测试，清楚显示逐台准备状态 |
 | 主机公钥获取 | 支持批量探测 + SHA256 指纹审核确认，绝不自动信任 |
-| SSH 诊断 | 20 类固定诊断；新增综合快照、命令能力、RSS 进程、失败服务、容器状态、内核告警 |
+| SSH 诊断 | 32 类固定诊断；包含 PSI、OOM、NTP、服务/timer、块设备、挂载、安全组件与容器资源 |
 | 诊断任务 | 每批最多 100 台、4 个 SSH 执行名额、200 个待执行任务上限、取消/重试/加密历史 |
 | 目录空间排行 | 对 /data、/var 等安全路径执行限时一层 du，占用空间从大到小排序 |
 | IP 连接数排行 | 从 ss 统计当前远端 IP 的 TCP 连接总数和已建立数量 |
 | IP 流量采样 | 使用 ss -ti 的 TCP 字节计数做约 3 秒同连接增量排名（有明确覆盖限制） |
-| MCP 工具 | 22 个工具；增加 Zabbix Host ID 精确解析与可选主机版本校验 |
+| MCP 工具 | 39 个工具；Host ID 精确解析、版本校验、后台批量诊断、任务查询与取消 |
 | 访问控制 | 每客户端限定主机组和诊断动作、有效期 1–365 天、独立撤销；旧全局令牌可停用 |
 | 部署 | 单容器 + SQLite，独立端口 9099，日志轮转 |
 

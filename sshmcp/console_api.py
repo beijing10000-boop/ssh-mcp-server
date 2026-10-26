@@ -26,6 +26,10 @@ def where_hosts(q="", group_id=None, status="all"):
         "ready": "enabled=1 AND host_key!='' AND credential_id IS NOT NULL",
         "failed": "last_status='failed'",
         "enabled": "enabled=1",
+        "missing_credential": "asset_type='linux' AND credential_id IS NULL",
+        "untested": "enabled=1 AND host_key!='' AND credential_id IS NOT NULL AND last_status='untested'",
+        "verified": "enabled=1 AND asset_type='linux' AND last_status='success' AND host_key!='' AND credential_id IS NOT NULL",
+        "unsupported": "asset_type!='linux'",
     }
     if status in rules:
         clauses.append(rules[status])
@@ -122,6 +126,59 @@ class EnableIn(BaseModel):
     enabled: StrictBool
 
 
+class AccessIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    host_ids: list[StrictInt] = Field(min_length=1, max_length=1000)
+    credential_id: StrictInt = Field(ge=1)
+    username: str = Field(min_length=1, max_length=32)
+    port: StrictInt = Field(default=22, ge=1, le=65535)
+    proxy_id: StrictInt | None = Field(default=None, ge=1)
+
+
+@router.post("/hosts/bulk-access")
+def bind_access(body: AccessIn, actor=Depends(admin)):
+    try:
+        username = store.username(body.username)
+        ids = sorted(set(body.host_ids))
+        with store.db() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if not c.execute(
+                "SELECT 1 FROM credentials WHERE id=?", (body.credential_id,)
+            ).fetchone():
+                raise ValueError("SSH 凭据不存在")
+            if (
+                body.proxy_id
+                and not c.execute(
+                    "SELECT 1 FROM proxies WHERE id=?", (body.proxy_id,)
+                ).fetchone()
+            ):
+                raise ValueError("跳板不存在")
+            for ident in ids:
+                row = c.execute("SELECT * FROM hosts WHERE id=?", (ident,)).fetchone()
+                if not row or row["asset_type"] != "linux":
+                    raise ValueError("所选资产包含不存在或非 Linux 的主机")
+                moved = row["port"] != body.port or row["proxy_id"] != body.proxy_id
+                c.execute(
+                    "UPDATE hosts SET credential_id=?,username=?,port=?,proxy_id=?,host_key=CASE WHEN ? THEN '' ELSE host_key END,last_status='untested',revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (
+                        body.credential_id,
+                        username,
+                        body.port,
+                        body.proxy_id,
+                        moved,
+                        ident,
+                    ),
+                )
+                if moved:
+                    c.execute(
+                        "DELETE FROM host_key_candidates WHERE host_id=?", (ident,)
+                    )
+        store.audit(actor, "hosts_bind_access", str(len(ids)), "success")
+        return {"count": len(ids)}
+    except Exception as exc:
+        fail(exc)
+
+
 @router.post("/hosts/bulk-enabled")
 def enable_hosts(body: EnableIn, actor=Depends(admin)):
     ids = list(dict.fromkeys(body.host_ids))
@@ -132,6 +189,16 @@ def enable_hosts(body: EnableIn, actor=Depends(admin)):
             "SELECT COUNT(*) FROM hosts WHERE id IN (" + slots + ")", ids
         ).fetchone()[0] != len(ids):
             raise HTTPException(404, "所选主机中包含不存在的资产")
+        if (
+            body.enabled
+            and c.execute(
+                "SELECT 1 FROM hosts WHERE id IN ("
+                + slots
+                + ") AND asset_type!='linux'",
+                ids,
+            ).fetchone()
+        ):
+            raise HTTPException(422, "非 Linux 资产暂不支持启用 SSH 诊断")
         c.execute(
             "UPDATE hosts SET enabled=?,revision=revision+1,last_status='untested' WHERE id IN ("
             + slots

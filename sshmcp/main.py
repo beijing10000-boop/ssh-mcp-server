@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from . import store, access, jobs, console_api
+from . import store, access, jobs, console_api, zabbix
 from .api import router
 from .auth import router as auth_router, trusted_origin
 from .mcp_tools import mcp
@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Linux 智能诊断 MCP 服务器",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -39,6 +39,7 @@ app.include_router(router)
 app.include_router(access.router)
 app.include_router(jobs.router)
 app.include_router(console_api.router)
+app.include_router(zabbix.router)
 
 
 @app.middleware("http")
@@ -76,7 +77,7 @@ async def secure_transport(request: Request, call_next):
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "version": "0.2.0", "service": "ssh-mcp-server"}
+    return {"ok": True, "version": "0.3.0", "service": "ssh-mcp-server"}
 
 
 @app.get("/setup")
@@ -114,6 +115,13 @@ def css():
 @app.get("/static/app.js")
 def js():
     return FileResponse(STATIC_DIR / "app.js", media_type="application/javascript")
+
+
+@app.get("/static/inventory.js")
+def inventory_js():
+    return FileResponse(
+        STATIC_DIR / "inventory.js", media_type="application/javascript"
+    )
 
 
 # Keep this final: Mount('/') matches every route after it.

@@ -163,3 +163,24 @@ def test_running_cancellation_closes_real_ssh(target):
     with pytest.raises(diagnostics.SSHDiagnosticError, match="取消"):
         diagnostics.execute(host, "connection", cancelled=server.executed.is_set)
     assert time.monotonic() - started < 4
+
+
+@pytest.mark.parametrize(
+    "tool,fragment,extra",
+    [
+        ("ssh_diagnose_pressure", "/proc/pressure/", {}),
+        ("ssh_diagnose_system_errors", "'-5 min'", {"minutes": 5}),
+        ("ssh_diagnose_container_stats", "stats --no-stream", {}),
+    ],
+)
+def test_new_tools_use_pinned_ssh_and_persist_redacted_output(
+    client, target, tool, fragment, extra
+):
+    host, server = target
+    status, result = mcp_call(
+        client, store.token("mcp.token"), tool, {"host_id": host, **extra}
+    )
+    assert status == 200 and result["status"] == "success"
+    assert fragment in server.command
+    assert "wire-fixture-secret" not in result["output"]
+    assert result["captured_at"] and result["job_id"]

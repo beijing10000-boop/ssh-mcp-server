@@ -54,6 +54,13 @@ def create(
             ).fetchone()
             if not row or not row["host_key"] or not row["credential_id"]:
                 raise ValueError(f"主机 {host_id} 未启用、未核验公钥或未绑定凭据")
+            if row["asset_type"] != "linux":
+                raise ValueError(f"资产 {host_id} 不是 Linux，不能执行 SSH 诊断")
+            if (
+                row["mode"] == "gateway"
+                and request["action"] in diagnostics.STANDARD_ONLY
+            ):
+                raise ValueError("此动作需要标准 SSH 模式；受限网关尚不支持")
             if expected_revisions is not None and row[
                 "revision"
             ] != expected_revisions.get(host_id):
@@ -124,6 +131,30 @@ def work(ident):
 
             if job["actor"] not in admins():
                 raise PermissionError("提交者已失去管理权限")
+        else:
+            # Background MCP tasks must re-check live scope, expiry and revoke
+            # state; a credential may change while its task waits in the queue.
+            from . import access
+            import time
+
+            client_id = job["actor"].removeprefix("mcp:")
+            if client_id == "legacy":
+                if not access.legacy_enabled():
+                    raise PermissionError("原始 MCP 令牌已停用")
+            else:
+                with store.db() as c:
+                    current = c.execute(
+                        "SELECT * FROM mcp_clients WHERE id=? AND enabled=1 AND expires_at>?",
+                        (client_id, int(time.time())),
+                    ).fetchone()
+                    if not current or job["action"] not in json.loads(
+                        current["actions"]
+                    ):
+                        raise PermissionError("MCP 客户端已撤销、到期或动作不再授权")
+                    if not current["all_hosts"] and not set(
+                        store.groups_for(job["host_id"])
+                    ) & set(json.loads(current["group_ids"])):
+                        raise PermissionError("主机已不在 MCP 客户端授权范围内")
         result = diagnostics.execute(
             job["host_id"],
             **request,

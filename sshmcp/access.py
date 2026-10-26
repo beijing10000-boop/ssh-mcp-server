@@ -81,7 +81,7 @@ class ClientIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     all_hosts: StrictBool = False
     group_ids: list[StrictInt] = Field(default_factory=list, max_length=100)
-    actions: list[str] = Field(min_length=1, max_length=30)
+    actions: list[str] = Field(min_length=1, max_length=100)
     valid_days: StrictInt = Field(default=90, ge=1, le=365)
 
 

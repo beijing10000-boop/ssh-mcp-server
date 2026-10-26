@@ -27,6 +27,26 @@ with socket.socket() as sock:
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
 base = f"http://127.0.0.1:{port}"
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0))
+    zabbix_port = sock.getsockname()[1]
+zabbix_log = Path("/tmp/sshmcp-zabbix-fixture.log").open("w")
+zabbix_server = subprocess.Popen(
+    [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "tests.zabbix_fixture:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(zabbix_port),
+    ],
+    cwd=ROOT,
+    env={**os.environ, "SSHMCP_UI_TEST": "1"},
+    stdout=zabbix_log,
+    stderr=zabbix_log,
+)
 log = Path("/tmp/sshmcp-browser-test.log").open("w")
 server = subprocess.Popen(
     [
@@ -40,7 +60,11 @@ server = subprocess.Popen(
         str(port),
     ],
     cwd=ROOT,
-    env={**os.environ, "SSHMCP_UI_TEST": "1"},
+    env={
+        **os.environ,
+        "SSHMCP_UI_TEST": "1",
+        "SSHMCP_ZABBIX_FIXTURE": f"http://127.0.0.1:{zabbix_port}/mcp",
+    },
     stdout=log,
     stderr=log,
 )
@@ -83,6 +107,7 @@ try:
                 "overview",
                 "hosts",
                 "groups",
+                "zabbix",
                 "credentials",
                 "proxies",
                 "keys",
@@ -209,6 +234,52 @@ try:
                 "ok": True,
             }
         )
+        navigate("zabbix")
+        page.locator(".connection-settings summary").click()
+        page.locator('[data-action="zabbix-test"]').click()
+        page.locator("#zabbix-feedback").get_by_text(
+            "MCP 握手、主机组读取和主机计数均已通过", exact=False
+        ).wait_for(timeout=15000)
+        assert page.locator(".zabbix-group-check:checked").count() == 1
+        before_count = len(page.request.get(base + "/api/v1/hosts").json())
+        page.locator("#zabbix-discover-form button[type=submit]").click()
+        page.locator(".sync-progress .status.preview").wait_for(timeout=30000)
+        assert len(page.request.get(base + "/api/v1/hosts").json()) == before_count
+        page.locator("#zabbix-register-form [name=credential_id]").select_option("1")
+        page.locator("#zabbix-register-form [name=register_all]").click()
+        page.locator("#zabbix-register-result").get_by_text(
+            "本次登记 28 台", exact=False
+        ).wait_for(timeout=15000)
+        after = page.request.get(base + "/api/v1/hosts").json()
+        imported = [
+            h
+            for h in after
+            if h["zabbix_hostid"] and h["zabbix_hostid"].startswith("200")
+        ]
+        assert len(imported) == 28 and all(
+            not h["has_host_key"] and h["port"] == 22 and h["credential_id"] == 1
+            for h in imported
+        )
+        checks.append(
+            {
+                "workflow": "real MCP handshake, initMAX notice, adaptive batches, preview, Linux registration and unverified keys",
+                "ok": True,
+            }
+        )
+        page.locator('[data-action="page-next"][data-id="zabbix"]').click()
+        page.locator(".pagination").get_by_text("第 2 / 2 页", exact=False).wait_for()
+        checks.append({"workflow": "Zabbix preview pagination", "ok": True})
+        page.screenshot(path=str(OUT / "zabbix-1440.png"), full_page=True)
+        navigate("diagnostics")
+        page.locator('[data-action="tool-category"][data-id="服务与日志"]').click()
+        page.locator('[data-action="choose-tool"][data-id="oom"]').click()
+        assert page.locator("#diagnostic-form [name=action]").input_value() == "oom"
+        assert page.locator("#diagnostic-form [name=minutes]").is_visible()
+        assert page.locator("#diagnostic-form [name=service]").is_hidden()
+        checks.append(
+            {"workflow": "diagnostic category and parameter guidance", "ok": True}
+        )
+        page.locator('[data-action="tool-category"][data-id="全部"]').click()
         for name in ("overview", "hosts", "diagnostics", "clients"):
             navigate(name)
             page.evaluate("document.fonts.ready")
@@ -238,6 +309,9 @@ try:
         )
     )
 finally:
+    zabbix_server.terminate()
+    zabbix_server.wait(timeout=10)
+    zabbix_log.close()
     server.terminate()
     server.wait(timeout=10)
     log.close()

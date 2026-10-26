@@ -36,7 +36,12 @@ def ssh_list_hosts(query: str = "", offset: int = 0, limit: int = 100) -> list[d
     ):
         raise ValueError("主机搜索或分页参数无效")
     who = access.identity()
-    clauses = ["enabled=1", "host_key!=''", "credential_id IS NOT NULL"]
+    clauses = [
+        "enabled=1",
+        "asset_type='linux'",
+        "host_key!=''",
+        "credential_id IS NOT NULL",
+    ]
     values = []
     if query:
         clauses.append("(instr(lower(name),lower(?))>0 OR zabbix_hostid=?)")
@@ -286,3 +291,182 @@ def _run(
             "status": "failed",
             "error": diagnostics.redact_output(error)[:250],
         }
+
+
+@mcp.tool(annotations=READ_ONLY)
+def ssh_diagnose_pressure(host_id: int, expected_revision: int | None = None) -> dict:
+    """读取内核 PSI CPU/内存/I/O 压力；旧内核不支持时返回能力缺失。"""
+    return _run(host_id, "pressure", expected_revision=expected_revision)
+
+
+@mcp.tool(annotations=READ_ONLY)
+def ssh_diagnose_resource_limits(
+    host_id: int, expected_revision: int | None = None
+) -> dict:
+    """读取系统文件句柄、PID 上限及当前 SSH shell 限制，不代表业务进程限制。"""
+    return _run(host_id, "resource_limits", expected_revision=expected_revision)
+
+
+@mcp.tool(annotations=READ_ONLY)
+def ssh_diagnose_mounts(host_id: int, expected_revision: int | None = None) -> dict:
+    """读取文件系统类型与只读挂载，不返回可能含凭据的挂载选项。"""
+    return _run(host_id, "mount_health", expected_revision=expected_revision)
+
+
+@mcp.tool(annotations=READ_ONLY)
+def ssh_diagnose_block_devices(
+    host_id: int, expected_revision: int | None = None
+) -> dict:
+    """读取块设备类型、容量、只读状态与挂载位置，不更改磁盘。"""
+    return _run(host_id, "block_devices", expected_revision=expected_revision)
+
+
+@mcp.tool(annotations=READ_ONLY)
+def ssh_diagnose_time_sync(host_id: int, expected_revision: int | None = None) -> dict:
+    """读取系统时间、NTP 同步状态及可用的 chrony 跟踪信息。"""
+    return _run(host_id, "time_sync", expected_revision=expected_revision)
+
+
+@mcp.tool(annotations=READ_ONLY)
+def ssh_diagnose_tcp_states(host_id: int, expected_revision: int | None = None) -> dict:
+    """统计 TCP 各状态连接数量，定位 TIME-WAIT/CLOSE-WAIT 等积压线索。"""
+    return _run(host_id, "tcp_states", expected_revision=expected_revision)
+
+
+@mcp.tool(annotations=READ_ONLY)
+def ssh_diagnose_service_inventory(
+    host_id: int, expected_revision: int | None = None
+) -> dict:
+    """读取最多 100 行 systemd 服务清单，包含当前状态，不启动或重启服务。"""
+    return _run(host_id, "service_inventory", expected_revision=expected_revision)
+
+
+@mcp.tool(annotations=READ_ONLY)
+def ssh_diagnose_timers(host_id: int, expected_revision: int | None = None) -> dict:
+    """读取最多 80 行 systemd timer 的上次/下次运行，不读取用户 cron 脚本。"""
+    return _run(host_id, "timers", expected_revision=expected_revision)
+
+
+@mcp.tool(annotations=READ_ONLY)
+def ssh_diagnose_system_errors(
+    host_id: int, minutes: int = 30, expected_revision: int | None = None
+) -> dict:
+    """读取最近 1–120 分钟内最多 100 行 warning 及以上系统日志，输出会脱敏。"""
+    return _run(
+        host_id, "log_errors", minutes=minutes, expected_revision=expected_revision
+    )
+
+
+@mcp.tool(annotations=READ_ONLY)
+def ssh_diagnose_oom(
+    host_id: int, minutes: int = 30, expected_revision: int | None = None
+) -> dict:
+    """从最近 1–120 分钟最多 300 行内核日志筛选 OOM 线索；没有匹配不代表没有发生 OOM。"""
+    return _run(host_id, "oom", minutes=minutes, expected_revision=expected_revision)
+
+
+@mcp.tool(annotations=READ_ONLY)
+def ssh_diagnose_container_stats(
+    host_id: int, expected_revision: int | None = None
+) -> dict:
+    """限时采集 Docker/Podman 容器 CPU、内存、网络与块 I/O 当前数据，不读取环境变量。"""
+    return _run(host_id, "container_stats", expected_revision=expected_revision)
+
+
+@mcp.tool(annotations=READ_ONLY)
+def ssh_diagnose_security_status(
+    host_id: int, expected_revision: int | None = None
+) -> dict:
+    """读取 SELinux、AppArmor 及防火墙服务状态；不是完整安全合规检查。"""
+    return _run(host_id, "security_status", expected_revision=expected_revision)
+
+
+@mcp.tool(annotations=READ_ONLY)
+def ssh_list_tool_catalog() -> list[dict]:
+    """按分类列出当前客户端获准使用的诊断动作及参数要求。"""
+    from .catalog import entries
+
+    who = access.identity()
+    return [e for e in entries() if e["id"] in who["actions"]]
+
+
+@mcp.tool(annotations=READ_ONLY)
+def ssh_list_groups() -> list[dict]:
+    """列出当前客户端授权主机组的 ID 与名称，不返回其他组。"""
+    who = access.identity()
+    with store.db() as c:
+        return [
+            dict(r)
+            for r in c.execute("SELECT id,name FROM groups ORDER BY name")
+            if who["all_hosts"] or r["id"] in who["group_ids"]
+        ]
+
+
+JOB_CONTROL = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+)
+
+
+@mcp.tool(annotations=JOB_CONTROL)
+def ssh_submit_diagnostics(
+    host_ids: list[int],
+    action: str = "health",
+    service: str | None = None,
+    minutes: int = 30,
+    directory_root: str | None = None,
+) -> dict:
+    """对 1–100 台授权主机提交后台只读诊断，返回任务 ID；使用 ssh_get_diagnostic_job 逐项查看结果。"""
+    if (
+        not host_ids
+        or len(host_ids) > 100
+        or any(type(h) is not int or h < 1 for h in host_ids)
+    ):
+        raise ValueError("请选择 1–100 台主机")
+    actor = None
+    for host_id in host_ids:
+        actor = access.enforce(host_id, action)
+    return jobs.create(
+        host_ids,
+        jobs._request(action, service, minutes, directory_root),
+        actor,
+        source="mcp",
+    )
+
+
+def _owned_job(job_id):
+    import re
+
+    if not re.fullmatch(r"[a-f0-9]{32}", job_id):
+        raise ValueError("任务 ID 格式无效")
+    job = jobs.detail(job_id)
+    who = access.identity()
+    if job["actor"] != "mcp:" + who["id"]:
+        raise PermissionError("只能访问当前客户端提交的诊断任务")
+    access.enforce(job["host_id"], job["action"])
+    return job
+
+
+@mcp.tool(annotations=READ_ONLY)
+def ssh_get_diagnostic_job(job_id: str) -> dict:
+    """查询当前客户端提交且仍在授权范围内的任务状态和采集结果。"""
+    job = _owned_job(job_id)
+    return {
+        k: job[k]
+        for k in (
+            "id",
+            "host_id",
+            "action",
+            "status",
+            "created_at",
+            "completed_at",
+            "error",
+            "result",
+        )
+    }
+
+
+@mcp.tool(annotations=JOB_CONTROL)
+def ssh_cancel_diagnostic_job(job_id: str) -> dict:
+    """取消当前客户端自己的排队/运行诊断；已采集数据保留，不修改目标主机。"""
+    job = _owned_job(job_id)
+    return jobs.cancel(job_id, actor=job["actor"])

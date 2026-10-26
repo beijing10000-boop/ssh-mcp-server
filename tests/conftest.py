@@ -1,3 +1,5 @@
+import io
+import paramiko
 import pytest
 from fastapi.testclient import TestClient
 from sshmcp import store
@@ -23,6 +25,10 @@ def reset_tables(client):
     client.cookies.clear()
     with store.db() as c:
         for table in (
+            "zabbix_sync_items",
+            "zabbix_sync_runs",
+            "zabbix_memberships",
+            "zabbix_groups",
             "diagnostic_jobs",
             "mcp_clients",
             "scan_results",
@@ -64,3 +70,11 @@ def reset_tables(client):
             ),
         )
     client.cookies.set(COOKIE, "test-session")
+
+
+@pytest.fixture(scope="session")
+def key_pair():
+    key = paramiko.RSAKey.generate(2048)
+    stream = io.StringIO()
+    key.write_private_key(stream)
+    return stream.getvalue(), "ssh-rsa " + key.get_base64()

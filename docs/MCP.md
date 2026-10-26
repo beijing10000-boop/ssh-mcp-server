@@ -51,10 +51,27 @@
 | ssh_diagnose_directory_usage | 白名单目录下一级空间排行，8 秒限时，支持逐层深入 |
 | ssh_diagnose_peer_connections | 当前远端 IP TCP 连接数 Top 50 |
 | ssh_diagnose_peer_traffic | 约 3 秒同一 TCP socket 的发送、接收字节增量 Top 30 |
+| ssh_diagnose_pressure | CPU/内存/I/O PSI 压力 |
+| ssh_diagnose_resource_limits | 文件句柄、PID 与当前 SSH shell 限制 |
+| ssh_diagnose_mounts | 挂载类型与只读文件系统 |
+| ssh_diagnose_block_devices | 块设备结构 |
+| ssh_diagnose_time_sync | 时间与 NTP/chrony 状态 |
+| ssh_diagnose_tcp_states | TCP 状态分布 |
+| ssh_diagnose_service_inventory | 系统服务清单 |
+| ssh_diagnose_timers | systemd timer 上次和下次运行 |
+| ssh_diagnose_system_errors | 有限时间内的系统告警日志 |
+| ssh_diagnose_oom | 有限内核日志中的 OOM 线索 |
+| ssh_diagnose_container_stats | Docker/Podman 当前资源数据 |
+| ssh_diagnose_security_status | 安全组件状态 |
+| ssh_list_tool_catalog | 当前客户端授权的诊断目录与参数要求 |
+| ssh_list_groups | 当前客户端获授权的主机组 |
+| ssh_submit_diagnostics | 每批 1–100 台授权主机，后台执行固定只读诊断 |
+| ssh_get_diagnostic_job | 查询自己提交且仍有权访问的任务 |
+| ssh_cancel_diagnostic_job | 取消自己提交且仍有权访问的任务 |
 
-共 22 个工具（20 类诊断 + 列表/映射）。`ssh_list_hosts` 支持 query、offset、limit（最多 1000），只返回当前客户端可访问且已就绪的资产。所有执行操作**仅接受登记的数字 host_id**，支持可选的 `expected_revision`：建议 AI 平台始终传入解析时取得的版本，拒绝过期映射。即使模型请求任意 IP 或 shell 命令，服务端也没有对应工具。
+共 39 个工具（32 类诊断 + 资产/目录查询 + 后台任务管理）。`ssh_list_hosts` 支持 query、offset、limit（最多 1000），只返回当前客户端可访问且已就绪的资产。所有执行操作**仅接受登记的数字 host_id**，单项诊断支持可选的 `expected_revision`：建议 AI 平台始终传入解析时取得的版本，拒绝过期映射。即使模型请求任意 IP 或 shell 命令，服务端也没有对应工具。
 
-结果包含 `status=success|partial|failed|cancelled`；已创建的执行任务包含 `job_id`，可供管理员在 Web 查看。工具层面的 MCP `isError` 和结果里的 `status` 都需要检查。缺命令、读取权限不足、非零退出或输出截断不能解释为诊断成功。MCP 工具采用同步返回，客户端断连不保证立即取消远端任务。
+结果包含 `status=success|partial|failed|cancelled`；已创建的执行任务包含 `job_id`，可供管理员在 Web 查看。工具层面的 MCP `isError` 和结果里的 `status` 都需要检查。缺命令、读取权限不足、非零退出或输出截断不能解释为诊断成功。单项诊断同步返回；批量任务通过 ssh_submit_diagnostics 后台提交，再查询状态。客户端断连不保证立即取消远端任务。
 
 ## 接入 AI Ops Platform
 
@@ -71,3 +88,6 @@
 
 
 新增诊断数据的覆盖条件请参阅 [目录与 IP 流量分析](INSIGHTS.md)。不要把一次 TCP 采样误写成全协议或历史 IP 流量统计。
+
+
+v0.3 的 12 类新增诊断需要标准 SSH 模式；受限网关尚不支持。后台任务在执行前重新核对客户端授权。详情见 [v0.3 更新说明](RELEASE-v0.3.md)。
