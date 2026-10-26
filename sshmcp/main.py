@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Linux 智能诊断 MCP 服务器",
-    version="0.4.0",
+    version="0.4.1",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,

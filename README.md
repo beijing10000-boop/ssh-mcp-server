@@ -2,9 +2,9 @@
 
 > 独立部署、中文优先、免 Agent 的 Linux SSH 诊断服务。默认 Web/MCP 端口 **9099**。
 
-**当前版本：v0.4.0（待真实环境联调）**
+**当前版本：v0.4.1（待真实环境联调）**
 
-从 Zabbix MCP 分批发现 Linux 资产，保留 Host ID 与主机组；通过页面预览登记、绑定凭据、公钥核验与 SSH 测试完成接入。提供 32 类单项只读诊断、6 个固定组合场景、42 个 MCP 工具、后台批量任务与客户端范围授权。
+从 Zabbix MCP 分批发现 Linux 资产，保留 Host ID 与主机组；通过页面预览登记、绑定凭据、公钥核验与 SSH 测试完成接入。提供 32 类单项只读诊断、6 个固定组合场景、43 个 MCP 工具、后台批量任务与客户端范围授权。支持按已登记 IP 精确解析主机，实时诊断不依赖 Zabbix 在线或 Host ID 映射。
 
 ![运维总览：截图使用隔离测试资产](docs/screenshots/overview-1440.png)
 
@@ -17,6 +17,8 @@
 - **健康检查**：`GET /healthz`
 
 ## 安全设计
+
+v0.4.0 → v0.4.1 的升级与 Skill 接入见 [v0.4.1 说明](docs/RELEASE-v0.4.1.md)。
 
 - 首次初始化 Token 用于绑定飞书应用和指定管理员 Open ID；完成后 Web 只能通过飞书 OAuth 登录，MCP 独立使用 Bearer Token。
 - Web/API 使用飞书管理员会话、HttpOnly Cookie 与 CSRF 校验；MCP 使用独立客户端令牌，支持主机组、动作范围、到期与撤销。
