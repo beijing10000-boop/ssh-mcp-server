@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+from typing import Literal
 from functools import wraps
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
-from . import store, diagnostics, access, jobs
+from . import store, diagnostics, access, jobs, observations
 
 mcp = FastMCP(
     "Linux SSH 智能诊断",
@@ -30,16 +32,45 @@ READ_ONLY = ToolAnnotations(
 def offload(fn):
     """FastMCP must await tools; to_thread preserves the MCP ContextVar."""
 
+    summarized = fn.__name__.startswith("ssh_diagnose_") or fn.__name__ in {
+        "ssh_test_connection",
+        "ssh_triage",
+        "ssh_get_diagnostic_job",
+        "ssh_get_diagnostic_batch",
+    }
+
     @wraps(fn)
     async def run(*args, **kwargs):
-        return await asyncio.to_thread(fn, *args, **kwargs)
+        detail = kwargs.pop("detail", "summary") if summarized else None
+        if summarized and detail not in {"summary", "full"}:
+            raise ValueError("detail 必须为 summary 或 full")
+        result = await asyncio.to_thread(fn, *args, **kwargs)
+        return observations.present(result, detail) if summarized else result
 
+    if summarized:
+        signature = inspect.signature(fn, eval_str=True)
+        run.__signature__ = signature.replace(
+            parameters=[
+                *signature.parameters.values(),
+                inspect.Parameter(
+                    "detail",
+                    inspect.Parameter.KEYWORD_ONLY,
+                    default="summary",
+                    annotation=Literal["summary", "full"],
+                ),
+            ]
+        )
+        run.__doc__ = (
+            fn.__doc__ or ""
+        ) + " detail 默认 summary 返回结构化摘要/findings；full 另带可用的脱敏原文。"
     return run
 
 
 @mcp.tool(annotations=READ_ONLY)
 @offload
-def ssh_list_hosts(query: str = "", offset: int = 0, limit: int = 100) -> list[dict]:
+def ssh_list_hosts(
+    query: str = "", offset: int = 0, limit: int = 100, group_id: int | None = None
+) -> list[dict]:
     """列出当前启用且已经审核的 Linux SSH 主机，返回 ID、名称、Host ID 与连接状态，不暴露密钥。"""
     if (
         len(query) > 160
@@ -49,6 +80,8 @@ def ssh_list_hosts(query: str = "", offset: int = 0, limit: int = 100) -> list[d
         or not 1 <= limit <= 1000
     ):
         raise ValueError("主机搜索或分页参数无效")
+    if group_id is not None and (type(group_id) is not int or group_id < 1):
+        raise ValueError("主机组 ID 无效")
     who = access.identity()
     clauses = [
         "enabled=1",
@@ -58,8 +91,15 @@ def ssh_list_hosts(query: str = "", offset: int = 0, limit: int = 100) -> list[d
     ]
     values = []
     if query:
-        clauses.append("(instr(lower(name),lower(?))>0 OR zabbix_hostid=?)")
-        values.extend((query, query))
+        clauses.append(
+            "(instr(lower(name),lower(?))>0 OR instr(address,?)>0 OR zabbix_hostid=?)"
+        )
+        values.extend((query, query, query))
+    if group_id is not None:
+        if not who["all_hosts"] and group_id not in who["group_ids"]:
+            raise PermissionError("当前客户端无权访问此主机组")
+        clauses.append("id IN (SELECT host_id FROM host_groups WHERE group_id=?)")
+        values.append(group_id)
     if not who["all_hosts"]:
         clauses.append(
             "id IN (SELECT host_id FROM host_groups WHERE group_id IN ("
@@ -74,13 +114,38 @@ def ssh_list_hosts(query: str = "", offset: int = 0, limit: int = 100) -> list[d
             + " ORDER BY id LIMIT ? OFFSET ?",
             (*values, limit, offset),
         ).fetchall()
-    return [dict(r) for r in rows]
+        group_rows = (
+            c.execute(
+                "SELECT hg.host_id,g.id,g.name FROM host_groups hg JOIN groups g ON g.id=hg.group_id WHERE hg.host_id IN ("
+                + ",".join("?" for _ in rows)
+                + ")",
+                [r["id"] for r in rows],
+            ).fetchall()
+            if rows
+            else []
+        )
+    return [
+        {
+            **dict(r),
+            "groups": [
+                {"id": g["id"], "name": g["name"]}
+                for g in group_rows
+                if g["host_id"] == r["id"]
+                and (who["all_hosts"] or g["id"] in who["group_ids"])
+            ],
+        }
+        for r in rows
+    ]
 
 
 @mcp.tool(annotations=READ_ONLY)
 @offload
 def ssh_resolve_host(zabbix_hostid: str) -> dict:
     """按数字 Zabbix Host ID 精确查找授权主机；禁止使用名称或 IP 推测关联，重复映射会拒绝。"""
+    return _resolve_host(zabbix_hostid)
+
+
+def _resolve_host(zabbix_hostid):
     import re
 
     if not re.fullmatch(r"[0-9]{1,32}", zabbix_hostid):
@@ -284,6 +349,7 @@ def _run(
     minutes: int = 30,
     directory_root: str | None = None,
     expected_revision: int | None = None,
+    symptom: str | None = None,
 ) -> dict:
     try:
         if type(host_id) is not int or host_id < 1:
@@ -301,6 +367,7 @@ def _run(
             minutes,
             directory_root,
             expected_revision=expected_revision,
+            symptom=symptom,
         )
         return result
     except Exception as exc:
@@ -465,6 +532,7 @@ def ssh_submit_diagnostics(
     minutes: int = 30,
     directory_root: str | None = None,
     strict: bool = False,
+    symptom: str | None = None,
 ) -> dict:
     """对 1–100 台授权主机提交后台只读诊断，返回任务 ID；使用 ssh_get_diagnostic_job 逐项查看结果。"""
     if (
@@ -495,7 +563,7 @@ def ssh_submit_diagnostics(
         }
     result = jobs.create(
         allowed,
-        jobs._request(action, service, minutes, directory_root),
+        jobs._request(action, service, minutes, directory_root, symptom),
         actor,
         source="mcp",
         strict=strict,
@@ -543,3 +611,53 @@ def ssh_cancel_diagnostic_job(job_id: str) -> dict:
     """取消当前客户端自己的排队/运行诊断；已采集数据保留，不修改目标主机。"""
     job = _owned_job(job_id)
     return jobs.cancel(job_id, actor=job["actor"])
+
+
+@mcp.tool(annotations=READ_ONLY)
+@offload
+def ssh_triage(
+    host_id: int,
+    symptom: str,
+    service: str | None = None,
+    minutes: int = 30,
+    expected_revision: int | None = None,
+) -> dict:
+    """同一 SSH 会话顺序执行固定组合。symptom: cpu_high/mem_high/disk_full/io_slow/service_down/network。需独立 triage 授权；service_down 必须指定服务。"""
+    return _run(
+        host_id,
+        "triage",
+        service=service,
+        minutes=minutes,
+        expected_revision=expected_revision,
+        symptom=symptom,
+    )
+
+
+@mcp.tool(annotations=READ_ONLY)
+@offload
+def ssh_resolve_hosts(zabbix_hostids: list[str]) -> dict:
+    """批量按精确 Zabbix Host ID 解析，最多 100 个；逐项返回映射或不可用原因。"""
+    if not zabbix_hostids or len(zabbix_hostids) > 100:
+        raise ValueError("请选择 1–100 个 Host ID")
+    access.identity()
+    return {
+        "items": [
+            {"zabbix_hostid": ident, **_resolve_host(ident)}
+            for ident in dict.fromkeys(zabbix_hostids)
+        ]
+    }
+
+
+@mcp.tool(annotations=READ_ONLY)
+@offload
+def ssh_get_diagnostic_batch(batch_id: str, page: int = 1, page_size: int = 25) -> dict:
+    """分页查看本客户端提交的批次计数、逐主机状态与 findings；再次检查当前授权，默认不带原文。"""
+    who = access.identity()
+    batch = jobs.batch_detail(batch_id, page, page_size, actor="mcp:" + who["id"])
+    with store.db() as c:
+        targets = c.execute(
+            "SELECT host_id,action FROM diagnostic_jobs WHERE batch_id=?", (batch_id,)
+        ).fetchall()
+    for host in targets:
+        access.enforce(host["host_id"], host["action"])
+    return batch

@@ -46,6 +46,11 @@ def cleanup():
                     days["diagnostic_days"],
                 ),
                 (
+                    "diagnostic_batches",
+                    "created_at < datetime('now',?) AND NOT EXISTS (SELECT 1 FROM diagnostic_jobs WHERE batch_id=diagnostic_batches.id)",
+                    days["diagnostic_days"],
+                ),
+                (
                     "scan_results",
                     "batch_id IN (SELECT id FROM scan_batches WHERE status!='running' AND created_at < datetime('now',?))",
                     days["scan_days"],

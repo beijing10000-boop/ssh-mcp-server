@@ -7,7 +7,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
-from . import diagnostics, store
+from . import diagnostics, store, observations
 from .auth import admin
 
 router = APIRouter(prefix="/api/v1/jobs")
@@ -21,16 +21,18 @@ class RunIn(BaseModel):
     service: str | None = Field(default=None, max_length=64)
     minutes: StrictInt = Field(default=30, ge=1, le=120)
     directory_root: str | None = Field(default=None, max_length=200)
+    symptom: str | None = None
     strict: bool = False
 
 
-def _request(action, service=None, minutes=30, directory_root=None):
-    diagnostics.command_for(action, service, minutes, directory_root)
+def _request(action, service=None, minutes=30, directory_root=None, symptom=None):
+    diagnostics.command_for(action, service, minutes, directory_root, symptom=symptom)
     return {
         "action": action,
         "service": service,
         "minutes": minutes,
         "directory_root": directory_root,
+        **({"symptom": symptom} if symptom is not None else {}),
     }
 
 
@@ -97,6 +99,15 @@ def create(
             )
             jobs.append(ident)
             accepted.append({"host_id": host_id, "job_id": ident})
+        c.execute(
+            "INSERT INTO diagnostic_batches(id,actor,source,skipped) VALUES (?,?,?,?)",
+            (
+                batch_id,
+                actor,
+                source,
+                store.seal(json.dumps(skipped, ensure_ascii=False)),
+            ),
+        )
     for ident in jobs:
         if background:
             try:
@@ -186,6 +197,16 @@ def work(ident, background=False):
             background=background,
             preflight=lambda: authorize(job),
         )
+        if "summary" not in result and job["action"] in observations.PARSERS:
+            result.update(
+                observations.analyze(
+                    job["action"],
+                    result.get("output", ""),
+                    data=result.get("data"),
+                    status=result["status"],
+                    truncated=result.get("truncated", False),
+                )
+            )
         status = result["status"]
     except Exception as exc:
         error = (
@@ -235,10 +256,11 @@ def run_inline(
     directory_root=None,
     source="mcp",
     expected_revision=None,
+    symptom=None,
 ):
     batch = create(
         [host_id],
-        _request(action, service, minutes, directory_root),
+        _request(action, service, minutes, directory_root, symptom),
         actor,
         source,
         background=False,
@@ -267,6 +289,100 @@ def detail(ident):
         json.loads(store.unseal(data["result"])) if data["result"] else None
     )
     return data
+
+
+def batch_detail(batch_id, page=1, page_size=25, *, actor=None):
+    import re
+
+    if not re.fullmatch(r"[a-f0-9]{32}", batch_id):
+        raise ValueError("批次 ID 格式无效")
+    if (
+        type(page) is not int
+        or page < 1
+        or type(page_size) is not int
+        or not 1 <= page_size <= 100
+    ):
+        raise ValueError("批次分页参数无效")
+    with store.db() as c:
+        batch = c.execute(
+            "SELECT * FROM diagnostic_batches WHERE id=?", (batch_id,)
+        ).fetchone()
+        if batch is None:
+            # Existing v0.3.1 batches have no parent row.
+            batch = c.execute(
+                "SELECT actor,source FROM diagnostic_jobs WHERE batch_id=? LIMIT 1",
+                (batch_id,),
+            ).fetchone()
+        if batch is None or actor is not None and batch["actor"] != actor:
+            raise PermissionError("批次不存在或不属于当前客户端")
+        rows = c.execute(
+            "SELECT id,status,actor FROM diagnostic_jobs WHERE batch_id=? ORDER BY rowid",
+            (batch_id,),
+        ).fetchall()
+        if actor is not None and any(r["actor"] != actor for r in rows):
+            raise PermissionError("批次不属于当前客户端")
+        counts = {
+            key: sum(r["status"] == key for r in rows)
+            for key in (
+                "queued",
+                "running",
+                "success",
+                "partial",
+                "failed",
+                "cancelled",
+            )
+        }
+    skipped = (
+        json.loads(store.unseal(batch["skipped"])) if "skipped" in batch.keys() else []
+    )
+    items = []
+    for row in rows[(page - 1) * page_size : page * page_size]:
+        job = detail(row["id"])
+        items.append(
+            {
+                k: job[k]
+                for k in (
+                    "id",
+                    "host_id",
+                    "host_name",
+                    "action",
+                    "status",
+                    "error",
+                    "created_at",
+                    "completed_at",
+                    "result",
+                )
+            }
+        )
+    for item in items:
+        item["findings"] = (item["result"] or {}).get("findings", [])
+    return {
+        "batch_id": batch_id,
+        "total": len(rows),
+        "skipped": skipped,
+        "counts": counts,
+        "completed": sum(
+            counts[k] for k in ("success", "partial", "failed", "cancelled")
+        ),
+        "page": page,
+        "page_size": page_size,
+        "items": items,
+    }
+
+
+@router.get("/batches/{batch_id}")
+def get_batch(
+    batch_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
+    actor=Depends(admin),
+):
+    try:
+        return batch_detail(batch_id, page, page_size)
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(
+            422 if isinstance(exc, ValueError) else 404, str(exc)
+        ) from None
 
 
 @router.post("", status_code=202)
