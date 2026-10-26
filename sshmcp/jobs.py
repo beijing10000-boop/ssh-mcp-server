@@ -208,6 +208,9 @@ def work(ident, background=False):
                 )
             )
         status = result["status"]
+        error = diagnostics.redact_output(
+            str(result.get("error") or result.get("stderr") or "")
+        )[:240]
     except Exception as exc:
         error = (
             diagnostics.redact_output(str(exc))[:240]
@@ -378,7 +381,7 @@ def get_batch(
     actor=Depends(admin),
 ):
     try:
-        return batch_detail(batch_id, page, page_size)
+        return observations.present(batch_detail(batch_id, page, page_size))
     except (ValueError, PermissionError) as exc:
         raise HTTPException(
             422 if isinstance(exc, ValueError) else 404, str(exc)
@@ -435,6 +438,49 @@ def listing(
         "page": page,
         "page_size": page_size,
     }
+
+
+@router.get("/status")
+def queue_status(actor=Depends(admin)):
+    with store.db() as c:
+        rows = dict(
+            c.execute(
+                "SELECT status,COUNT(*) FROM diagnostic_jobs WHERE status IN ('queued','running') GROUP BY status"
+            ).fetchall()
+        )
+    return {
+        **diagnostics.slot_usage(),
+        "queued": rows.get("queued", 0),
+        "running": rows.get("running", 0),
+        "pending": sum(rows.values()),
+        "queue_capacity": 200,
+    }
+
+
+@router.post("/batches/{batch_id}/retry-failed", status_code=202)
+def retry_failed(batch_id: str, actor=Depends(admin)):
+    try:
+        batch_detail(batch_id, 1, 1)
+        with store.db() as c:
+            rows = c.execute(
+                "SELECT id FROM diagnostic_jobs WHERE batch_id=? AND status='failed' ORDER BY rowid",
+                (batch_id,),
+            ).fetchall()
+            active = c.execute(
+                "SELECT 1 FROM diagnostic_jobs WHERE batch_id=? AND status IN ('queued','running')",
+                (batch_id,),
+            ).fetchone()
+        if active:
+            raise ValueError("批次尚未结束，请等待完成后重试失败项")
+        if not rows:
+            raise ValueError("本批次没有失败项")
+        items = [detail(r["id"]) for r in rows]
+        # A submitted batch uses one fixed action/request; reject malformed old batches.
+        if any(j["request"] != items[0]["request"] for j in items):
+            raise ValueError("批次参数不一致，请逐项重试")
+        return create([j["host_id"] for j in items], items[0]["request"], actor)
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(422, str(exc)) from None
 
 
 @router.get("/{job_id}")

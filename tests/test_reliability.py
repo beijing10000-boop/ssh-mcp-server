@@ -158,3 +158,49 @@ def test_firewall_script_labels_each_service(tmp_path):
         f"{name}: inactive" in result.stdout
         for name in ("firewalld", "nftables", "ufw")
     )
+
+
+def test_waiting_job_rechecks_revoked_client_before_ssh(client, key_pair, monkeypatch):
+    hid = ready_host(client, key_pair)
+    client_data = client.post(
+        "/api/v1/mcp/clients",
+        headers=auth(),
+        json={"name": "waiting-client", "all_hosts": True, "actions": ["cpu"]},
+    ).json()
+    monkeypatch.setattr(jobs.POOL, "submit", lambda *_: None)
+    task = jobs.create(
+        [hid], {"action": "cpu"}, "mcp:" + client_data["id"], source="mcp"
+    )["job_ids"][0]
+    checked = threading.Event()
+    original = jobs.authorize
+
+    def observe(job):
+        original(job)
+        checked.set()
+
+    monkeypatch.setattr(jobs, "authorize", observe)
+    monkeypatch.setattr(
+        diagnostics,
+        "_execute_inner",
+        lambda *a, **k: pytest.fail("revoked client reached SSH"),
+    )
+    with diagnostics._SLOTS:
+        diagnostics._ACTIVE_HOSTS.add(hid)
+    try:
+        with ThreadPoolExecutor() as pool:
+            worker = pool.submit(jobs.work, task, True)
+            assert checked.wait(2)
+            client.post(
+                f"/api/v1/mcp/clients/{client_data['id']}/revoke", headers=auth()
+            )
+            with diagnostics._SLOTS:
+                diagnostics._ACTIVE_HOSTS.remove(hid)
+                diagnostics._SLOTS.notify_all()
+            worker.result(timeout=3)
+    finally:
+        with diagnostics._SLOTS:
+            diagnostics._ACTIVE_HOSTS.discard(hid)
+            diagnostics._SLOTS.notify_all()
+    assert (
+        jobs.detail(task)["status"] == "failed" and "撤销" in jobs.detail(task)["error"]
+    )

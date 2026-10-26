@@ -7,6 +7,7 @@
     <title>Linux 智能诊断 MCP 服务器</title>
     <link rel="stylesheet" href="/static/app.css" />
     <script defer src="/static/inventory.js"></script>
+    <script defer src="/static/interactions.js"></script>
     <script defer src="/static/app.js"></script>
   </head>
   <body>
@@ -79,7 +80,14 @@
             <h1 id="page-title">运维总览</h1>
           </div>
           <div class="top-actions">
-            <span class="pill">独立 SSH 服务</span
+            <button
+              class="btn subtle"
+              id="task-indicator"
+              data-action="open-history"
+              type="button"
+              aria-label="全局任务状态"
+            >
+              正在读取任务状态</button
             ><button
               id="theme-toggle"
               class="btn subtle"
@@ -93,6 +101,19 @@
         <section id="content" aria-live="polite"></section>
       </main>
     </div>
+    <dialog id="action-confirm" aria-labelledby="action-confirm-title">
+      <form method="dialog">
+        <h2 id="action-confirm-title">确认操作范围</h2>
+        <p id="action-confirm-message"></p>
+        <div class="modal-actions">
+          <button class="btn" value="cancel">取消</button
+          ><button class="btn primary" value="confirm">确认执行</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="host-drawer" class="host-drawer" aria-label="主机详情">
+      <div id="host-drawer-content"></div>
+    </dialog>
     <dialog id="editor">
       <form id="editor-form">
         <div class="modal-title">

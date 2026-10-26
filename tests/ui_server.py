@@ -74,6 +74,23 @@ with store.db() as c:
         c.execute("INSERT INTO host_groups VALUES (?,?)", (i, (i - 1) % 3 + 1))
 
 
+fingerprint = diagnostics.host_fingerprint(public)
+signature = store.scan_signature(store.get_host(31))
+with store.db() as c:
+    c.execute(
+        "INSERT INTO scan_batches(id,status,total,completed) VALUES ('ui-keys','finished',1,1)"
+    )
+    c.execute(
+        "INSERT INTO scan_results(batch_id,host_id,status,fingerprint,algorithm) VALUES ('ui-keys',31,'candidate',?,'ssh-rsa')",
+        (fingerprint,),
+    )
+    c.execute(
+        "INSERT INTO host_key_candidates(host_id,key,fingerprint,source_signature) VALUES (31,?,?,?)",
+        (public, fingerprint, signature),
+    )
+fixture_failures = set()
+
+
 def fixture_execute(
     host_id,
     action,
@@ -83,6 +100,15 @@ def fixture_execute(
     cancelled=lambda: False,
     **kwargs,
 ):
+    if (
+        host_id == 29
+        and action == "health"
+        and (host_id, action) not in fixture_failures
+    ):
+        fixture_failures.add((host_id, action))
+        raise diagnostics.SSHDiagnosticError(
+            "隔离测试：首次采集失败，供仅重试失败项验证"
+        )
     for _ in range(300 if action == "io" else 6):
         if cancelled():
             raise diagnostics.SSHDiagnosticError("任务已取消")

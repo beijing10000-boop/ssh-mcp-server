@@ -19,6 +19,12 @@ const state = {
   batchId: null,
   editor: null,
   selected: new Set(),
+  selectedHosts: new Map(),
+  targets: new Map(),
+  targetCandidates: [],
+  targetQuery: "",
+  hostSort: "id",
+  hostDirection: "desc",
   hostQuery: "",
   hostGroup: "",
   hostStatus: "all",
@@ -112,6 +118,8 @@ function hostQuery() {
   return new URLSearchParams({
     q: state.hostQuery,
     status: state.hostStatus,
+    sort: state.hostSort,
+    direction: state.hostDirection,
     ...(state.hostGroup ? { group_id: state.hostGroup } : {}),
   });
 }
@@ -159,7 +167,7 @@ function notice(text, failure = false) {
   box.classList.toggle("error", failure);
 }
 const btn = (name, text, id = "", kind = "") =>
-  '<button class="btn small ' +
+  '<button type="button" class="btn small ' +
   kind +
   '" data-action="' +
   esc(name) +
@@ -259,6 +267,7 @@ function openModal(title, fields, submit) {
   $("#editor-feedback").hidden = true;
   $('#editor-form button[type="submit"]').hidden = !submit;
   $("#editor").showModal();
+  $('#editor-form button[type="submit"]').textContent = "保存";
 }
 function clearEditor() {
   state.editor = null;
@@ -348,6 +357,7 @@ async function pageHosts() {
     return pageHosts();
   }
   const hosts = data.items;
+  for (const h of hosts) state.selectedHosts.set(h.id, h);
   state.hosts = hosts;
   state.groups = groups;
   state.credentials = credentials;
@@ -362,9 +372,9 @@ async function pageHosts() {
         '" ' +
         (state.selected.has(h.id) ? "checked" : "") +
         "/></td>" +
-        "<td><strong>" +
-        esc(h.name) +
-        "</strong><small>资产 ID " +
+        "<td>" +
+        btn("host-detail", h.name, h.id) +
+        "<small>资产 ID " +
         h.id +
         " · Zabbix Host ID " +
         esc(h.zabbix_hostid || "未关联") +
@@ -381,7 +391,11 @@ async function pageHosts() {
         esc(h.mode === "gateway" ? "B · 受限网关" : "A · 免 Agent") +
         "</td>" +
         "<td>" +
+        '<button type="button" class="readiness-button" data-action="prepare-host" data-id="' +
+        h.id +
+        '">' +
         badge(h.readiness || "untested") +
+        "</button>" +
         "<small>" +
         esc(
           h.group_ids
@@ -389,6 +403,11 @@ async function pageHosts() {
             .filter(Boolean)
             .join(" · ") || "未分组",
         ) +
+        "</small></td>" +
+        '<td class="date">' +
+        date(h.last_test_at) +
+        "<small>诊断 " +
+        date(h.last_diagnostic_at) +
         "</small></td>" +
         '<td><div class="actions">' +
         btn("edit-host", "编辑", h.id) +
@@ -454,10 +473,12 @@ async function pageHosts() {
       table(
         [
           '<input type="checkbox" id="select-page" aria-label="选择本页主机">',
-          "主机 / 关联",
-          "SSH 路由",
+          btn("sort-host", "主机 / 关联", "name"),
+          btn("sort-host", "SSH 路由", "address"),
           "权限模式",
           "准备状态",
+          btn("sort-host", "上次测试 / 诊断", "last_test_at") +
+            btn("sort-host", "按诊断时间", "last_diagnostic_at"),
           "操作",
         ],
         rows,
@@ -688,7 +709,7 @@ async function pageKeys() {
     : [];
   const trust = panel(
     "批量导入可信指纹",
-    '<p class="muted">批量核验无需逐台点击弹窗。请先通过服务器控制台、Ansible 可信通道或已有可信资产台账取得真实 SHA256 指纹，再按「主机 ID/IP + [可选算法] + SHA256 指纹」逐行粘贴；支持从已开启 SSH 主机身份校验的 Ansible 清单导入。<strong>不能直接复制本页面扫描到的指纹作为可信来源。</strong> 任意一台不匹配，整批不保存。</p>' +
+    '<p class="muted">批量核验无需逐台点击弹窗。请先通过服务器控制台、Ansible 可信通道或已有可信资产台账取得真实 SHA256 指纹，再按「主机 ID/IP + [可选算法] + SHA256 指纹」逐行粘贴；支持从已开启 SSH 主机身份校验的 Ansible 清单导入。<strong>不能直接复制本页面扫描到的指纹作为可信来源。</strong> 先逐行预检，确认后只保存匹配项；不匹配会记录安全审计。</p>' +
       '<p class="muted">当前批次待确认：' +
       matching.length +
       " 台</p>" +
@@ -702,17 +723,10 @@ async function pageKeys() {
   return results + trust;
 }
 async function pageDiagnostics() {
-  const [hosts, tools] = await Promise.all([api("/hosts"), api("/tools")]);
+  const [tools, groups] = await Promise.all([api("/tools"), api("/groups")]);
   state.tools = tools;
-  const ready = hosts.filter(
-    (h) =>
-      h.asset_type === "linux" &&
-      h.enabled &&
-      h.has_host_key &&
-      h.credential_id,
-  );
-  state.diagnosticHosts = ready;
-  const options = ready.map((h) => [h.id, h.name + " · " + h.address]);
+  state.groups = groups;
+  const picker = await targetPicker();
   return (
     '<div class="page-intro"><p>选择目标与诊断方式。任务在后台执行，离开页面后仍可在历史中查看。</p>' +
     btn("open-history", "查看诊断历史") +
@@ -734,17 +748,11 @@ async function pageDiagnostics() {
     panel(
       "创建诊断任务",
       '<form id="diagnostic-form"><div class="fields">' +
-        field(
-          "host_id",
-          "目标主机",
-          state.preselectedId || options[0]?.[0] || "",
-          "text",
-          options,
-        ) +
+        picker +
         field(
           "action",
           "诊断类型",
-          "health",
+          state.diagnosticAction || "health",
           "text",
           tools
             .filter(
@@ -754,13 +762,6 @@ async function pageDiagnostics() {
             )
             .map((t) => [t.id, t.name]),
         ) +
-        (state.selected.size
-          ? '<div class="wide"><label class="check"><input type="checkbox" name="use_selected" ' +
-            (state.useSelection ? "checked" : "") +
-            "> 使用资产页选中的 " +
-            state.selected.size +
-            " 台主机（每批最多 100 台）</label></div>"
-          : "") +
         field("symptom", "故障场景", "cpu_high", "text", [
           ["cpu_high", "CPU 高"],
           ["mem_high", "内存高"],
@@ -781,11 +782,11 @@ async function pageDiagnostics() {
           "支持 /root、/root/.cache、/data、/var 等目录，每次最多扫描 8 秒；仅统计单层，不修改或清理文件。",
         ) +
         '</div><div class="notice diagnostic-help">快照反映采集时刻的状态。日志、目录与流量数据需有相应读取权限；缺失能力会显示为部分完成。</div>' +
-        (!options.length && !state.selected.size
-          ? '<p class="inline-error">暂无可诊断主机，请先绑定凭据并核验公钥。</p>'
+        (!state.targets.size
+          ? '<p class="inline-error">请选择上方搜索结果中的主机，明确目标后提交。</p>'
           : "") +
         '<div class="modal-actions"><span class="muted">固定动作 · 无任意命令输入</span><button class="btn primary" type="submit" ' +
-        (!options.length && !state.selected.size ? "disabled" : "") +
+        (!state.targets.size ? "disabled" : "") +
         ">提交诊断</button></div></form>",
     ) +
     '<div class="capability-grid">' +
@@ -817,7 +818,9 @@ function jobTable(items) {
     items
       .map(
         (j) =>
-          "<tr><td><strong>" +
+          '<tr data-key="' +
+          esc(j.id) +
+          '"><td><strong>' +
           esc(j.host_name) +
           '</strong><small class="mono">' +
           esc(j.id.slice(0, 10)) +
@@ -842,7 +845,10 @@ async function pageHistory() {
     status: state.historyStatus,
     ...(state.batchFilter ? { batch_id: state.batchFilter } : {}),
   });
-  const data = await api("/jobs?" + query);
+  const [data, progress] = await Promise.all([
+    api("/jobs?" + query),
+    batchProgress(),
+  ]);
   if (state.historyPage > 1 && !data.items.length) {
     state.historyPage--;
     return pageHistory();
@@ -868,6 +874,7 @@ async function pageHistory() {
       "</select>" +
       (state.batchFilter ? btn("all-history", "显示全部历史") : "") +
       '<span class="muted">结果加密保存 · 重启中断可追溯</span></div>' +
+      progress +
       jobTable(data.items) +
       pagination("history", data),
     btn("open-diagnostics", "新建诊断", "", "primary"),
@@ -1292,6 +1299,27 @@ function patchNode(old, next) {
     if (!next.hasAttribute(a.name)) old.removeAttribute(a.name);
   for (const a of [...next.attributes])
     if (old.getAttribute(a.name) !== a.value) old.setAttribute(a.name, a.value);
+  if (
+    next.children.length &&
+    [...next.children].every((el) => el.dataset.key)
+  ) {
+    const keys = new Set([...next.children].map((el) => el.dataset.key));
+    const focused = document.activeElement;
+    for (const [i, item] of [...next.children].entries()) {
+      const existing = [...old.children].find(
+        (el) => el.dataset.key === item.dataset.key,
+      );
+      const current = existing || item;
+      if (existing) patchNode(existing, item);
+      if (old.children[i] !== current)
+        old.insertBefore(current, old.children[i] || null);
+    }
+    for (const el of [...old.children])
+      if (!keys.has(el.dataset.key)) el.remove();
+    if (focused?.isConnected && document.activeElement !== focused)
+      focused.focus({ preventScroll: true });
+    return;
+  }
   const left = [...old.childNodes],
     right = [...next.childNodes];
   for (let i = 0; i < Math.max(left.length, right.length); i++) {
@@ -1304,12 +1332,16 @@ async function render(poll = false) {
   poll = poll === true;
   clearTimeout(timer);
   const version = ++generation;
-  const [page, id] = location.hash.slice(1).split("/");
+  const [page, id] = location.hash.slice(1).split("?")[0].split("/");
   if (["clients", "feishu"].includes(page)) {
     location.replace("#settings/" + page);
     return;
   }
   state.page = page || "overview";
+  if (state.loadedHash !== location.hash) {
+    readFilters();
+    state.loadedHash = location.hash;
+  }
   if (state.page === "settings")
     state.settingsTab = ["zabbix", "clients", "feishu", "retention"].includes(
       id,
@@ -1363,13 +1395,19 @@ async function render(poll = false) {
       document.scrollingElement.scrollTop = scroll;
     } else content.innerHTML = html;
     state.renderedRoute = location.hash;
-    if (state.page === "diagnostics") updateDiagnosticInputs();
-    if (state.page === "zabbix" && state.zabbixPolling) {
-      for (const form of document.querySelectorAll("#zabbix-discover-form"))
-        form
-          .querySelectorAll("input,select,button")
-          .forEach((el) => (el.disabled = true));
+    if (state.page === "diagnostics") {
+      const field = document.querySelector("#diagnostic-form [name=action]");
+      if (
+        state.diagnosticAction &&
+        [...field.options].some((x) => x.value === state.diagnosticAction)
+      )
+        field.value = state.diagnosticAction;
+      updateDiagnosticInputs();
     }
+    const discoverButton = document.querySelector(
+      "#zabbix-discover-form button[type=submit]",
+    );
+    if (discoverButton) discoverButton.disabled = !!state.zabbixPolling;
     updateSelection();
     const pending =
       (state.page === "job" &&
@@ -1390,6 +1428,20 @@ function updateSelection() {
     count.textContent = "已选 " + state.selected.size + " 台（跨页保留）";
   const boxes = [...document.querySelectorAll(".host-selected")];
   boxes.forEach((b) => (b.checked = state.selected.has(Number(b.dataset.id))));
+  const ready = [...state.selected].filter((id) =>
+    canExecute(state.selectedHosts.get(id) || {}),
+  ).length;
+  for (const name of ["test-selected", "diagnose-selected"]) {
+    const button = document.querySelector('[data-action="' + name + '"]');
+    if (button)
+      button.textContent =
+        (name === "test-selected" ? "测试 SSH" : "批量诊断") +
+        "（" +
+        ready +
+        "/" +
+        state.selected.size +
+        " 可执行）";
+  }
   const page = $("#select-page");
   if (page) {
     const count = boxes.filter((b) => b.checked).length;
@@ -1408,6 +1460,8 @@ async function login() {
     $("#login").hidden = true;
     $("#app").hidden = false;
     await render();
+    clearTimeout(state.taskTimer);
+    taskIndicator();
   } catch (e) {
     $("#app").hidden = true;
     $("#login").hidden = false;
@@ -1451,7 +1505,8 @@ $("#editor-form").addEventListener("submit", async (e) => {
   try {
     const result = await state.editor(e.target);
     closeModal();
-    notice("保存成功");
+    if (!result?.notice) notice("保存成功");
+    else notice(result.notice);
     await render();
     if (result?.token) {
       openModal(
@@ -1672,6 +1727,7 @@ $("#content").addEventListener("change", (e) => {
     const count = $("#zabbix-selected-count");
     if (count) count.textContent = "已选 " + state.zabbixSelected.size + " 台";
   }
+  if (e.target.name === "action") state.diagnosticAction = e.target.value;
   if (["action", "symptom"].includes(e.target.name)) updateDiagnosticInputs();
   if (e.target.classList.contains("host-selected")) {
     const id = Number(e.target.dataset.id);
@@ -1691,6 +1747,7 @@ $("#content").addEventListener("change", (e) => {
   if (e.target.id === "history-status") {
     state.historyStatus = e.target.value;
     state.historyPage = 1;
+    writeFilters();
     render();
   }
   updateSelection();
@@ -1725,6 +1782,7 @@ $("#content").addEventListener("submit", async (e) => {
     state.hostStatus = $("#host-status").value;
     state.hostPage = 1;
     state.selected.clear();
+    writeFilters();
     render();
     return;
   }
@@ -1733,6 +1791,7 @@ $("#content").addEventListener("submit", async (e) => {
     state.auditQuery = $("#audit-search").value.trim();
     state.auditStatus = $("#audit-status").value;
     state.auditPage = 1;
+    writeFilters();
     render();
     return;
   }
@@ -1760,9 +1819,7 @@ $("#content").addEventListener("submit", async (e) => {
   button.disabled = true;
   try {
     const action = getForm(form, "action");
-    const host_ids = checkbox(form, "use_selected")
-      ? [...state.selected]
-      : [Number(getForm(form, "host_id"))];
+    const host_ids = [...state.targets.keys()];
     const result = await api("/jobs", "POST", {
       host_ids,
       action,
@@ -1820,11 +1877,19 @@ document.addEventListener("click", async (e) => {
     }
     if (action === "tool-category") {
       state.toolCategory = id;
+      if (
+        id !== "全部" &&
+        !state.tools.some(
+          (t) => t.id === state.diagnosticAction && t.category === id,
+        )
+      )
+        state.diagnosticAction = state.tools.find((t) => t.category === id)?.id;
       await render();
       return;
     }
     if (action === "choose-tool") {
       const form = $("#diagnostic-form");
+      state.diagnosticAction = id;
       form.elements.action.value = id;
       updateDiagnosticInputs();
       form.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -1847,10 +1912,12 @@ document.addEventListener("click", async (e) => {
           state[key] + (action === "page-next" ? 1 : -1),
         ),
       );
+      writeFilters();
       await render();
       return;
     }
     if (action === "job-detail") {
+      if ($("#host-drawer").open) $("#host-drawer").close();
       go("job/" + id);
       return;
     }
@@ -1879,13 +1946,13 @@ document.addEventListener("click", async (e) => {
       if (!state.selected.size) throw Error("请先选择主机");
       const enabled = action === "enable-selected";
       if (
-        !confirm(
+        !(await askConfirmation(
           "确认" +
             (enabled ? "启用" : "停用") +
             "所选 " +
             state.selected.size +
             " 台主机？停用会立即阻止新的诊断。",
-        )
+        ))
       )
         return;
       await api("/hosts/bulk-enabled", "POST", {
@@ -1899,8 +1966,7 @@ document.addEventListener("click", async (e) => {
     if (action === "diagnose-selected") {
       if (!state.selected.size || state.selected.size > 100)
         throw Error("批量诊断请选择 1–100 台主机");
-      state.useSelection = true;
-      go("diagnostics");
+      await setTargets([...state.selected]);
       return;
     }
     if (action === "bind-selected") {
@@ -2065,11 +2131,11 @@ document.addEventListener("click", async (e) => {
     if (action === "revoke-client") {
       const c = state.clients.find((x) => x.id === id);
       if (
-        !confirm(
+        !(await askConfirmation(
           "撤销「" +
             c.name +
             "」的令牌？该客户端将无法继续访问 MCP，其他客户端不受影响。",
-        )
+        ))
       )
         return;
       await api("/mcp/clients/" + id + "/revoke", "POST");
@@ -2078,11 +2144,11 @@ document.addEventListener("click", async (e) => {
     }
     if (action === "toggle-legacy") {
       if (
-        !confirm(
+        !(await askConfirmation(
           state.legacyEnabled
             ? "停用原始 mcp.token？请先确认 AI 平台已改用新的客户端令牌。"
             : "启用原始令牌会授予全部主机和工具权限，确认启用？",
-        )
+        ))
       )
         return;
       await api("/settings/mcp-legacy", "PUT", {
@@ -2092,7 +2158,11 @@ document.addEventListener("click", async (e) => {
       return;
     }
     if (action === "new-host" || action === "edit-host") {
-      const h = action === "edit-host" ? currentHost(id) : {};
+      const h =
+        action === "edit-host"
+          ? currentHost(id) || (await api("/hosts/" + id + "/detail")).host
+          : {};
+      if ($("#host-drawer").open) $("#host-drawer").close();
       openModal(
         h.id ? "编辑主机资产" : "登记 Linux 主机",
         hostFields(h),
@@ -2115,9 +2185,9 @@ document.addEventListener("click", async (e) => {
       );
     } else if (action === "delete-group") {
       if (
-        !confirm(
+        !(await askConfirmation(
           "删除此分组？主机保留，仅通过该分组授权的 MCP 客户端将失去相应主机访问权限。",
-        )
+        ))
       )
         return;
       await api("/groups/" + id, "DELETE");
@@ -2181,18 +2251,27 @@ document.addEventListener("click", async (e) => {
       if (value.total) go("job/" + value.job_ids[0]);
       else notice(value.skipped.map((x) => x.reason).join("；"), true);
     } else if (action === "disable-host") {
-      if (!confirm("确定停用资产 " + id + "？停用后 MCP 将无法诊断这台主机。"))
+      if (
+        !(await askConfirmation(
+          "确定停用资产 " + id + "？停用后 MCP 将无法诊断这台主机。",
+        ))
+      )
         return;
       await api("/hosts/" + id + "/disable", "POST");
       notice("主机已停用");
       render();
     } else if (action === "diagnose-host") {
-      state.preselectedId = id;
-      state.useSelection = false;
-      go("diagnostics");
+      if ($("#host-drawer").open) $("#host-drawer").close();
+      await setTargets([Number(id)]);
     } else if (action === "select-filtered") {
       const r = await api("/inventory/ids?" + hostQuery());
       state.selected = new Set(r.host_ids);
+      if (r.host_ids.length) {
+        const items = await api("/inventory/targets", "POST", {
+          host_ids: r.host_ids,
+        });
+        for (const h of items) state.selectedHosts.set(h.id, h);
+      }
       updateSelection();
     } else if (
       action === "scan-selected" ||
@@ -2221,76 +2300,7 @@ document.addEventListener("click", async (e) => {
       );
       go("keys/" + result.batch_id);
     } else if (action === "confirm-batch-from-manifest") {
-      if (!state.batchId) throw new Error("请先扫描目标主机");
-      const info = await api(
-        "/host-keys/batches/" + encodeURIComponent(state.batchId),
-      );
-      const eligible = info.items.filter(
-        (r) => r.status === "candidate" || r.status === "changed",
-      );
-      const raw = ($("#trusted-fingerprints")?.value || "").trim();
-      if (!raw) throw new Error("请粘贴通过独立可信渠道取得的主机指纹清单");
-      const lines = raw
-        .split(/\r?\n/)
-        .map((x) => x.trim())
-        .filter(Boolean);
-      const entries = [];
-      let skipped = 0;
-      for (const [index, line] of lines.entries()) {
-        const m = line.match(
-          /^(\S+)\s+(?:(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256)\s+)?(SHA256:[A-Za-z0-9+/=_-]+)$/,
-        );
-        if (!m)
-          throw new Error(
-            "第 " +
-              (index + 1) +
-              " 行格式错误：应为「资产 ID/IP [密钥算法] SHA256:...」",
-          );
-        const match = eligible.find(
-          (r) => String(r.host_id) === m[1] || r.address === m[1],
-        );
-        // Independently gathered Ansible inventories may include several key
-        // algorithms and more hosts than the current scan. Use only exact matches.
-        if (!match || (m[2] && m[2] !== match.algorithm)) {
-          if (!m[2] && !match)
-            throw new Error(
-              "第 " + (index + 1) + " 行的主机不在待核验批次：" + m[1],
-            );
-          skipped++;
-          continue;
-        }
-        entries.push({
-          host_id: match.host_id,
-          independently_verified_sha256: m[3],
-        });
-      }
-      if (!entries.length)
-        throw new Error(
-          "清单没有当前批次匹配的可信主机指纹，请核对 IP 与密钥算法",
-        );
-      if (new Set(entries.map((x) => x.host_id)).size !== entries.length)
-        throw new Error("同一主机存在重复匹配的可信指纹，请清理重复行");
-      if (
-        !confirm(
-          "将独立核验 " +
-            entries.length +
-            " 台主机，跳过 " +
-            skipped +
-            " 行其他主机或不同算法指纹。任意一台不匹配将整批拒绝。确定继续？",
-        )
-      )
-        return;
-      const result = await api("/host-keys/confirm-batch", "POST", {
-        items: entries,
-        confirmed: true,
-      });
-      state.manifest = "";
-      notice(
-        "已成功保存 " +
-          result.count +
-          " 台主机的公钥。可返回主机资产进行 SSH 连接测试。",
-      );
-      await render();
+      await precheckManifest();
     } else if (action === "confirm-key") {
       const h = await api("/hosts");
       const asset = h.find((x) => String(x.id) === id);

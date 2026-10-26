@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 from . import store
 from .api import HostIn, ProxyIn, GroupIn, host_with_groups, safe_host_input, fail
 from .auth import admin
+from .api import HOST_SELECT
 
 router = APIRouter(prefix="/api/v1")
 
@@ -14,9 +15,9 @@ def where_hosts(q="", group_id=None, status="all"):
     clauses, args = [], []
     if q:
         clauses.append(
-            "(instr(lower(name),lower(?))>0 OR instr(address,?)>0 OR zabbix_hostid=?)"
+            "(instr(lower(name),lower(?))>0 OR instr(address,?)>0 OR zabbix_hostid=? OR id IN (SELECT hg.host_id FROM host_groups hg JOIN groups g ON g.id=hg.group_id WHERE instr(lower(g.name),lower(?))>0))"
         )
-        args.extend((q, q, q))
+        args.extend((q, q, q, q))
     if group_id:
         clauses.append("id IN (SELECT host_id FROM host_groups WHERE group_id=?)")
         args.append(group_id)
@@ -45,15 +46,29 @@ def listing(
     status: str = "all",
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
+    sort: str = "id",
+    direction: str = "desc",
     actor=Depends(admin),
 ):
+    if sort not in {
+        "id",
+        "name",
+        "address",
+        "last_test_at",
+        "last_diagnostic_at",
+    } or direction not in {"asc", "desc"}:
+        raise HTTPException(422, "排序字段或方向无效")
     where, args = where_hosts(q, group_id, status)
     with store.db() as c:
         total = c.execute("SELECT COUNT(*) FROM hosts" + where, args).fetchone()[0]
         rows = c.execute(
-            "SELECT h.*,(SELECT GROUP_CONCAT(group_id) FROM host_groups WHERE host_id=h.id) AS joined_groups FROM hosts h"
+            HOST_SELECT
             + where
-            + " ORDER BY id DESC LIMIT ? OFFSET ?",
+            + " ORDER BY "
+            + sort
+            + " "
+            + direction
+            + ",id DESC LIMIT ? OFFSET ?",
             (*args, page_size, (page - 1) * page_size),
         ).fetchall()
     return {
@@ -277,7 +292,7 @@ def audit_page(
     clauses, args = [], []
     if q:
         clauses.append("(instr(action,?)>0 OR instr(actor,?)>0 OR target=?)")
-        args.extend((q, q, q))
+        args.extend((q, q, q, q))
     if outcome != "all":
         clauses.append("outcome=?")
         args.append(outcome)
@@ -294,3 +309,18 @@ def audit_page(
         "page": page,
         "page_size": 50,
     }
+
+
+class TargetsIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    host_ids: list[StrictInt] = Field(min_length=1, max_length=1000)
+
+
+@router.post("/inventory/targets")
+def targets(body: TargetsIn, actor=Depends(admin)):
+    ids = sorted(set(body.host_ids))
+    with store.db() as c:
+        rows = c.execute(
+            HOST_SELECT + " WHERE h.id IN (" + ",".join("?" for _ in ids) + ")", ids
+        ).fetchall()
+    return [host_with_groups(row) for row in rows]

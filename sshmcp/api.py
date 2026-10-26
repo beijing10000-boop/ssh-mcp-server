@@ -85,6 +85,7 @@ class BatchConfirmedKey(BaseModel):
 class ConfirmBatchIn(BaseModel):
     items: list[BatchConfirmedKey] = Field(min_length=1, max_length=1000)
     confirmed: StrictBool = False
+    matched_only: StrictBool = False
 
 
 class RunIn(BaseModel):
@@ -147,6 +148,13 @@ def _host_view(row, group_ids=None) -> dict:
     return v
 
 
+HOST_SELECT = """SELECT h.*,
+(SELECT GROUP_CONCAT(group_id) FROM host_groups WHERE host_id=h.id) AS joined_groups,
+(SELECT MAX(completed_at) FROM diagnostic_jobs WHERE host_id=h.id AND action='connection') AS last_test_at,
+(SELECT MAX(completed_at) FROM diagnostic_jobs WHERE host_id=h.id AND action!='connection') AS last_diagnostic_at
+FROM hosts h"""
+
+
 def host_with_groups(row):
     item = dict(row)
     ids = item.pop("joined_groups")
@@ -185,9 +193,7 @@ def overview(actor=Depends(admin)):
 @router.get("/hosts")
 def hosts(actor=Depends(admin)):
     with store.db() as c:
-        rows = c.execute(
-            "SELECT h.*,GROUP_CONCAT(hg.group_id) AS joined_groups FROM hosts h LEFT JOIN host_groups hg ON hg.host_id=h.id GROUP BY h.id ORDER BY h.id DESC LIMIT 2000"
-        ).fetchall()
+        rows = c.execute(HOST_SELECT + " ORDER BY h.id DESC LIMIT 2000").fetchall()
     return [host_with_groups(x) for x in rows]
 
 
@@ -603,7 +609,7 @@ def batch_detail(batch_id: str, actor=Depends(admin)):
     return {"batch": dict(batch), "items": [dict(r) for r in rows]}
 
 
-def _save_confirmed_key(c, item: BatchConfirmedKey):
+def _key_candidate(c, item: BatchConfirmedKey):
     row = c.execute(
         "SELECT key,fingerprint,source_signature FROM host_key_candidates WHERE host_id=?",
         (item.host_id,),
@@ -622,6 +628,11 @@ def _save_confirmed_key(c, item: BatchConfirmedKey):
         row["fingerprint"], provided
     ):
         raise HTTPException(422, f"主机 {item.host_id} 可信指纹与扫描结果不一致")
+    return row
+
+
+def _save_confirmed_key(c, item: BatchConfirmedKey):
+    row = _key_candidate(c, item)
     c.execute(
         "UPDATE hosts SET host_key=?,revision=revision+1,last_status='untested',updated_at=CURRENT_TIMESTAMP WHERE id=?",
         (row["key"], item.host_id),
@@ -659,13 +670,37 @@ def confirm_batch(body: ConfirmBatchIn, actor=Depends(admin)):
     ids = [item.host_id for item in body.items]
     if len(ids) != len(set(ids)):
         raise HTTPException(422, "批量核验包含重复的主机 ID")
-    with store.db() as c:
-        c.execute("BEGIN IMMEDIATE")
-        # Transactional batch: any mismatch means zero keys are confirmed.
-        verified = [(item.host_id, _save_confirmed_key(c, item)) for item in body.items]
+    verified, skipped = [], []
+    try:
+        with store.db() as c:
+            c.execute("BEGIN IMMEDIATE")
+            for item in body.items:
+                try:
+                    verified.append((item.host_id, _save_confirmed_key(c, item)))
+                except HTTPException as exc:
+                    if not body.matched_only:
+                        raise
+                    skipped.append({"host_id": item.host_id, "reason": exc.detail})
+    except HTTPException as exc:
+        store.audit(
+            actor,
+            "host_key_mismatch",
+            str(item.host_id),
+            "denied",
+            "trusted fingerprint rejected",
+        )
+        raise exc
+    for item in skipped:
+        store.audit(
+            actor,
+            "host_key_mismatch",
+            str(item["host_id"]),
+            "denied",
+            "trusted fingerprint rejected",
+        )
     for hid, fingerprint in verified:
         store.audit(actor, "host_key_confirm", str(hid), "success", fingerprint)
-    return {"ok": True, "count": len(verified)}
+    return {"ok": True, "count": len(verified), "skipped": skipped}
 
 
 @router.get("/audit")
@@ -674,3 +709,103 @@ def audit_log(actor=Depends(admin)):
         return [
             dict(r) for r in c.execute("SELECT * FROM audit ORDER BY id DESC LIMIT 200")
         ]
+
+
+@router.get("/hosts/{host_id}/detail")
+def host_detail(host_id: int, actor=Depends(admin)):
+    with store.db() as c:
+        row = c.execute(HOST_SELECT + " WHERE h.id=?", (host_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "主机不存在")
+        recent = c.execute(
+            "SELECT id,action,status,error,completed_at,created_at FROM diagnostic_jobs WHERE host_id=? ORDER BY rowid DESC LIMIT 8",
+            (host_id,),
+        ).fetchall()
+        test = c.execute(
+            "SELECT status,error,completed_at,host_revision FROM diagnostic_jobs WHERE host_id=? AND action='connection' ORDER BY rowid DESC LIMIT 1",
+            (host_id,),
+        ).fetchone()
+    return {
+        "host": host_with_groups(row),
+        "recent": [dict(r) for r in recent],
+        "last_test": dict(test) if test else None,
+    }
+
+
+class KeyPrecheckIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    batch_id: str = Field(min_length=1, max_length=64)
+    manifest: str = Field(min_length=1, max_length=300000)
+
+
+@router.post("/host-keys/precheck")
+def precheck_keys(body: KeyPrecheckIn, actor=Depends(admin)):
+    lines = [line.strip() for line in body.manifest.splitlines() if line.strip()]
+    if len(lines) > 1000:
+        raise HTTPException(422, "每次最多核对 1000 行")
+    rows = []
+    seen = set()
+    with store.db() as c:
+        candidates = c.execute(
+            "SELECT r.host_id,h.address,r.algorithm FROM scan_results r JOIN hosts h ON h.id=r.host_id WHERE r.batch_id=? AND r.status IN ('candidate','changed')",
+            (body.batch_id,),
+        ).fetchall()
+        for index, line in enumerate(lines, 1):
+            result = {
+                "line": index,
+                "status": "invalid",
+                "reason": "格式应为资产 ID/IP [算法] SHA256 指纹",
+            }
+            match = re.fullmatch(
+                r"(\S+)\s+(?:(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256)\s+)?(SHA256:[A-Za-z0-9+/=_-]+)",
+                line,
+            )
+            if match:
+                result["target"] = match[1]
+                host = next(
+                    (
+                        r
+                        for r in candidates
+                        if str(r["host_id"]) == match[1] or r["address"] == match[1]
+                    ),
+                    None,
+                )
+                if host is None:
+                    result.update(status="not_found", reason="当前批次找不到待核验目标")
+                elif match[2] and match[2] != host["algorithm"]:
+                    result.update(status="algorithm_mismatch", reason="算法不匹配")
+                elif host["host_id"] in seen:
+                    result.update(status="duplicate", reason="同一主机重复提交")
+                else:
+                    seen.add(host["host_id"])
+                    item = BatchConfirmedKey(
+                        host_id=host["host_id"], independently_verified_sha256=match[3]
+                    )
+                    try:
+                        _key_candidate(c, item)
+                        result.update(
+                            status="matched",
+                            reason="与独立提供的指纹一致",
+                            **item.model_dump(),
+                        )
+                    except HTTPException as exc:
+                        result.update(
+                            status="mismatch",
+                            host_id=host["host_id"],
+                            reason=exc.detail,
+                        )
+            rows.append(result)
+    for result in rows:
+        if result["status"] in {"mismatch", "algorithm_mismatch", "duplicate"}:
+            store.audit(
+                actor,
+                "host_key_mismatch",
+                str(result.get("host_id", result.get("target", ""))),
+                "denied",
+                "fingerprint precheck: " + result["status"],
+            )
+    return {
+        "items": rows,
+        "matched": sum(r["status"] == "matched" for r in rows),
+        "total": len(rows),
+    }

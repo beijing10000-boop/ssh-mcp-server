@@ -1222,3 +1222,105 @@ button.capability:hover {
   margin-bottom: 0;
   overflow-wrap: anywhere;
 }
+
+/* Explicit target selection and host readiness workflow. */
+.target-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  max-height: 240px;
+  overflow: auto;
+  margin: 12px 0;
+}
+.target-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.target-option input {
+  width: auto;
+  margin-top: 4px;
+}
+.target-option small,
+.target-list small,
+.readiness-list small {
+  display: block;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.target-list,
+.readiness-list {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0;
+}
+.target-list li,
+.readiness-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.readiness-button {
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+}
+.readiness-button:hover {
+  text-decoration: underline;
+}
+.host-drawer {
+  position: fixed;
+  inset: 0 0 0 auto;
+  margin: 0 0 0 auto;
+  width: min(760px, 96vw);
+  height: 100%;
+  max-height: 100vh;
+  border-radius: 0;
+  padding: 28px;
+}
+.host-drawer h3 {
+  margin-top: 24px;
+}
+.check-good {
+  color: var(--green);
+}
+.check-pending {
+  color: var(--muted);
+}
+.batch-progress {
+  padding: 16px;
+  background: var(--surface2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  margin-bottom: 18px;
+}
+.batch-progress progress {
+  width: 100%;
+  margin: 10px 0;
+}
+#action-confirm {
+  width: min(500px, 92vw);
+}
+#action-confirm-message {
+  white-space: pre-wrap;
+  line-height: 1.8;
+}
+#task-indicator {
+  font-size: 12px;
+}
+@media (max-width: 700px) {
+  .target-options {
+    grid-template-columns: 1fr;
+  }
+  .host-drawer {
+    padding: 18px;
+  }
+}
