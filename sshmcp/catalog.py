@@ -1,6 +1,7 @@
 """Shared, explicit tool catalogue for Web, scoped clients and MCP adapters."""
 
 TITLES = {
+    "triage": "组合场景诊断",
     "connection": "SSH 连接测试",
     "health": "主机健康概览",
     "capabilities": "采集能力检查",
@@ -34,9 +35,17 @@ TITLES = {
     "container_stats": "容器资源使用",
     "security_status": "安全组件状态",
 }
-SENSITIVE = {"logs", "kernel", "directory", "peer_traffic", "log_errors", "oom"}
+SENSITIVE = {
+    "triage",
+    "logs",
+    "kernel",
+    "directory",
+    "peer_traffic",
+    "log_errors",
+    "oom",
+}
 CATEGORIES = {
-    "连接与概览": {"connection", "health", "capabilities", "system"},
+    "连接与概览": {"connection", "health", "capabilities", "system", "triage"},
     "性能与进程": {
         "cpu",
         "memory",

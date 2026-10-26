@@ -17,12 +17,12 @@ from contextlib import suppress
 import paramiko
 from paramiko import SSHException
 
-from . import store, insights, operations
+from . import store, insights, operations, observations, triage
 
 PREFIX = "PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; LC_ALL=C; export LC_ALL=C; "
 ACTIONS = {
     "connection": "printf 'AIOPS_SSH_OK\\n'; id -u; uname -s",
-    "cpu": "cat /proc/loadavg /proc/stat; command -v vmstat >/dev/null 2>&1 && vmstat 1 2 || true",
+    "cpu": "printf 'CPU_COUNT='; getconf _NPROCESSORS_ONLN; cat /proc/loadavg /proc/stat; command -v vmstat >/dev/null 2>&1 && vmstat 1 2 || true",
     "memory": "cat /proc/meminfo; command -v free >/dev/null 2>&1 && free -k || true",
     "processes": "ps -eo pid,ppid,comm,pcpu,pmem,rss,etime,state --sort=-pcpu | head -n 25",
     "disk": "df -Pk -l; df -Pi -l; head -n 80 /proc/mounts",
@@ -32,7 +32,7 @@ ACTIONS = {
     "system": "uname -sr; cat /proc/uptime /proc/loadavg; date -u '+%Y-%m-%dT%H:%M:%SZ'",
     "memory_processes": "ps -eo pid,ppid,comm,pcpu,pmem,rss,etime,state --sort=-rss | head -n 25",
     "health": (
-        "printf '\\n[负载与运行时长]\\n'; cat /proc/loadavg /proc/uptime; "
+        "printf 'CPU_COUNT='; getconf _NPROCESSORS_ONLN; printf '\\n[负载与运行时长]\\n'; cat /proc/loadavg /proc/uptime; "
         "printf '\\n[内存 KiB]\\n'; awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/{print}' /proc/meminfo; "
         "printf '\\n[文件系统]\\n'; df -Pk -l; printf '\\n[inode]\\n'; df -Pi -l; "
         "printf '\\n[高 CPU 进程]\\n'; ps -eo pid,comm,pcpu,pmem --sort=-pcpu | head -n 11"
@@ -113,7 +113,7 @@ printf '__SAMPLE_B__\n'
 capture_peers
 """
 INSIGHT_ACTIONS = {"directory", "peer_connections", "peer_traffic"}
-STANDARD_ONLY = INSIGHT_ACTIONS | operations.NEW_ACTIONS
+STANDARD_ONLY = INSIGHT_ACTIONS | operations.NEW_ACTIONS | {"triage"}
 
 SERVICE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$")
 REDACTION = re.compile(
@@ -158,7 +158,15 @@ def command_for(
     service: str | None = None,
     minutes: int = 30,
     directory_root: str | None = None,
+    *,
+    symptom=None,
 ) -> str:
+    if action == "triage":
+        if directory_root is not None:
+            raise ValueError("组合诊断不接收目录参数")
+        return PREFIX + triage.command(symptom, service, minutes, command_for)
+    if symptom is not None:
+        raise ValueError("仅组合诊断接收 symptom")
     if (
         isinstance(minutes, bool)
         or not isinstance(minutes, int)
@@ -306,6 +314,7 @@ def execute(
     *,
     cancelled=lambda: False,
     expected_revision=None,
+    symptom=None,
     background=False,
     preflight=lambda: None,
 ) -> dict:
@@ -337,6 +346,7 @@ def execute(
             directory_root,
             cancelled=cancelled,
             expected_revision=expected_revision,
+            symptom=symptom,
         )
     finally:
         with _SLOTS:
@@ -354,6 +364,7 @@ def _execute_inner(
     *,
     cancelled=lambda: False,
     expected_revision=None,
+    symptom=None,
 ) -> dict:
     host = store.get_host(host_id)
     if cancelled():
@@ -362,7 +373,7 @@ def _execute_inner(
         raise SSHDiagnosticError("主机配置已变更，请重新提交诊断")
     if not host.get("host_key"):
         raise SSHDiagnosticError("未核验 SSH 主机公钥；请先批量获取并确认 SHA256 指纹")
-    command = command_for(action, service, minutes, directory_root)
+    command = command_for(action, service, minutes, directory_root, symptom=symptom)
     if host.get("mode") == "gateway":
         if action in STANDARD_ONLY:
             raise SSHDiagnosticError(
@@ -388,14 +399,20 @@ def _execute_inner(
         chan.settimeout(6)
         chan.exec_command(command)
         stdout, stderr = bytearray(), bytearray()
-        output_limit = 262144 if action == "peer_traffic" else 32768
-        deadline = time.monotonic() + 20
+        output_limit = (
+            262144
+            if action == "peer_traffic"
+            else 131072
+            if action == "triage"
+            else 32768
+        )
+        deadline = time.monotonic() + (60 if action == "triage" else 20)
         truncated = False
         while True:
             if cancelled():
                 raise SSHDiagnosticError("任务已取消")
             if time.monotonic() > deadline:
-                raise SSHDiagnosticError("SSH 诊断执行超时（20秒）")
+                raise SSHDiagnosticError("SSH 诊断执行超时（单项 20 秒 / 组合 60 秒）")
             for ready, recv, dest, limit in (
                 (chan.recv_ready, chan.recv, stdout, output_limit),
                 (chan.recv_stderr_ready, chan.recv_stderr, stderr, 2048),
@@ -468,6 +485,20 @@ def _execute_inner(
             result["data"] = data
             result["output"] = (
                 ""  # Avoid leaking raw socket/directory inventory to LLM.
+            )
+        if action == "triage":
+            result.update(triage.parse(output, symptom, truncated))
+            if any(step["status"] != "success" for step in result["steps"]):
+                result["status"] = "partial"
+        else:
+            result.update(
+                observations.analyze(
+                    action,
+                    output,
+                    data=result.get("data"),
+                    status=result["status"],
+                    truncated=truncated,
+                )
             )
         return result
     except paramiko.BadHostKeyException:

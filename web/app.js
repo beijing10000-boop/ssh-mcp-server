@@ -761,6 +761,14 @@ async function pageDiagnostics() {
             state.selected.size +
             " 台主机（每批最多 100 台）</label></div>"
           : "") +
+        field("symptom", "故障场景", "cpu_high", "text", [
+          ["cpu_high", "CPU 高"],
+          ["mem_high", "内存高"],
+          ["disk_full", "磁盘满"],
+          ["io_slow", "I/O 慢"],
+          ["service_down", "服务异常"],
+          ["network", "网络异常"],
+        ]) +
         field("service", "systemd 服务名称", "nginx.service") +
         field("minutes", "时间范围（分钟）", 30, "number") +
         field(
@@ -1100,8 +1108,17 @@ function updateDiagnosticInputs() {
   if (!form) return;
   const action = getForm(form, "action");
   for (const [name, visible] of [
-    ["service", !!state.tools.find((t) => t.id === action)?.service_required],
-    ["minutes", !!state.tools.find((t) => t.id === action)?.window_required],
+    ["symptom", action === "triage"],
+    [
+      "service",
+      !!state.tools.find((t) => t.id === action)?.service_required ||
+        (action === "triage" && getForm(form, "symptom") === "service_down"),
+    ],
+    [
+      "minutes",
+      !!state.tools.find((t) => t.id === action)?.window_required ||
+        action === "triage",
+    ],
     ["directory_root", action === "directory"],
   ]) {
     const item = form.elements.namedItem(name);
@@ -1655,7 +1672,7 @@ $("#content").addEventListener("change", (e) => {
     const count = $("#zabbix-selected-count");
     if (count) count.textContent = "已选 " + state.zabbixSelected.size + " 台";
   }
-  if (e.target.name === "action") updateDiagnosticInputs();
+  if (["action", "symptom"].includes(e.target.name)) updateDiagnosticInputs();
   if (e.target.classList.contains("host-selected")) {
     const id = Number(e.target.dataset.id);
     if (e.target.checked) state.selected.add(id);
@@ -1749,10 +1766,13 @@ $("#content").addEventListener("submit", async (e) => {
     const result = await api("/jobs", "POST", {
       host_ids,
       action,
-      service: ["logs", "service"].includes(action)
-        ? getForm(form, "service")
-        : null,
+      service:
+        ["logs", "service"].includes(action) ||
+        (action === "triage" && getForm(form, "symptom") === "service_down")
+          ? getForm(form, "service")
+          : null,
       minutes: Number(getForm(form, "minutes")),
+      ...(action === "triage" ? { symptom: getForm(form, "symptom") } : {}),
       directory_root:
         action === "directory" ? getForm(form, "directory_root").trim() : null,
     });

@@ -30,6 +30,7 @@ def reset_tables(client):
             "zabbix_memberships",
             "zabbix_groups",
             "diagnostic_jobs",
+            "diagnostic_batches",
             "mcp_clients",
             "scan_results",
             "scan_batches",

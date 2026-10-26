@@ -37,6 +37,7 @@ def target(client, monkeypatch):
             self.command = None
             self.auth_attempts = 0
             self.executed = threading.Event()
+            self.response = b"AIOPS_SSH_OK\n0\nLinux\npassword=wire-fixture-secret\n"
 
         def check_auth_publickey(self, username, key):
             self.auth_attempts += 1
@@ -78,9 +79,7 @@ def target(client, monkeypatch):
                 transport.start_server(server=server)
                 channel = transport.accept(3)
                 if channel and server.executed.wait(3):
-                    channel.sendall(
-                        b"AIOPS_SSH_OK\n0\nLinux\npassword=wire-fixture-secret\n"
-                    )
+                    channel.sendall(server.response)
                     channel.send_exit_status(0)
                     channel.close()
             except (paramiko.SSHException, EOFError, OSError):
@@ -118,7 +117,10 @@ def target(client, monkeypatch):
 def test_mcp_uses_real_pinned_ssh_and_redacts_before_persistence(client, target):
     host, server = target
     status, result = mcp_call(
-        client, store.token("mcp.token"), "ssh_test_connection", {"host_id": host}
+        client,
+        store.token("mcp.token"),
+        "ssh_test_connection",
+        {"host_id": host, "detail": "full"},
     )
     assert status == 200 and result["status"] == "success"
     assert "id -u" in server.command and "sudo" not in server.command
@@ -178,9 +180,39 @@ def test_new_tools_use_pinned_ssh_and_persist_redacted_output(
 ):
     host, server = target
     status, result = mcp_call(
-        client, store.token("mcp.token"), tool, {"host_id": host, **extra}
+        client,
+        store.token("mcp.token"),
+        tool,
+        {"host_id": host, "detail": "full", **extra},
     )
     assert status == 200 and result["status"] == "success"
     assert fragment in server.command
     assert "wire-fixture-secret" not in result["output"]
     assert result["captured_at"] and result["job_id"]
+
+
+def test_triage_uses_one_pinned_ssh_session(client, target):
+    from sshmcp.triage import actions
+
+    host, server = target
+    samples = {
+        "cpu": "CPU_COUNT=1\n3.00 2.00 1.00 1/10 99",
+        "processes": "PID COMMAND %CPU\n1 java 95",
+        "pressure": "[cpu PSI]\nsome avg10=30.00 avg60=20.00 avg300=10.00 total=1",
+    }
+    server.response = "".join(
+        f"__SSHMCP_BEGIN_{a}__\n{samples[a]}\n__SSHMCP_END_{a}__:0\n"
+        for a in actions("cpu_high")
+    ).encode()
+    result = mcp_call(
+        client,
+        store.token("mcp.token"),
+        "ssh_triage",
+        {"host_id": host, "symptom": "cpu_high"},
+    )[1]
+    assert result["status"] == "success" and len(result["steps"]) == 3
+    assert server.auth_attempts == 1 and server.command.count("__SSHMCP_BEGIN_") == 3
+    assert any(f["metric"] == "load_per_core" for f in result["findings"])
+    assert "output" not in result and all(
+        "output" not in step for step in result["steps"]
+    )
