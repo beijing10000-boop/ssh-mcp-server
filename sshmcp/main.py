@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Linux 智能诊断 MCP 服务器",
-    version="0.3.0",
+    version="0.3.1",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -77,7 +77,7 @@ async def secure_transport(request: Request, call_next):
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "version": "0.3.0", "service": "ssh-mcp-server"}
+    return {"ok": True, "version": "0.3.1", "service": "ssh-mcp-server"}
 
 
 @app.get("/setup")

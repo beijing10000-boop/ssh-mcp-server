@@ -1023,15 +1023,6 @@ progress::-webkit-progress-value {
 .sync-steps .complete span {
   background: var(--primary-soft);
 }
-.connection-settings summary {
-  cursor: pointer;
-  font-weight: 550;
-  overflow-wrap: anywhere;
-  padding: 6px 0 14px;
-}
-.connection-settings .fields {
-  padding-top: 14px;
-}
 .sync-scope {
   display: grid;
   grid-template-columns: minmax(0, 1.4fr) minmax(240px, 1fr);
@@ -1184,4 +1175,50 @@ button.capability:hover {
   .sync-scope {
     gap: 18px;
   }
+}
+
+.settings-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+.settings-source {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 20px;
+}
+.settings-source p {
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+}
+.settings-source > div:first-child {
+  min-width: 0;
+}
+
+.credential-upload {
+  padding: 20px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+}
+.credential-upload input[type="file"] {
+  width: 100%;
+  padding: 12px;
+  background: var(--surface);
+}
+.credential-upload input::file-selector-button {
+  border: 0;
+  border-radius: 7px;
+  padding: 8px 14px;
+  margin-right: 12px;
+  color: var(--primary);
+  background: var(--primary-soft);
+  font: inherit;
+  cursor: pointer;
+}
+.credential-upload .help {
+  margin-bottom: 0;
+  overflow-wrap: anywhere;
 }

@@ -4,6 +4,9 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import json
+import io
+
+import paramiko
 import os
 from pathlib import Path
 import socket
@@ -94,9 +97,23 @@ try:
         page.locator(".welcome").wait_for()
 
         def navigate(name):
-            page.locator(f'nav [data-page="{name}"]').click()
-            page.locator(f'nav [data-page="{name}"].active').wait_for()
+            settings_tab = {
+                "settings": "zabbix",
+                "clients": "clients",
+                "feishu": "feishu",
+            }.get(name)
+            nav_page = "settings" if settings_tab else name
+            page.locator(f'#nav [data-page="{nav_page}"]').click()
+            page.locator(f'#nav [data-page="{nav_page}"].active').wait_for()
             page.locator("#content .loading-panel").wait_for(state="hidden")
+            if settings_tab:
+                page.locator(
+                    f'[data-action="settings-tab"][data-id="{settings_tab}"]'
+                ).click()
+                page.locator(
+                    f'[data-action="settings-tab"][data-id="{settings_tab}"][aria-pressed="true"]'
+                ).wait_for()
+                page.locator("#content .loading-panel").wait_for(state="hidden")
             assert not page.locator('#content [role="alert"]').count(), page.locator(
                 "#content"
             ).inner_text()
@@ -113,6 +130,7 @@ try:
                 "keys",
                 "diagnostics",
                 "history",
+                "settings",
                 "clients",
                 "audit",
                 "feishu",
@@ -123,6 +141,25 @@ try:
                 ), (width, name)
                 checks.append({"width": width, "page": name, "ok": True})
         page.set_viewport_size({"width": 1440, "height": 1080})
+        assert (
+            page.locator('#nav [data-page="clients"],#nav [data-page="feishu"]').count()
+            == 0
+        )
+        for legacy, target in (("clients", "clients"), ("feishu", "feishu")):
+            page.goto(base + "/#" + legacy)
+            page.wait_for_function(
+                "target => location.hash === '#settings/' + target", arg=target
+            )
+            page.locator(
+                f'[data-action="settings-tab"][data-id="{target}"][aria-pressed="true"]'
+            ).wait_for()
+            assert page.locator("#page-title").inner_text() == "系统配置"
+        checks.append(
+            {
+                "workflow": "legacy MCP and Feishu links resolve to unified system settings",
+                "ok": True,
+            }
+        )
         navigate("hosts")
         page.locator('[data-action="page-next"]').click()
         page.locator(".pagination").get_by_text(
@@ -235,12 +272,25 @@ try:
             }
         )
         navigate("zabbix")
-        page.locator(".connection-settings summary").click()
+        assert page.locator("#zabbix-connection-form").count() == 0
+        page.locator('[data-action="open-settings/zabbix"]').click()
+        page.locator("#zabbix-connection-form").wait_for()
+        assert page.locator('#nav [data-page="settings"].active').count() == 1
+        assert page.locator(".settings-tabs button").count() == 3
         page.locator('[data-action="zabbix-test"]').click()
         page.locator("#zabbix-feedback").get_by_text(
             "MCP 握手、主机组读取和主机计数均已通过", exact=False
         ).wait_for(timeout=15000)
+        assert page.locator("#zabbix-connection-form [name=token]").input_value() == ""
+        page.screenshot(path=str(OUT / "settings-1440.png"), full_page=True)
+        navigate("zabbix")
         assert page.locator(".zabbix-group-check:checked").count() == 1
+        checks.append(
+            {
+                "workflow": "Zabbix settings and connection verification share system settings; asset sync retains registration workflow",
+                "ok": True,
+            }
+        )
         before_count = len(page.request.get(base + "/api/v1/hosts").json())
         page.locator("#zabbix-discover-form button[type=submit]").click()
         page.locator(".sync-progress .status.preview").wait_for(timeout=30000)
@@ -280,6 +330,120 @@ try:
             {"workflow": "diagnostic category and parameter guidance", "ok": True}
         )
         page.locator('[data-action="tool-category"][data-id="全部"]').click()
+        navigate("credentials")
+        credential_count = len(page.request.get(base + "/api/v1/credentials").json())
+        upload_key = paramiko.RSAKey.generate(2048)
+        encrypted_key = io.StringIO()
+        upload_key.write_private_key(encrypted_key, password="fixture-key-passphrase")
+        private_material = (
+            "\ufeff" + encrypted_key.getvalue().replace("\n", "\r\n")
+        ).encode("utf-8")
+        page.locator('[data-action="new-credential"]').click()
+        page.get_by_label("凭据名称", exact=True).fill("浏览器上传密钥")
+        assert page.locator("#editor [name=key_source]").input_value() == "file"
+        assert page.locator("#editor [name=private_key]").is_hidden()
+        private_file = page.get_by_label("SSH 私钥文件", exact=True)
+        private_file.set_input_files(
+            {
+                "name": "too-large.key",
+                "mimeType": "application/octet-stream",
+                "buffer": b"x" * 16001,
+            }
+        )
+        page.locator("#editor-form button[type=submit]").click()
+        page.locator("#editor-feedback").get_by_text(
+            "大小不能超过", exact=False
+        ).wait_for()
+        private_file.set_input_files(
+            {
+                "name": "id_rsa.pub",
+                "mimeType": "text/plain",
+                "buffer": (
+                    upload_key.get_name() + " " + upload_key.get_base64()
+                ).encode(),
+            }
+        )
+        page.locator("#editor-form button[type=submit]").click()
+        page.locator("#editor-feedback").get_by_text(
+            ".pub 是公钥文件", exact=False
+        ).wait_for()
+        private_file.set_input_files(
+            {
+                "name": "id_rsa",
+                "mimeType": "application/octet-stream",
+                "buffer": private_material,
+            }
+        )
+        page.get_by_label("私钥口令（可选）", exact=True).fill("incorrect-passphrase")
+        page.locator("#editor-form button[type=submit]").click()
+        page.locator("#editor-feedback").get_by_text(
+            "私钥无法解析或口令错误", exact=True
+        ).wait_for()
+        assert (
+            len(page.request.get(base + "/api/v1/credentials").json())
+            == credential_count
+        )
+        checks.append(
+            {
+                "workflow": "key file upload rejects oversized files, public keys and invalid passphrases without saving credentials",
+                "ok": True,
+            }
+        )
+        page.get_by_label("私钥口令（可选）", exact=True).fill("fixture-key-passphrase")
+        assert page.locator("#editor-feedback").is_hidden()
+        page.screenshot(path=str(OUT / "credential-upload-1440.png"), full_page=True)
+        page.locator("#editor-form button[type=submit]").click()
+        page.locator("#editor").wait_for(state="hidden")
+        upload_row = page.locator("tr").filter(has_text="浏览器上传密钥")
+        upload_row.wait_for()
+        assert (
+            len(page.request.get(base + "/api/v1/credentials").json())
+            == credential_count + 1
+        )
+        assert encrypted_key.getvalue() not in page.content()
+        assert page.locator("#editor [name=key_file]").count() == 0
+        checks.append(
+            {
+                "workflow": "encrypted OpenSSH/PEM key upload accepts an extensionless BOM/CRLF file and clears modal data after save",
+                "ok": True,
+            }
+        )
+        upload_row.locator('[data-action="rotate-credential"]').click()
+        unencrypted_key = io.StringIO()
+        upload_key.write_private_key(unencrypted_key)
+        page.get_by_label("SSH 私钥文件", exact=True).set_input_files(
+            {
+                "name": "replacement.pem",
+                "mimeType": "application/x-pem-file",
+                "buffer": unencrypted_key.getvalue().encode(),
+            }
+        )
+        page.locator("#editor-form button[type=submit]").click()
+        page.locator("#editor").wait_for(state="hidden")
+        assert (
+            len(page.request.get(base + "/api/v1/credentials").json())
+            == credential_count + 1
+        )
+        page.locator('[data-action="new-credential"]').click()
+        page.get_by_label("凭据名称", exact=True).fill("浏览器粘贴密钥")
+        page.get_by_label("私钥提供方式", exact=True).select_option("paste")
+        assert page.locator("#editor [name=key_file]").is_hidden()
+        page.get_by_label("完整 SSH 私钥（不回显）", exact=True).fill(
+            unencrypted_key.getvalue()
+        )
+        page.locator("#editor-form button[type=submit]").click()
+        page.locator("#editor").wait_for(state="hidden")
+        assert (
+            len(page.request.get(base + "/api/v1/credentials").json())
+            == credential_count + 2
+        )
+        assert unencrypted_key.getvalue() not in page.content()
+        checks.append(
+            {
+                "workflow": "credential rotation supports file upload and pasted private keys remain supported",
+                "ok": True,
+            }
+        )
         for name in ("overview", "hosts", "diagnostics", "clients"):
             navigate(name)
             page.evaluate("document.fonts.ready")
