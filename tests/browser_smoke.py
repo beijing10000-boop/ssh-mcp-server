@@ -186,6 +186,21 @@ try:
             }
         )
         page.locator('[data-action="clear-selected"]').click()
+        assert "group=2" in page.url
+        page.reload()
+        page.locator(".pagination").get_by_text("第 1 / 1 页", exact=False).wait_for()
+        page.locator('[data-action="host-detail"]').first.click()
+        page.locator("#host-drawer").get_by_role(
+            "heading", name="准备情况", exact=True
+        ).wait_for()
+        assert page.locator("#host-drawer .readiness-list li").count() == 3
+        page.locator('[data-action="close-drawer"]').click()
+        checks.append(
+            {
+                "workflow": "paged URL restores on reload and host drawer shows readiness",
+                "ok": True,
+            }
+        )
         page.locator('[data-action="new-host"]').click()
         page.get_by_label("资产名称", exact=True).fill("浏览器验证资产")
         page.get_by_label("内网 IP 地址", exact=True).fill("8.8.8.8")
@@ -205,6 +220,15 @@ try:
         page.locator("#editor-close").click()
         checks.append({"workflow": "direct jump page loads credentials", "ok": True})
         navigate("diagnostics")
+        assert not page.locator("#diagnostic-form select[name=host_id]").count()
+        page.get_by_label("搜索并选择诊断目标", exact=True).fill("10001")
+        page.get_by_label("选择诊断目标 10.20.0.1", exact=True).check()
+        page.locator("#diagnostic-targets").get_by_text(
+            "测试资产 · linux-01", exact=True
+        ).wait_for()
+        checks.append(
+            {"workflow": "search Host ID and choose explicit target list", "ok": True}
+        )
         page.get_by_label("诊断类型", exact=True).select_option("memory_processes")
         assert page.locator("#diagnostic-form [name=service]").is_hidden()
         page.locator("#diagnostic-form button[type=submit]").click()
@@ -221,6 +245,8 @@ try:
         )
         page.screenshot(path=str(OUT / "job-1440.png"), full_page=True)
         navigate("diagnostics")
+        page.get_by_label("搜索并选择诊断目标", exact=True).fill("10001")
+        page.get_by_label("选择诊断目标 10.20.0.1", exact=True).check()
         page.get_by_label("诊断类型", exact=True).select_option("io")
         page.locator("#diagnostic-form button[type=submit]").click()
         page.locator('[data-action="cancel-job"]').wait_for()
@@ -240,6 +266,51 @@ try:
         page.locator('[data-action="cancel-job"]').click()
         page.get_by_text("已取消", exact=True).wait_for()
         checks.append({"workflow": "running diagnosis cancellation", "ok": True})
+        navigate("diagnostics")
+        for host in (28, 29):
+            page.get_by_label("搜索并选择诊断目标", exact=True).fill(str(10000 + host))
+            page.get_by_label("选择诊断目标 10.20.0." + str(host), exact=True).check()
+        page.get_by_label("诊断类型", exact=True).select_option("health")
+        # Remove the earlier single target so the scope is exactly two hosts.
+        if page.locator('[data-action="remove-target"][data-id="1"]').count():
+            page.locator('[data-action="remove-target"][data-id="1"]').click()
+        page.locator("#diagnostic-form button[type=submit]").click()
+        page.locator(".batch-progress progress[value='2']").wait_for()
+        page.locator(".batch-progress").get_by_text(
+            "失败: 1", exact=False
+        ).first.wait_for()
+        previous = page.url
+        page.locator('[data-action="retry-failed-jobs"]').click()
+        page.wait_for_function("previous=>location.href!==previous", arg=previous)
+        page.locator(".batch-progress progress[value='1']").wait_for()
+        assert page.locator("#content tbody tr").count() == 1
+        checks.append(
+            {"workflow": "batch progress and retry only failed target", "ok": True}
+        )
+        navigate("keys")
+        # Isolated fixture simulates an independent trusted inventory; production
+        # code never derives trusted input from the SSH handshake automatically.
+        trusted = page.request.get(base + "/api/v1/host-keys/batches/ui-keys").json()[
+            "items"
+        ][0]["fingerprint"]
+        page.locator("#trusted-fingerprints").fill(
+            "31 " + trusted + "\n999999 SHA256:wrong"
+        )
+        page.locator('[data-action="confirm-batch-from-manifest"]').click()
+        page.get_by_role("heading", name="可信指纹预检", exact=True).wait_for()
+        page.locator("#editor").get_by_text("找不到", exact=True).wait_for()
+        page.locator('#editor input[name="independent_confirmed"]').check()
+        page.locator("#editor-form button[type=submit]").click()
+        page.locator("#editor").wait_for(state="hidden")
+        assert page.request.get(base + "/api/v1/hosts/31/detail").json()["host"][
+            "has_host_key"
+        ]
+        checks.append(
+            {
+                "workflow": "fingerprint row precheck and explicit matching-only confirmation",
+                "ok": True,
+            }
+        )
         navigate("clients")
         page.locator('[data-action="new-client"]').click()
         page.get_by_label("客户端名称", exact=True).fill("浏览器验证客户端")
@@ -272,6 +343,7 @@ try:
         )
         row = page.locator("tr").filter(has_text="浏览器验证客户端")
         row.locator('[data-action="revoke-client"]').click()
+        page.locator('#action-confirm button[value="confirm"]').click()
         row.get_by_text("已撤销", exact=True).wait_for()
         assert (
             page.request.post(

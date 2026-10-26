@@ -132,5 +132,12 @@ def inventory_js():
     )
 
 
+@app.get("/static/interactions.js")
+def interactions_js():
+    return FileResponse(
+        STATIC_DIR / "interactions.js", media_type="application/javascript"
+    )
+
+
 # Keep this final: Mount('/') matches every route after it.
 app.mount("/", mcp_app)

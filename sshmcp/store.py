@@ -211,6 +211,7 @@ def init_db():
           id TEXT PRIMARY KEY, actor TEXT NOT NULL, source TEXT NOT NULL,
           skipped TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE INDEX IF NOT EXISTS ix_jobs_host_action_completed ON diagnostic_jobs(host_id,action,completed_at);
         CREATE INDEX IF NOT EXISTS ix_jobs_batch ON diagnostic_jobs(batch_id);
         CREATE INDEX IF NOT EXISTS ix_batches_created ON diagnostic_batches(created_at);
         CREATE INDEX IF NOT EXISTS ix_jobs_created ON diagnostic_jobs(created_at DESC,id);

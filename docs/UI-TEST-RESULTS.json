@@ -205,11 +205,19 @@
       "ok": true
     },
     {
+      "workflow": "paged URL restores on reload and host drawer shows readiness",
+      "ok": true
+    },
+    {
       "workflow": "asset validation appears in modal and root saves",
       "ok": true
     },
     {
       "workflow": "direct jump page loads credentials",
+      "ok": true
+    },
+    {
+      "workflow": "search Host ID and choose explicit target list",
       "ok": true
     },
     {
@@ -222,6 +230,14 @@
     },
     {
       "workflow": "running diagnosis cancellation",
+      "ok": true
+    },
+    {
+      "workflow": "batch progress and retry only failed target",
+      "ok": true
+    },
+    {
+      "workflow": "fingerprint row precheck and explicit matching-only confirmation",
       "ok": true
     },
     {
