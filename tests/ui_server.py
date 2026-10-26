@@ -113,6 +113,9 @@ def fixture_execute(
         if cancelled():
             raise diagnostics.SSHDiagnosticError("任务已取消")
         time.sleep(0.05)
+    output = "隔离界面测试结果，不代表生产观测。\n[采集范围]\n负载、内存、文件系统与进程快照\nAIOPS_SSH_OK\n0\nLinux"
+    if action == "health":
+        output += "\nCPU_COUNT=2\n5.00 4.00 3.00 1/100 99\nMemTotal: 1048576 kB\nMemAvailable: 40000 kB\nSwapTotal: 204800 kB\nSwapFree: 204000 kB\nFilesystem 1024-blocks Used Available Capacity Mounted on\n/dev/vda 100000 95000 5000 95% /\nFilesystem Inodes IUsed IFree IUse% Mounted on\n/dev/vda 1000 970 30 97% /\n"
     return {
         "host_id": host_id,
         "action": action,
@@ -121,7 +124,7 @@ def fixture_execute(
         "duration_ms": 300,
         "truncated": False,
         "stderr": "",
-        "output": "隔离界面测试结果，不代表生产观测。\n[采集范围]\n负载、内存、文件系统与进程快照\nAIOPS_SSH_OK\n0\nLinux",
+        "output": output,
     }
 
 

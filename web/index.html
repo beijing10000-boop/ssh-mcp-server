@@ -7,16 +7,17 @@
     <title>Linux 智能诊断 MCP 服务器</title>
     <link rel="stylesheet" href="/static/app.css" />
     <script defer src="/static/inventory.js"></script>
+    <script defer src="/static/presentation.js"></script>
     <script defer src="/static/interactions.js"></script>
     <script defer src="/static/app.js"></script>
   </head>
   <body>
     <div id="login" class="login-wrap">
       <div class="login-card">
-        <div class="logo">⌘</div>
-        <div class="eyebrow">SSH MCP SERVER · 飞书身份认证</div>
+        <div class="logo" data-icon="terminal"></div>
+        <div class="eyebrow">飞书身份认证</div>
         <h1>Linux 智能诊断</h1>
-        <p class="muted">独立 SSH MCP 服务 · 企业级身份验证</p>
+        <p class="muted">使用企业账号进入诊断控制台</p>
         <a href="/api/v1/auth/login" class="btn primary stretch login-link"
           >使用飞书账号登录 →</a
         >
@@ -28,58 +29,80 @@
     <div id="app" class="shell" hidden>
       <aside class="sidebar">
         <div class="brand">
-          <span class="symbol">⌘</span>
+          <span class="symbol" data-icon="terminal"></span>
           <div><strong>SSH MCP</strong><small>Linux 智能诊断</small></div>
         </div>
-        <div class="nav-caption">工作台</div>
         <nav id="nav" aria-label="主导航">
-          <button class="nav-link active" data-page="overview">
-            ▦ <span>运维总览</span>
+          <div class="nav-caption">概览</div>
+          <button class="nav-link" data-page="overview">
+            <span data-icon="overview"></span><span>运维总览</span>
           </button>
+          <div class="nav-caption">资产接入</div>
           <button class="nav-link" data-page="hosts">
-            ▤ <span>主机资产</span>
+            <span data-icon="hosts"></span><span>主机资产</span></button
+          ><button class="nav-link" data-page="zabbix">
+            <span data-icon="zabbix"></span><span>Zabbix 资产同步</span></button
+          ><button class="nav-link" data-page="groups">
+            <span data-icon="groups"></span><span>主机组</span></button
+          ><button class="nav-link" data-page="credentials">
+            <span data-icon="credentials"></span><span>SSH 凭据</span></button
+          ><button class="nav-link" data-page="proxies">
+            <span data-icon="proxies"></span><span>跳板管理</span></button
+          ><button class="nav-link" data-page="keys">
+            <span data-icon="keys"></span><span>主机公钥核验</span>
           </button>
-          <button class="nav-link" data-page="zabbix">
-            ⇣ <span>Zabbix 资产同步</span>
-          </button>
-          <button class="nav-link" data-page="groups">
-            ▧ <span>主机组</span>
-          </button>
-          <button class="nav-link" data-page="credentials">
-            ⌑ <span>SSH 凭据</span>
-          </button>
-          <button class="nav-link" data-page="proxies">
-            ⇄ <span>跳板管理</span>
-          </button>
-          <button class="nav-link" data-page="keys">
-            ◇ <span>主机公钥核验</span>
-          </button>
+          <div class="nav-caption">诊断</div>
           <button class="nav-link" data-page="diagnostics">
-            ✧ <span>诊断工作台</span>
+            <span data-icon="diagnostics"></span><span>诊断工作台</span></button
+          ><button class="nav-link" data-page="history">
+            <span data-icon="history"></span><span>诊断历史</span>
           </button>
-          <button class="nav-link" data-page="history">
-            ◷ <span>诊断历史</span>
-          </button>
+          <div class="nav-caption">治理</div>
           <button class="nav-link" data-page="audit">
-            ◴ <span>操作审计</span>
-          </button>
-          <button class="nav-link" data-page="settings">
-            ⚙ <span>系统配置</span>
+            <span data-icon="audit"></span><span>操作审计</span></button
+          ><button class="nav-link" data-page="settings">
+            <span data-icon="settings"></span><span>系统配置</span>
           </button>
         </nav>
         <div class="sidebar-foot">
-          <span class="indicator"></span> 端口 9099 · 独立服务
-          <span id="whoami"></span
+          <span class="indicator"></span> 服务端口 9099 <span id="whoami"></span
           ><button class="text-button" id="logout">退出飞书登录</button>
         </div>
       </aside>
       <main class="workspace">
+        <button
+          class="nav-backdrop"
+          data-action="toggle-nav"
+          type="button"
+          aria-label="关闭导航"
+        ></button>
         <header class="topbar">
           <div>
-            <span class="eyebrow">LINUX OPERATIONS / STANDALONE MCP</span>
+            <nav class="breadcrumb" aria-label="当前位置">
+              <span>SSH MCP</span><span aria-hidden="true">/</span
+              ><span id="breadcrumb-section">概览</span>
+            </nav>
             <h1 id="page-title">运维总览</h1>
           </div>
           <div class="top-actions">
+            <button
+              class="btn subtle"
+              id="menu-toggle"
+              data-action="toggle-nav"
+              aria-label="打开导航"
+              aria-expanded="false"
+              type="button"
+            >
+              <span data-icon="menu"></span></button
+            ><button
+              class="btn subtle"
+              id="density-toggle"
+              data-action="density-toggle"
+              type="button"
+              aria-pressed="false"
+            >
+              紧凑表格
+            </button>
             <button
               class="btn subtle"
               id="task-indicator"
@@ -93,7 +116,7 @@
               class="btn subtle"
               aria-label="切换深浅色主题"
             >
-              ◐</button
+              <span data-icon="moon"></span></button
             ><button id="reload" class="btn subtle">刷新</button>
           </div>
         </header>
@@ -118,7 +141,6 @@
       <form id="editor-form">
         <div class="modal-title">
           <div>
-            <span class="eyebrow">SSH MCP / 管理</span>
             <h2 id="editor-heading">编辑</h2>
           </div>
           <button
@@ -127,7 +149,7 @@
             id="editor-close"
             aria-label="关闭弹窗"
           >
-            ×
+            <span data-icon="close"></span>
           </button>
         </div>
         <div id="editor-fields" class="fields"></div>

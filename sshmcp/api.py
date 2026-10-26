@@ -11,7 +11,7 @@ import sqlite3
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 
-from . import store, diagnostics, jobs
+from . import store, diagnostics, jobs, dashboard
 from .auth import admin
 
 router = APIRouter(prefix="/api/v1")
@@ -168,26 +168,7 @@ def check_auth(actor=Depends(admin)):
 
 @router.get("/overview")
 def overview(actor=Depends(admin)):
-    with store.db() as c:
-        hosts = c.execute("SELECT COUNT(*) FROM hosts").fetchone()[0]
-        ready = c.execute(
-            "SELECT COUNT(*) FROM hosts WHERE host_key!='' AND credential_id IS NOT NULL AND enabled=1"
-        ).fetchone()[0]
-        verified = c.execute(
-            "SELECT COUNT(*) FROM hosts WHERE asset_type='linux' AND enabled=1 AND host_key!='' AND credential_id IS NOT NULL AND last_status='success'"
-        ).fetchone()[0]
-        groups = c.execute("SELECT COUNT(*) FROM groups").fetchone()[0]
-        failed = c.execute(
-            "SELECT COUNT(*) FROM audit WHERE outcome='failed' AND created_at>=datetime('now','-1 day')"
-        ).fetchone()[0]
-    return {
-        "hosts": hosts,
-        "ready": ready,
-        "verified": verified,
-        "groups": groups,
-        "failed_actions": failed,
-        "version": "0.3.1",
-    }
+    return dashboard.snapshot()
 
 
 @router.get("/hosts")

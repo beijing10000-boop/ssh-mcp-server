@@ -292,57 +292,7 @@ function currentHost(id) {
 }
 
 async function pageOverview() {
-  const [o, recent] = await Promise.all([
-    api("/overview"),
-    api("/jobs?page_size=5"),
-  ]);
-  const ratio = o.hosts ? Math.round((o.ready / o.hosts) * 100) : 0;
-  const cards = [
-    ["登记资产", o.hosts, "已登记的主机与设备"],
-    ["SSH 验证通过", o.verified, "已完成连接与 Linux 身份测试"],
-    ["主机组", o.groups, "资产分组与 MCP 授权"],
-    ["24 小时失败操作", o.failed_actions, "查看审计定位原因"],
-  ];
-  return (
-    '<section class="welcome"><div><div class="eyebrow">YOUR INFRASTRUCTURE, IN FOCUS</div><h2>让每次排查，都有据可查。</h2><p>从主机快照到问题线索，在受控范围内完成诊断。</p><div class="actions">' +
-    btn("open-diagnostics", "开始诊断", "", "primary") +
-    btn("open-zabbix", "从 Zabbix 同步资产") +
-    '</div></div><div class="readiness"><span>SSH 配置完成率</span><strong>' +
-    ratio +
-    '<small>%</small></strong><progress value="' +
-    o.ready +
-    '" max="' +
-    Math.max(1, o.hosts) +
-    '" aria-label="SSH 配置完成率"></progress></div></section>' +
-    '<div class="stat-grid">' +
-    cards
-      .map(
-        ([name, value, note]) =>
-          '<section class="panel stat"><div class="label">' +
-          name +
-          '</div><div class="number">' +
-          value +
-          "</div><small>" +
-          note +
-          "</small></section>",
-      )
-      .join("") +
-    "</div>" +
-    '<div class="grid2">' +
-    panel(
-      "从登记到诊断",
-      '<ol class="onboarding"><li><span>01</span><div><strong>准备访问凭据</strong><small>私钥加密保存，支持已登记的 SSH 跳板。</small></div></li><li><span>02</span><div><strong>确认主机身份</strong><small>批量获取公钥，通过可信渠道核对指纹。</small></div></li><li><span>03</span><div><strong>开始受控排查</strong><small>连接测试、诊断任务和历史记录集中管理。</small></div></li></ol>',
-    ) +
-    panel(
-      "独立运行，按需协作",
-      '<div class="connection-card"><span class="service-mark">MCP</span><div><strong>AI 平台 → SSH MCP → Linux</strong><p class="muted">只向授权主机执行固定诊断。AI 客户端无需接触 SSH 私钥。</p><code>/mcp · Streamable HTTP</code></div></div><div class="actions">' +
-        btn("open-settings/clients", "管理 MCP 接入") +
-        btn("open-keys", "查看公钥核验") +
-        "</div>",
-    ) +
-    "</div>" +
-    panel("最近诊断", jobTable(recent.items), btn("open-history", "全部历史"))
-  );
+  return dashboard();
 }
 
 async function pageHosts() {
@@ -438,6 +388,7 @@ async function pageHosts() {
       [
         ["all", "全部状态"],
         ["ready", "已配置 SSH"],
+        ["credential_bound", "已绑定凭据的 Linux"],
         ["verified", "SSH 验证通过"],
         ["missing_credential", "待绑定凭据"],
         ["untested", "待测试"],
@@ -731,6 +682,7 @@ async function pageDiagnostics() {
     '<div class="page-intro"><p>选择目标与诊断方式。任务在后台执行，离开页面后仍可在历史中查看。</p>' +
     btn("open-history", "查看诊断历史") +
     "</div>" +
+    scenarioTemplates() +
     '<div class="tool-categories" aria-label="按诊断场景筛选">' +
     ["全部", ...new Set(tools.map((t) => t.category))]
       .map(
@@ -762,7 +714,7 @@ async function pageDiagnostics() {
             )
             .map((t) => [t.id, t.name]),
         ) +
-        field("symptom", "故障场景", "cpu_high", "text", [
+        field("symptom", "故障场景", state.scenario || "cpu_high", "text", [
           ["cpu_high", "CPU 高"],
           ["mem_high", "内存高"],
           ["disk_full", "磁盘满"],
@@ -800,10 +752,16 @@ async function pageDiagnostics() {
           '<button class="capability" data-action="choose-tool" data-id="' +
           esc(t.id) +
           '"><span class="capability-icon">' +
-          (t.sensitive ? "◇" : "⌘") +
+          icon(t.sensitive ? "keys" : "diagnostics") +
           "</span><div><strong>" +
           esc(t.name) +
-          "</strong><small>" +
+          "</strong><p>" +
+          esc(t.question) +
+          "</p><small>参数：" +
+          esc(t.parameters?.join("、") || "无需额外参数") +
+          "</small><small>" +
+          esc(t.duration_hint) +
+          "</small><small>" +
           (t.standard_only ? "标准 SSH 模式 · " : "") +
           (t.sensitive ? "按授权范围采集" : "固定只读采集") +
           "</small></div></button>",
@@ -813,32 +771,47 @@ async function pageDiagnostics() {
   );
 }
 function jobTable(items) {
-  return table(
-    ["主机 / 任务", "诊断类型", "来源", "状态", "提交时间", "操作"],
-    items
-      .map(
-        (j) =>
-          '<tr data-key="' +
-          esc(j.id) +
-          '"><td><strong>' +
+  const labels = [
+    "主机 / 任务",
+    "诊断类型",
+    "来源",
+    "状态",
+    "提交时间",
+    "操作",
+  ];
+  const rows = items
+    .map((j) => {
+      const cells = [
+        "<strong>" +
           esc(j.host_name) +
           '</strong><small class="mono">' +
           esc(j.id.slice(0, 10)) +
-          "</small></td><td>" +
-          esc(actionName(j.action)) +
-          "</td><td>" +
-          esc(j.source === "mcp" ? "MCP 客户端" : "Web 控制台") +
-          "</td><td>" +
-          badge(j.status) +
-          '</td><td class="date">' +
-          date(j.created_at) +
-          "</td><td>" +
-          btn("job-detail", "查看", j.id) +
-          "</td></tr>",
-      )
-      .join(""),
+          "</small>",
+        esc(actionName(j.action)),
+        esc(j.source === "mcp" ? "MCP 客户端" : "Web 控制台"),
+        badge(j.status),
+        date(j.created_at),
+        btn("job-detail", "查看", j.id),
+      ];
+      return (
+        '<tr data-key="' +
+        esc(j.id) +
+        '">' +
+        cells
+          .map(
+            (html, i) => '<td data-label="' + labels[i] + '">' + html + "</td>",
+          )
+          .join("") +
+        "</tr>"
+      );
+    })
+    .join("");
+  return table(labels, rows).replace(
+    'class="table-wrap"',
+    'class="table-wrap job-history"',
   );
 }
+
 async function pageHistory() {
   const query = new URLSearchParams({
     page: state.historyPage,
@@ -919,11 +892,7 @@ async function pageJob() {
             (result
               ? (result.note
                   ? '<p class="notice">' + esc(result.note) + "</p>"
-                  : "") +
-                summarizeDiagnostic(result) +
-                '<details class="result-details"><summary>查看结构化结果</summary><pre class="code-result">' +
-                esc(JSON.stringify(result, null, 2)) +
-                "</pre></details>"
+                  : "") + diagnosticReport(result, job)
               : '<p class="muted">没有完成采集，尚无结果。</p>'),
     )
   );
@@ -1360,6 +1329,7 @@ async function render(poll = false) {
     state.manifest = "";
   }
   $("#page-title").textContent = titles[state.page] || "运维总览";
+  breadcrumb();
   for (const el of document.querySelectorAll(".nav-link"))
     el.classList.toggle(
       "active",
@@ -1488,6 +1458,8 @@ $("#nav").addEventListener("click", (e) => {
   const b = e.target.closest("[data-page]");
   if (b) {
     notice("");
+    document.body.classList.remove("nav-open");
+    $("#menu-toggle").setAttribute("aria-expanded", "false");
     go(b.dataset.page);
   }
 });
@@ -2349,4 +2321,5 @@ $("#theme-toggle").addEventListener("click", () => {
   document.documentElement.dataset.theme = value;
   localStorage.setItem("ssh-theme", value);
 });
+initPresentation();
 login();

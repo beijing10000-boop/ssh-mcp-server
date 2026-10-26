@@ -311,6 +311,8 @@ async function prepareHost(id) {
     state.batchId = batch.batch_id;
     notice("扫描只收集候选公钥；请通过独立可信渠道核验后再确认。");
     go("keys/" + batch.batch_id);
+  } else if (h.last_status === "success") {
+    await setTargets([h.id]);
   } else {
     const r = await api("/jobs", "POST", {
       host_ids: [h.id],

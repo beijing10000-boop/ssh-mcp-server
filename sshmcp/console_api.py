@@ -24,7 +24,8 @@ def where_hosts(q="", group_id=None, status="all"):
     rules = {
         "disabled": "enabled=0",
         "unverified": "enabled=1 AND host_key=''",
-        "ready": "enabled=1 AND host_key!='' AND credential_id IS NOT NULL",
+        "credential_bound": "asset_type='linux' AND enabled=1 AND credential_id IS NOT NULL",
+        "ready": "asset_type='linux' AND enabled=1 AND host_key!='' AND credential_id IS NOT NULL",
         "failed": "last_status='failed'",
         "enabled": "enabled=1",
         "missing_credential": "asset_type='linux' AND credential_id IS NULL",
