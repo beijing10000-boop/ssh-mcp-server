@@ -30,7 +30,8 @@ ACTIONS = {
     "network": "cat /proc/net/dev /proc/net/snmp; command -v ip >/dev/null 2>&1 && { ip -s link; ip route show; } || cat /proc/net/route",
     "sockets": "command -v ss >/dev/null 2>&1 && { ss -s; ss -lnt | head -n 60; } || head -n 60 /proc/net/tcp",
     "system": "uname -sr; cat /proc/uptime /proc/loadavg; date -u '+%Y-%m-%dT%H:%M:%SZ'",
-    "memory_processes": (
+    "memory_processes": "".join(
+        (
         "ps -eo pid,ppid,comm,pcpu,pmem,rss,etime,state --sort=-rss | head -n 25; "
         # A bounded fixed read-only identity probe; only approved jar basenames and
         # systemd service unit names are output, never the full argv or secrets.
@@ -48,7 +49,8 @@ ACTIONS = {
         '{print substr($0,RSTART,RLENGTH); exit}\' "/proc/$pid/cgroup"); ',
         '[ -n "$app" ] && kind=service; fi; ',
         '[ -n "$app" ] && printf \'AIOPS_APP %s %s %s\n\' "$pid" "$kind" "$app"; ',
-        "done",
+            "done",
+        )
     ),
     "health": (
         "printf 'CPU_COUNT='; getconf _NPROCESSORS_ONLN; printf '\\n[负载与运行时长]\\n'; cat /proc/loadavg /proc/uptime; "
