@@ -394,6 +394,17 @@ def processes(text, summary, findings):
                     "state": fields[7],
                 }
             )
+    # Join optional, sanitized APP_IDENTITY records to the matching RSS snapshot.
+    # No guessed application labels: comm=java alone does not identify a workload.
+    labels = {}
+    for match in re.finditer(
+        r"(?m)^AIOPS_APP ([0-9]{1,10}) (jar|service) ([A-Za-z0-9_.@-]{1,160})$",
+        text,
+    ):
+        labels[int(match[1])] = (match[3], match[2])
+    for row in rows:
+        if row["pid"] in labels:
+            row["application"], row["identity_source"] = labels[row["pid"]]
     summary["processes"] = rows[:25]
     summary["coverage"] = (
         "进程排行快照；CPU 口径为进程生命周期平均值，多线程进程可超过 100%"
