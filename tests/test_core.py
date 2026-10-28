@@ -729,4 +729,3 @@ def test_rss_identity_probe_uses_only_bounded_fixed_procfs_reads():
     assert "print v" in command  # print only safe basename, never argv
     with pytest.raises(ValueError):
         diagnostics.command_for("memory_processes", service="injected;id")
-
