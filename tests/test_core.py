@@ -695,3 +695,38 @@ def test_remote_tcp_sampler_awk_on_fixture_without_ssh():
     assert result["sample_b_sockets"] == 1
     assert result["matched_sockets"] == 1
     assert result["ranking"][0]["peer_ip"] == "172.20.1.3"
+
+
+def test_rss_process_names_only_use_safe_jar_or_service_identifiers():
+    from sshmcp import observations
+
+    sample = (
+        "PID PPID COMMAND %CPU %MEM RSS ELAPSED S\n"
+        "31272 1 java 2.2 27.3 2232168 02:00 S\n"
+        "6092 1 java 1.1 22.9 1877632 01:00 S\n"
+        "24782 1 java 0.4 16.6 1362656 00:15 S\n"
+        "[AIOPS_APP_IDENTITY]\n"
+        "AIOPS_APP 31272 jar billing-api.jar\n"
+        "AIOPS_APP 6092 service order-worker.service\n"
+        "AIOPS_APP 24782 jar --password=mysecret.jar\n"
+    )
+    report = observations.analyze("memory_processes", sample)
+    processes = report["summary"]["processes"]
+    assert processes[0]["application"] == "billing-api.jar"
+    assert processes[0]["identity_source"] == "jar"
+    assert processes[1]["application"] == "order-worker.service"
+    assert processes[2]["name"] == "java"
+    # Report identifiers are hints, not complete argv or proven business ownership.
+    assert all("cmdline" not in str(p) for p in processes)
+
+
+def test_rss_identity_probe_uses_only_bounded_fixed_procfs_reads():
+    command = diagnostics.command_for("memory_processes")
+    assert "head -n 24" in command
+    assert "/proc/$pid/cmdline" in command
+    assert "/proc/$pid/cgroup" in command
+    assert "AIOPS_APP" in command
+    assert "print v" in command  # print only safe basename, never argv
+    with pytest.raises(ValueError):
+        diagnostics.command_for("memory_processes", service="injected;id")
+
