@@ -353,7 +353,7 @@ def ssh_diagnose_capabilities(
 def ssh_diagnose_memory_processes(
     host_id: int, expected_revision: int | None = None
 ) -> dict:
-    """按 RSS 排序查询前 24 个进程，不读取进程环境变量或完整命令行。"""
+    """按 RSS 排序查询前 24 个进程，可识别的 Java JAR/服务单元给出安全应用名称，不返回完整命令行或进程环境变量。"""
     return _run(host_id, "memory_processes", expected_revision=expected_revision)
 
 
