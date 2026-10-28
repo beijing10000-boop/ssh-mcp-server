@@ -38,16 +38,16 @@ ACTIONS = {
         "ps -eo pid= --sort=-rss | head -n 24 | while read -r pid; do "
         "case \"$pid\" in ''|*[!0-9]*) continue;; esac; "
         "app=''; kind=''; "
-        "if [ -r \"/proc/$pid/cmdline\" ]; then "
+        'if [ -r "/proc/$pid/cmdline" ]; then ',
         "app=$(tr '\\000' '\\n' < \"/proc/$pid/cmdline\" | "
-        "awk '$0==\"-jar\" {found=1; next} found {n=split($0,p,\"/\"); "
+        'awk \'$0=="-jar" {found=1; next} found {n=split($0,p,"/"); ',
         "v=p[n]; if(v ~ /^[A-Za-z0-9_.-]+[.]jar$/) print v; exit}'); "
-        "[ -n \"$app\" ] && kind=jar; fi; "
-        "if [ -z \"$app\" ] && [ -r \"/proc/$pid/cgroup\" ]; then "
+        '[ -n "$app" ] && kind=jar; fi; ',
+        'if [ -z "$app" ] && [ -r "/proc/$pid/cgroup" ]; then ',
         "app=$(awk 'match($0,/[A-Za-z0-9_.@-]+[.]service/)"
-        "{print substr($0,RSTART,RLENGTH); exit}' \"/proc/$pid/cgroup\"); "
-        "[ -n \"$app\" ] && kind=service; fi; "
-        "[ -n \"$app\" ] && printf 'AIOPS_APP %s %s %s\\n' \"$pid\" \"$kind\" \"$app\"; "
+        '{print substr($0,RSTART,RLENGTH); exit}\' "/proc/$pid/cgroup"); ',
+        '[ -n "$app" ] && kind=service; fi; ',
+        '[ -n "$app" ] && printf \'AIOPS_APP %s %s %s\n\' "$pid" "$kind" "$app"; ',
         "done"
     ),
     "health": (
