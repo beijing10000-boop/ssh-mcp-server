@@ -48,7 +48,7 @@ ACTIONS = {
         '{print substr($0,RSTART,RLENGTH); exit}\' "/proc/$pid/cgroup"); ',
         '[ -n "$app" ] && kind=service; fi; ',
         '[ -n "$app" ] && printf \'AIOPS_APP %s %s %s\n\' "$pid" "$kind" "$app"; ',
-        "done"
+        "done",
     ),
     "health": (
         "printf 'CPU_COUNT='; getconf _NPROCESSORS_ONLN; printf '\\n[负载与运行时长]\\n'; cat /proc/loadavg /proc/uptime; "
