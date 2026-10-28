@@ -726,6 +726,9 @@ def test_rss_identity_probe_uses_only_bounded_fixed_procfs_reads():
     assert "/proc/$pid/cmdline" in command
     assert "/proc/$pid/cgroup" in command
     assert "AIOPS_APP" in command
+    import subprocess
+
+    assert subprocess.run(["sh", "-n", "-c", command], check=False).returncode == 0
     assert "print v" in command  # print only safe basename, never argv
     with pytest.raises(ValueError):
         diagnostics.command_for("memory_processes", service="injected;id")
