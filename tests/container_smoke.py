@@ -36,7 +36,7 @@ try:
         for _ in range(100):
             try:
                 with opener.open(base + "/healthz", timeout=2) as response:
-                    assert json.load(response)["version"] == "0.4.2"
+                    assert json.load(response)["version"] == "0.5.0"
                 return
             except (OSError, urllib.error.URLError):
                 time.sleep(0.2)

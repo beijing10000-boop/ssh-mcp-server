@@ -35,10 +35,10 @@
 | ssh_test_connection | 验证 SSH 身份、认证和固定命令 |
 | ssh_diagnose_health | 负载、内存、Swap、文件系统、inode 与高 CPU 进程综合快照 |
 | ssh_diagnose_capabilities | 登录 UID、诊断命令是否可用，不自动安装工具 |
-| ssh_diagnose_cpu | CPU 负载/内核计数 |
+| ssh_diagnose_cpu | CPU 负载（1/5/15 分钟及每核）、vmstat 1 秒采样（运行/阻塞队列与 us/sy/id/wa/st）、procs_running/procs_blocked；负载高但 CPU 空闲时给出 load_cpu_divergence 线索 |
 | ssh_diagnose_memory | 内存与 Swap |
 | ssh_diagnose_disk | 磁盘容量、inode 与挂载 |
-| ssh_diagnose_processes | 进程概况 |
+| ssh_diagnose_processes | 进程排行（生命周期平均 CPU）；A 模式另含进程状态计数、D 状态进程及 wchan、最近 1 秒 CPU 增量 cpu_interval |
 | ssh_diagnose_memory_processes | 按 RSS 排序的进程概况，不读取环境变量或完整命令行 |
 | ssh_diagnose_io | I/O 数据 |
 | ssh_diagnose_network | 网卡与路由 |
@@ -64,7 +64,7 @@
 | ssh_diagnose_oom | 有限内核日志中的 OOM 线索 |
 | ssh_diagnose_container_stats | Docker/Podman 当前资源数据 |
 | ssh_diagnose_security_status | 安全组件状态 |
-| ssh_list_tool_catalog | 当前客户端授权的诊断目录与参数要求 |
+| ssh_list_tool_catalog | 当前客户端授权的诊断目录与参数要求；每项 `tool` 为对应的 MCP 工具名，客户端可据此只展示获准动作 |
 | ssh_list_groups | 当前客户端获授权的主机组 |
 | ssh_submit_diagnostics | 每批 1–100 台授权主机，后台执行固定只读诊断 |
 | ssh_get_diagnostic_job | 查询自己提交且仍有权访问的任务 |
@@ -72,7 +72,7 @@
 
 共 42 个工具（32 类单项诊断、组合诊断、资产/目录查询及后台任务管理）。`ssh_list_hosts` 支持 query、group_id、offset、limit（最多 1000），返回当前授权范围内的所属主机组名称，只返回当前客户端可访问且已就绪的资产。所有执行操作**仅接受登记的数字 host_id**，单项诊断支持可选的 `expected_revision`：建议 AI 平台始终传入解析时取得的版本，拒绝过期映射。即使模型请求任意 IP 或 shell 命令，服务端也没有对应工具。
 
-结果包含 `status=success|partial|failed|cancelled`；已创建的执行任务包含 `job_id`，可供管理员在 Web 查看。工具层面的 MCP `isError` 和结果里的 `status` 都需要检查。缺命令、读取权限不足、非零退出或输出截断不能解释为诊断成功。单项诊断同步返回；批量任务通过 ssh_submit_diagnostics 后台提交，再查询状态。客户端断连不保证立即取消远端任务。
+结果包含 `status=success|partial|failed|cancelled`；失败结果另含稳定的 `error_code`（`forbidden` 未授权、`unavailable` 主机不存在/未就绪/无权访问、`mapping_unresolved` Zabbix 映射缺失或重复、`timeout`、`revision_changed`、`host_unverified`、`unsupported`、`invalid_argument`、`cancelled`、`failed`），`error` 仍为中文说明；已创建的执行任务包含 `job_id`，可供管理员在 Web 查看。工具层面的 MCP `isError` 和结果里的 `status` 都需要检查。缺命令、读取权限不足、非零退出或输出截断不能解释为诊断成功。单项诊断同步返回；批量任务通过 ssh_submit_diagnostics 后台提交，再查询状态。客户端断连不保证立即取消远端任务。
 
 ## 接入 AI Ops Platform
 

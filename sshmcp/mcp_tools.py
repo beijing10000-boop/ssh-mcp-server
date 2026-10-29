@@ -152,6 +152,7 @@ def ssh_resolve_target(address: str) -> dict:
         return {
             "status": "failed",
             "error": "主机不存在、未就绪或不在当前客户端授权范围内",
+            "error_code": "unavailable",
         }
     host = dict(row)
     if (
@@ -163,6 +164,7 @@ def ssh_resolve_target(address: str) -> dict:
         return {
             "status": "failed",
             "error": "主机不存在、未就绪或不在当前客户端授权范围内",
+            "error_code": "unavailable",
         }
     return {
         "status": "success",
@@ -193,7 +195,11 @@ def _resolve_host(zabbix_hostid):
             (zabbix_hostid,),
         ).fetchall()
     if len(rows) != 1:
-        return {"status": "failed", "error": "映射不存在或存在重复关联，请由管理员修正"}
+        return {
+            "status": "failed",
+            "error": "映射不存在或存在重复关联，请由管理员修正",
+            "error_code": "mapping_unresolved",
+        }
     host = dict(rows[0])
     if (
         not access.host_allowed(host["id"])
@@ -202,7 +208,11 @@ def _resolve_host(zabbix_hostid):
         or not host["host_key"]
         or not host["credential_id"]
     ):
-        return {"status": "failed", "error": "关联主机未就绪或当前客户端无权访问"}
+        return {
+            "status": "failed",
+            "error": "关联主机未就绪或当前客户端无权访问",
+            "error_code": "unavailable",
+        }
     return {
         "status": "success",
         "host_id": host["id"],
@@ -432,7 +442,26 @@ def _run(
             "action": action,
             "status": "failed",
             "error": diagnostics.redact_output(error)[:250],
+            "error_code": error_code(exc, error),
         }
+
+
+ERROR_CODES = (
+    ("超时", "timeout"),
+    ("已变更", "revision_changed"),
+    ("取消", "cancelled"),
+    ("公钥", "host_unverified"),
+    ("网关", "unsupported"),
+)
+
+
+def error_code(exc, message):
+    """Stable machine-readable failure class; `error` stays human readable."""
+    if isinstance(exc, PermissionError):
+        return "forbidden"
+    if isinstance(exc, ValueError):
+        return "invalid_argument"
+    return next((code for word, code in ERROR_CODES if word in message), "failed")
 
 
 @mcp.tool(annotations=READ_ONLY)

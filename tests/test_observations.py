@@ -1,7 +1,9 @@
 """Structured observations must be bounded, conservative and scope safe."""
 
 import json
+import os
 import subprocess
+import sys
 
 import pytest
 
@@ -62,6 +64,136 @@ def test_cpu_memory_disk_psi_and_service_rules():
         "MemTotal: 100 kB\nMemAvailable: 80 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n",
     )
     assert clean["findings"] == []
+
+
+CPU_OUTPUT = """CPU_COUNT=2
+3.34 3.40 3.45 2/327 3592417
+cpu  155728400 292744 34479741 8712855818 5153813 13643116 8443476 0 0 0
+cpu0 77649037 146615 17150673 4354118911 2593402 7109562 4247095 0 0 0
+cpu1 78079363 146129 17329068 4358736907 2560411 6533554 4196381 0 0 0
+procs_running 2
+procs_blocked 3
+procs ---------memory---------- ---swap-- -----io---- -system-- -------cpu-------
+ r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st gu
+ 3  0      0 120000  20000 900000    0    0     5    20  300  500 30  8 60  2  0  0
+ 2  3      0 119000  20000 900100    0    0     0    44  410  620  1  2 95  2  0  0
+"""
+
+
+def test_cpu_reports_all_load_averages_vmstat_and_load_cpu_divergence():
+    data = observations.analyze("cpu", CPU_OUTPUT)
+    metrics = {m["metric"]: m for m in data["summary"]["metrics"]}
+    assert [metrics[k]["value"] for k in ("load_1m", "load_5m", "load_15m")] == [
+        3.34,
+        3.4,
+        3.45,
+    ]
+    assert metrics["load_per_core_5m"]["value"] == 1.7
+    # Zabbix's default per-CPU warning line, so an active alert is not "info".
+    assert metrics["load_per_core"]["threshold"] == 1.5
+    assert metrics["load_per_core"]["level"] == "warning"
+    # The last vmstat row is the 1 s sample, not the since-boot averages.
+    assert metrics["cpu_idle_percent"]["value"] == 95
+    assert metrics["vmstat_blocked"]["value"] == 3
+    assert metrics["cpu_steal_percent"]["value"] == 0
+    assert metrics["procs_blocked"]["level"] == "warning"
+    divergence = next(
+        f for f in data["findings"] if f["metric"] == "load_cpu_divergence"
+    )
+    assert divergence["value"] == {"load_per_core": 1.67, "cpu_idle_percent": 95}
+    assert "CPU Ready" in divergence["hint"]
+    # Gateway/older output without /proc/stat or vmstat still parses.
+    old = observations.analyze("cpu", "CPU_COUNT=1\n3.00 2.00 1.00 1/10 99\n")
+    assert not any(f["metric"] == "load_cpu_divergence" for f in old["findings"])
+
+
+PROCESS_OUTPUT = """  PID  PPID COMMAND         %CPU %MEM   RSS     ELAPSED S
+3572619 1386621 postgres         8.0 29.3 1096256    10:54:58 S
+3573186 1386621 postgres         7.8 29.3 1094960    10:34:41 S
+[AIOPS_STATES]
+      2 D
+      3 R
+    320 S
+[AIOPS_DSTATE]
+811 D io_schedule jbd2/sda1-8
+912 D nfs_wait_bit_killable rsync worker
+[AIOPS_CPU_DELTA]
+AIOPS_DELTA 3572619 45.0 R postgres
+AIOPS_DELTA 4100 12.5 S kworker/u8:2-ev
+"""
+
+
+def test_processes_report_states_d_waits_and_one_second_cpu_delta():
+    summary = observations.analyze("processes", PROCESS_OUTPUT)["summary"]
+    assert [p["pid"] for p in summary["processes"]] == [3572619, 3573186]
+    assert summary["state_counts"] == {"D": 2, "R": 3, "S": 320}
+    assert summary["uninterruptible"][1] == {
+        "pid": 912,
+        "wchan": "nfs_wait_bit_killable",
+        "name": "rsync worker",
+    }
+    assert summary["cpu_interval"][0] == {
+        "pid": 3572619,
+        "cpu_percent_1s": 45.0,
+        "state": "R",
+        "name": "postgres",
+    }
+    assert "1 秒" in summary["coverage"]
+    # Gateway output (no optional sections) keeps the previous shape.
+    plain = observations.analyze("processes", PROCESS_OUTPUT.split("[AIOPS_")[0])
+    assert "cpu_interval" not in plain["summary"]
+    assert "生命周期平均值" in plain["summary"]["coverage"]
+
+
+@pytest.mark.skipif(not os.path.exists("/proc/self/stat"), reason="needs Linux /proc")
+def test_processes_command_runs_under_sh_and_measures_a_busy_process():
+    busy = subprocess.Popen([sys.executable, "-c", "while True: pass"])
+    try:
+        result = subprocess.run(
+            ["/bin/sh", "-c", diagnostics.command_for("processes")],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    finally:
+        busy.kill()
+        busy.wait()
+    assert result.returncode == 0, result.stderr
+    summary = observations.analyze("processes", result.stdout)["summary"]
+    assert summary["state_counts"].get("R", 0) >= 1
+    top = {row["pid"]: row["cpu_percent_1s"] for row in summary["cpu_interval"]}
+    assert top.get(busy.pid, 0) > 50, result.stdout[-2000:]
+
+
+def test_catalog_names_the_mcp_tool_for_every_action():
+    import asyncio
+
+    from sshmcp.catalog import entries
+
+    registered = {tool.name for tool in asyncio.run(mcp.list_tools())}
+    assert all(entry["tool"] in registered for entry in entries())
+    by_action = {entry["id"]: entry["tool"] for entry in entries()}
+    assert by_action["mount_health"] == "ssh_diagnose_mounts"
+    assert by_action["log_errors"] == "ssh_diagnose_system_errors"
+    assert by_action["pressure"] == "ssh_diagnose_pressure"
+
+
+def test_failures_carry_a_stable_error_code():
+    from sshmcp.mcp_tools import error_code
+
+    assert (
+        error_code(PermissionError("x"), "该 MCP 客户端无权访问此主机或诊断动作")
+        == "forbidden"
+    )
+    assert error_code(ValueError("x"), "主机 ID 必须是正整数") == "invalid_argument"
+    failure = diagnostics.SSHDiagnosticError
+    assert (
+        error_code(failure(), "SSH 诊断执行超时（单项 20 秒 / 组合 60 秒）")
+        == "timeout"
+    )
+    assert error_code(failure(), "主机配置已变更，请重新提交诊断") == "revision_changed"
+    assert error_code(failure(), "未核验 SSH 主机公钥") == "host_unverified"
+    assert error_code(RuntimeError(), "RuntimeError") == "failed"
 
 
 def test_counter_snapshots_do_not_invent_rates():

@@ -20,11 +20,31 @@ from paramiko import SSHException
 from . import store, insights, operations, observations, triage
 
 PREFIX = "PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; LC_ALL=C; export LC_ALL=C; "
+# Process state counts, D-state waits and a 1 s CPU delta from two /proc/*/stat
+# samples (utime+stime, fields 14-15 after the parenthesised comm). Read-only,
+# nothing written to disk; the snapshot is held in shell variables only.
+PROCESS_SIGNALS = (
+    "printf '[AIOPS_STATES]\\n'; ps -eo state= | cut -c1 | sort | uniq -c; "
+    "printf '[AIOPS_DSTATE]\\n'; ps -eo pid=,state=,wchan:32=,comm= | "
+    "awk '$2 ~ /^D/ {c=$4; for (i=5; i<=NF; i++) c=c\" \"$i; print $1, $2, $3, c}' | head -n 10; "
+    "printf '[AIOPS_CPU_DELTA]\\n'; hz=$(getconf CLK_TCK 2>/dev/null || echo 100); "
+    'snap() { for f in /proc/[0-9]*/stat; do read -r l 2>/dev/null < "$f" && printf \'%s\\n\' "$l"; done; }; '
+    "a=$(snap); sleep 1; b=$(snap); "
+    "{ printf '%s\\n' \"$a\" | sed 's/^/A /'; printf '%s\\n' \"$b\" | sed 's/^/B /'; } | "
+    'awk -v hz="$hz" \'{tag=$1; line=substr($0,3); o=index(line,"("); c=0; '
+    'for (i=length(line); i>1; i--) if (substr(line,i,2)==") ") {c=i; break} '
+    'if (!o || !c) next; pid=substr(line,1,o-2); split(substr(line,c+2),f," "); t=f[12]+f[13]; '
+    'if (tag=="A") t0[pid]=t; else {t1[pid]=t; st[pid]=f[1]; nm[pid]=substr(line,o+1,c-o-1)}} '
+    "END {for (p in t1) if (p in t0) {d=(t1[p]-t0[p])*100/hz; "
+    'if (d>0) printf "AIOPS_DELTA %s %.1f %s %s\\n", p, d, st[p], nm[p]}}\' | '
+    "sort -k3,3nr | head -n 15"
+)
 ACTIONS = {
     "connection": "printf 'AIOPS_SSH_OK\\n'; id -u; uname -s",
     "cpu": "printf 'CPU_COUNT='; getconf _NPROCESSORS_ONLN; cat /proc/loadavg /proc/stat; command -v vmstat >/dev/null 2>&1 && vmstat 1 2 || true",
     "memory": "cat /proc/meminfo; command -v free >/dev/null 2>&1 && free -k || true",
-    "processes": "ps -eo pid,ppid,comm,pcpu,pmem,rss,etime,state --sort=-pcpu | head -n 25",
+    "processes": "ps -eo pid,ppid,comm,pcpu,pmem,rss,etime,state --sort=-pcpu | head -n 25; "
+    + PROCESS_SIGNALS,
     "disk": "df -Pk -l; df -Pi -l; head -n 80 /proc/mounts",
     "io": "command -v iostat >/dev/null 2>&1 && iostat -dx 1 2 || cat /proc/diskstats",
     "network": "cat /proc/net/dev /proc/net/snmp; command -v ip >/dev/null 2>&1 && { ip -s link; ip route show; } || cat /proc/net/route",

@@ -58,23 +58,94 @@ def metric(
     )
 
 
+# Zabbix "Linux by Zabbix agent" default {$LOAD_AVG_PER_CPU.MAX.WARN}; keeping the
+# same line means an active load alert is not reported back as "info".
+LOAD_PER_CORE_WARN = 1.5
+VMSTAT_FIELDS = {
+    "r": "vmstat_runnable",
+    "b": "vmstat_blocked",
+    "us": "cpu_user_percent",
+    "sy": "cpu_system_percent",
+    "id": "cpu_idle_percent",
+    "wa": "cpu_iowait_percent",
+    "st": "cpu_steal_percent",
+}
+
+
+def vmstat_sample(text):
+    """Last `vmstat 1 2` row (a 1 s sample, not since-boot averages) by column name."""
+    lines = text.splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        names = lines[index].split()
+        if names[:2] == ["r", "b"] and "id" in names:
+            rows = [
+                line.split()
+                for line in lines[index + 1 :]
+                if len(line.split()) == len(names)
+                and all(number(v) is not None for v in line.split())
+            ]
+            return dict(zip(names, map(number, rows[-1]))) if rows else {}
+    return {}
+
+
 def cpu(text, summary, findings):
     m = re.search(r"(?m)^(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+\d+/\d+\s+\d+", text)
     cores = len(re.findall(r"(?m)^cpu\d+\s", text))
     n = re.search(r"(?m)^CPU_COUNT=(\d+)$", text)
     cores = int(n[1]) if n else cores
+    per_core = None
     if m:
         metric(summary, findings, "load_1m", float(m[1]))
+        metric(summary, findings, "load_5m", float(m[2]))
+        metric(summary, findings, "load_15m", float(m[3]))
         if cores:
+            per_core = float(m[1]) / cores
             metric(summary, findings, "cpu_cores", cores)
             metric(
                 summary,
                 findings,
                 "load_per_core",
-                float(m[1]) / cores,
-                threshold=2,
+                per_core,
+                threshold=LOAD_PER_CORE_WARN,
                 critical=4,
                 hint="负载包含等待 I/O 的任务；结合 PSI、vmstat 与进程排行核查",
+            )
+            metric(summary, findings, "load_per_core_5m", float(m[2]) / cores)
+    for key in ("procs_running", "procs_blocked"):
+        found = re.search(r"(?m)^" + key + r"\s+(\d+)$", text)
+        if found:
+            metric(
+                summary,
+                findings,
+                key,
+                int(found[1]),
+                threshold=1 if key == "procs_blocked" else None,
+                hint="存在不可中断等待（D 状态）任务；负载升高可能来自 I/O 或内核等待，结合 PSI 与进程状态核查",
+            )
+    sample = vmstat_sample(text)
+    for column, key in VMSTAT_FIELDS.items():
+        if column in sample:
+            metric(
+                summary, findings, key, sample[column], "%" if "percent" in key else ""
+            )
+    idle = sample.get("id")
+    if per_core is not None and idle is not None and per_core >= LOAD_PER_CORE_WARN:
+        if idle >= 50:
+            findings.append(
+                {
+                    "level": "warning",
+                    "metric": "load_cpu_divergence",
+                    "value": {
+                        "load_per_core": round(per_core, 3),
+                        "cpu_idle_percent": idle,
+                    },
+                    "threshold": {
+                        "load_per_core": LOAD_PER_CORE_WARN,
+                        "cpu_idle_percent": 50,
+                    },
+                    "hint": "负载偏高但 CPU 空闲较多：负载可能来自 D 状态（不可中断等待）任务或宿主机 CPU 争抢，而非计算繁忙。"
+                    "核查 procs_blocked、PSI 与 D 状态进程；VMware 等虚拟机通常不上报 steal，需在虚拟化平台查看 CPU Ready",
+                }
             )
 
 
@@ -409,6 +480,52 @@ def processes(text, summary, findings):
     summary["coverage"] = (
         "进程排行快照；CPU 口径为进程生命周期平均值，多线程进程可超过 100%"
     )
+    # Optional sections (A-mode `processes` since v0.5.0); absent on gateway hosts.
+    states = {
+        m[2]: int(m[1])
+        for m in re.finditer(r"(?m)^\s*(\d+) ([A-Za-z])$", section(text, "STATES"))
+    }
+    if states:
+        summary["state_counts"] = states
+        metric(
+            summary,
+            findings,
+            "processes_uninterruptible",
+            states.get("D", 0),
+            threshold=1,
+            hint="存在 D 状态（不可中断等待）进程，会计入负载但不占 CPU；查看 wchan 判断在等待磁盘、网络存储还是内核锁",
+        )
+    blocked = [
+        {"pid": int(m[1]), "wchan": m[2], "name": m[3]}
+        for m in re.finditer(
+            r"(?m)^\s*(\d+) D\S* (\S+) (\S.{0,63})$", section(text, "DSTATE")
+        )
+    ]
+    if blocked:
+        summary["uninterruptible"] = blocked[:10]
+    interval = [
+        {
+            "pid": int(m[1]),
+            "cpu_percent_1s": float(m[2]),
+            "state": m[3],
+            "name": m[4],
+        }
+        for m in re.finditer(
+            r"(?m)^AIOPS_DELTA (\d+) (\d+(?:\.\d+)?) (\S+) (\S.{0,63})$", text
+        )
+    ]
+    if states or interval:
+        summary["cpu_interval"] = interval[:15]
+        summary["coverage"] = (
+            "进程排行快照；processes.cpu_percent 为进程生命周期平均值，"
+            "cpu_interval 为最近 1 秒的采样增量（多线程可超过 100%），用于判断当前占用"
+        )
+
+
+def section(text, name):
+    """Text of a `[AIOPS_<name>]` block up to the next block marker."""
+    match = re.search(r"(?ms)^\[AIOPS_" + name + r"\]\n(.*?)(?=^\[AIOPS_|\Z)", text)
+    return match[1] if match else ""
 
 
 def resources(text, summary, findings):

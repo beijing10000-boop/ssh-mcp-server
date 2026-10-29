@@ -107,12 +107,28 @@ QUESTIONS = {
 }
 
 
+# MCP tool per action; all others are named ssh_diagnose_<action>. Clients filter
+# their tool list by `tool` so they never offer an action this token cannot run.
+TOOLS = {
+    "connection": "ssh_test_connection",
+    "triage": "ssh_triage",
+    "directory": "ssh_diagnose_directory_usage",
+    "mount_health": "ssh_diagnose_mounts",
+    "log_errors": "ssh_diagnose_system_errors",
+}
+
+
+def tool_name(action):
+    return TOOLS.get(action, "ssh_diagnose_" + action)
+
+
 def entries():
     from .diagnostics import STANDARD_ONLY
 
     return [
         {
             "id": action,
+            "tool": tool_name(action),
             "name": name,
             "question": QUESTIONS[action],
             "estimated_seconds": 60 if action == "triage" else 20,
