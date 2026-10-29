@@ -41,3 +41,9 @@ curl -fsS http://127.0.0.1:9099/healthz
 ```
 
 `/healthz` 应返回 `0.5.0`。旧客户端不受影响：新增字段都是附加的，原有字段的含义不变（每核负载的告警线除外）。
+
+### 容器反复重启：`Permission denied: '/app/sshmcp/__init__.py'`
+
+服务器 root 的 umask 为 077 时，`git pull` 改写的源码文件权限是 600。旧版 Dockerfile 原样复制这些权限，容器内的非 root 用户读不了源码，服务启动即退出。数据目录不受影响。
+
+已在 Dockerfile 中修复：镜像构建时统一设为可读。拉取最新 main 后，重新执行上面的 `docker compose up -d --build ...` 即可。还在用旧 Dockerfile 时，可先在部署目录执行 `chmod -R a+rX sshmcp web`，再重新构建。
