@@ -367,7 +367,7 @@ def logs(text, summary, findings):
         for l in text.splitlines()
         if l.strip() and not l.startswith(("-- No entries", "AIOPS_GATEWAY"))
     ]
-    missing = {m for m in re.findall(r"CAPABILITY_MISSING:([\w-]+)", text)}
+    missing = set(re.findall(r"CAPABILITY_MISSING:([\w-]+)", text))
     rows = [l for l in rows if not l.startswith("CAPABILITY_MISSING:")]
     matched = {}
     for line in rows:
@@ -839,22 +839,11 @@ PARSERS = {
     "block_devices": devices,
     "containers": containers,
     "container_stats": containers,
+    "timers": table_rows,
+    "directory": table_rows,
+    "peer_connections": table_rows,
+    "peer_traffic": table_rows,
 }
-for _action in (
-    "processes",
-    "memory_processes",
-    "sockets",
-    "resource_limits",
-    "mount_health",
-    "block_devices",
-    "timers",
-    "containers",
-    "container_stats",
-    "directory",
-    "peer_connections",
-    "peer_traffic",
-):
-    PARSERS.setdefault(_action, table_rows)
 
 
 def analyze(

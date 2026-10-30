@@ -16,7 +16,6 @@ def spec_fixture():
         title="测试探针",
         question="测试用",
         category="连接与概览",
-        description="fixture",
         params=(
             Param("minutes", "int", "窗口", default=30, minimum=1, maximum=120),
             Param(

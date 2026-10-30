@@ -42,7 +42,7 @@ def command(symptom, service, minutes, command_for):
     return command_many(actions(symptom), service, minutes, command_for)
 
 
-def parse_many(text, steps, truncated=False, *, coverage_metric="triage_coverage"):
+def parse_many(text, steps, truncated=False):
     results = []
     findings = []
     for action in steps:
@@ -83,7 +83,7 @@ def parse_many(text, steps, truncated=False, *, coverage_metric="triage_coverage
         findings.append(
             {
                 "level": "info",
-                "metric": coverage_metric,
+                "metric": "triage_coverage",
                 "value": "partial",
                 "threshold": "complete",
                 "hint": "组合诊断包含未完成动作，不能排除未采集部分的问题",

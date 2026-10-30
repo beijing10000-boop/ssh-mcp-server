@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import ipaddress
 import json
@@ -15,7 +16,6 @@ from contextlib import contextmanager
 from functools import lru_cache
 
 from cryptography.fernet import Fernet
-import base64
 import paramiko
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
@@ -23,7 +23,6 @@ IDENTITY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,31}$")
 HOSTKEY = re.compile(
     r"^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) [A-Za-z0-9+/=]+(?: .*)?$"
 )
-GROUP = re.compile(r"^.{1,80}$", re.S)
 
 
 def ensure_secret(filename: str, creator) -> bytes:
@@ -146,23 +145,17 @@ def init_db():
           PRIMARY KEY(batch_id,host_id)
         );
         """)
-        cols = {r["name"] for r in c.execute("PRAGMA table_info(hosts)")}
-        if "mode" not in cols:
-            c.execute(
-                "ALTER TABLE hosts ADD COLUMN mode TEXT NOT NULL DEFAULT 'standard'"
-            )
-        if "gateway_approved" not in cols:
-            c.execute(
-                "ALTER TABLE hosts ADD COLUMN gateway_approved INTEGER NOT NULL DEFAULT 0"
-            )
-        if "revision" not in cols:
-            c.execute(
-                "ALTER TABLE hosts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"
-            )
-        if "asset_type" not in cols:
-            c.execute(
-                "ALTER TABLE hosts ADD COLUMN asset_type TEXT NOT NULL DEFAULT 'linux'"
-            )
+        # revision/asset_type are not in CREATE TABLE above: new databases get them here too.
+        _add_columns(
+            c,
+            "hosts",
+            {
+                "mode": "TEXT NOT NULL DEFAULT 'standard'",
+                "gateway_approved": "INTEGER NOT NULL DEFAULT 0",
+                "revision": "INTEGER NOT NULL DEFAULT 1",
+                "asset_type": "TEXT NOT NULL DEFAULT 'linux'",
+            },
+        )
         c.executescript("""
         CREATE TABLE IF NOT EXISTS zabbix_groups(
           zabbix_groupid TEXT PRIMARY KEY,
@@ -223,24 +216,26 @@ def init_db():
             "UPDATE diagnostic_jobs SET status='failed',error='服务重启，任务中断；请重新提交',"
             "completed_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running')"
         )
-        candidates = {
-            r["name"] for r in c.execute("PRAGMA table_info(host_key_candidates)")
-        }
-        if "source_signature" not in candidates:
-            c.execute(
-                "ALTER TABLE host_key_candidates ADD COLUMN source_signature TEXT NOT NULL DEFAULT ''"
-            )
-        results = {r["name"] for r in c.execute("PRAGMA table_info(scan_results)")}
-        if "algorithm" not in results:
-            c.execute("ALTER TABLE scan_results ADD COLUMN algorithm TEXT")
-        if "previous_fingerprint" not in results:
-            c.execute("ALTER TABLE scan_results ADD COLUMN previous_fingerprint TEXT")
+        _add_columns(
+            c, "host_key_candidates", {"source_signature": "TEXT NOT NULL DEFAULT ''"}
+        )
+        _add_columns(
+            c, "scan_results", {"algorithm": "TEXT", "previous_fingerprint": "TEXT"}
+        )
         c.execute("UPDATE scan_batches SET status='interrupted' WHERE status='running'")
         c.execute(
             "UPDATE scan_results SET status='interrupted',error='任务执行中断，可仅重试失败主机' "
             "WHERE status='queued' AND batch_id IN "
             "(SELECT id FROM scan_batches WHERE status='interrupted')"
         )
+
+
+def _add_columns(c, table: str, columns: dict[str, str]):
+    """Idempotent upgrade of databases created by older releases (in order)."""
+    present = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
+    for name, definition in columns.items():
+        if name not in present:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
 
 @contextmanager
@@ -267,6 +262,7 @@ def token(name: str) -> str:
 
 @lru_cache(maxsize=8)
 def _fernet(directory: Path) -> Fernet:
+    # `directory` is only the cache key: one cached key per resolved DATA_DIR.
     return Fernet(ensure_secret("master.key", Fernet.generate_key))
 
 
@@ -324,10 +320,6 @@ def validate_hostkey(value: str, *, optional: bool = False) -> str:
     except Exception:
         raise ValueError("SSH 公钥内容与算法不匹配或已损坏") from None
     return " ".join(value.split()[:2])
-
-
-def safe_row(row) -> dict | None:
-    return dict(row) if row else None
 
 
 def audit(actor: str, action: str, target: str, outcome: str, detail: str = ""):

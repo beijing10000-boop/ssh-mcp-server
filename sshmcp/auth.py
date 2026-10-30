@@ -50,6 +50,14 @@ def admins() -> set[str]:
     }
 
 
+def _open_id_list(value: str) -> list[str] | None:
+    """Comma-separated administrator Open IDs, or None when the list is invalid."""
+    ids = [x.strip() for x in value.split(",") if x.strip()]
+    if not ids or len(ids) > 100 or any(not OPEN_ID.fullmatch(i) for i in ids):
+        return None
+    return ids
+
+
 def redirect_uri() -> str:
     protocol = store.setting("web_protocol")
     host = store.setting("web_public_host")
@@ -176,8 +184,8 @@ def setup(body: SetupRequest):
         raise HTTPException(422, "飞书应用 App ID 格式不正确")
     if not 8 <= len(body.lark_app_secret) <= 512:
         raise HTTPException(422, "飞书应用 App Secret 长度不正确")
-    ids = [x.strip() for x in body.feishu_admin_open_ids.split(",") if x.strip()]
-    if not ids or len(ids) > 100 or any(not OPEN_ID.fullmatch(i) for i in ids):
+    ids = _open_id_list(body.feishu_admin_open_ids)
+    if ids is None:
         raise HTTPException(422, "管理员 Open ID 格式不正确")
     values = {
         "web_protocol": body.web_protocol,
@@ -375,8 +383,8 @@ def feishu_settings(request: Request):
 @router.put("/settings/admins")
 def update_admins(body: AdminsUpdate, request: Request):
     identity = authorize(request)
-    ids = [x.strip() for x in body.open_ids.split(",") if x.strip()]
-    if not ids or len(ids) > 100 or any(not OPEN_ID.fullmatch(i) for i in ids):
+    ids = _open_id_list(body.open_ids)
+    if ids is None:
         raise HTTPException(422, "管理员 Open ID 无效")
     if identity["open_id"] not in ids:
         raise HTTPException(422, "不能从授权列表中移除当前登录的管理员")

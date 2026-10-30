@@ -312,7 +312,7 @@ def application_of(sysprops, appprops, main, unit):
         if base:
             return base[:80]
     if unit and not unit.startswith("user@"):
-        return unit[: -len(".service")] if unit.endswith(".service") else unit
+        return unit.removesuffix(".service")
     return "未识别"
 
 
@@ -614,12 +614,6 @@ def parse_java(text: str, summary: dict, findings: list, options: dict) -> None:
 PROBES = ("heap_info", "vm_flags", "gc_stat", "gc_log")
 DEFAULT_PROBES = ("heap_info", "vm_flags", "gc_stat")
 ATTACH_PROBES = ("heap_info", "vm_flags", "gc_stat")
-SECTIONS = {
-    "heap_info": "HEAP_INFO",
-    "vm_flags": "VM_FLAGS",
-    "gc_stat": "GC_STAT",
-    "gc_log": "GC_LOG",
-}
 
 # Refuses anything but java/jsvc (jcmd would SIGQUIT an arbitrary process),
 # then records owner, uptime, binary and the GC log path from the argv
@@ -751,8 +745,8 @@ esac
 }
 
 
-def probes_of(options) -> list[str]:
-    chosen = options.get("probes") if isinstance(options, dict) else None
+def probes_of(options: dict) -> list[str]:
+    chosen = options.get("probes")
     if not isinstance(chosen, list) or not chosen:
         chosen = DEFAULT_PROBES
     return [probe for probe in PROBES if probe in chosen]
@@ -1154,7 +1148,8 @@ def parse_jvm(text: str, summary: dict, findings: list, options: dict) -> None:
             )
         )
         return
-    bodies = {probe: _section(text, SECTIONS[probe]) for probe in probes}
+    # Each probe prints its own `[AIOPS_<PROBE>]` block (heap_info -> HEAP_INFO).
+    bodies = {probe: _section(text, probe.upper()) for probe in probes}
     states = {
         probe: gc_log_state(body) if probe == "gc_log" else probe_state(probe, body)
         for probe, body in bodies.items()
@@ -1304,7 +1299,6 @@ register(
         title="Java 进程盘点",
         question="主机上有哪些 Java 进程？各自的应用、JDK、堆与 GC 参数、线程与句柄、日志位置是什么？",
         category="应用与中间件",
-        description="Java 进程盘点（只读 /proc，不附加 JVM）",
         params=(),
         script=java_script,
         parse=parse_java,
@@ -1325,7 +1319,6 @@ register(
         title="JVM 堆与 GC 探针",
         question="指定 Java 进程的堆各代用量、生效 JVM 参数、GC 次数与累计耗时以及 GC 日志近况如何？",
         category="应用与中间件",
-        description="JVM 探针（jcmd / jstat / GC 日志）",
         params=(
             Param(
                 "pid",

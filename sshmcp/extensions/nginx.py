@@ -1004,8 +1004,7 @@ UPSTREAM_KINDS = (
 ERROR_LEVELS = ("error", "crit", "alert", "emerg")
 
 
-def _redact(value) -> str:
-    value = value if isinstance(value, str) else str(value)
+def _redact(value: str) -> str:
     value = _URL_CREDENTIALS.sub(r"\1[REDACTED]@", value)
     return _SECRET_VALUE.sub(lambda m: m[1] + m[2] + "[REDACTED]", value)
 
@@ -1211,7 +1210,7 @@ def _systemd(text: str) -> list[dict]:
     for line in _lines(text, "SYSTEMD"):
         if line.startswith("UNIT "):
             current = {"unit": line[5:].strip()[:80]}
-            current.update({key: None for key in SYSTEMD_KEYS.values()})
+            current.update(dict.fromkeys(SYSTEMD_KEYS.values()))
             if len(units) < 5:
                 units.append(current)
             continue
@@ -1691,9 +1690,10 @@ def _access_files(text: str) -> dict:
     return result
 
 
-def _counted(text: str, name: str, tag: str, limit: int) -> list[dict]:
+def _counted(text: str, tag: str, limit: int) -> list[dict]:
+    """``TAG count value`` rows of the ``[AIOPS_TAG]`` block, largest first."""
     rows = []
-    for line in _lines(text, name):
+    for line in _lines(text, tag):
         match = re.match(re.escape(tag) + r" (\d+) (.+)$", line)
         if match and len(rows) < limit:
             rows.append({"value": _redact(match[2])[:200], "count": int(match[1])})
@@ -1850,9 +1850,9 @@ def parse_access(text, summary, findings, options) -> None:
             "totals": totals,
             "codes": codes,
             "top": {
-                "uris": _counted(text, "TOP_URI", "TOP_URI", 30),
-                "ips": _counted(text, "TOP_IP", "TOP_IP", 30),
-                "uas": _counted(text, "TOP_UA", "TOP_UA", 30),
+                "uris": _counted(text, "TOP_URI", 30),
+                "ips": _counted(text, "TOP_IP", 30),
+                "uas": _counted(text, "TOP_UA", 30),
             },
             "timeline": timeline,
             "bucket_minutes": bucket,
@@ -2000,7 +2000,6 @@ register(
         title="Nginx 运行状态与错误日志",
         question="Nginx 是否在运行、配置能否通过测试，最近 error.log 中上游超时、连接失败等错误集中在哪里？",
         category="应用与中间件",
-        description="Nginx 发现、配置摘要、进程/端口/systemd 与 error.log 聚合",
         params=(
             Param(
                 "minutes",
@@ -2032,7 +2031,6 @@ register(
         title="Nginx 访问日志分析",
         question="时间窗口内 Nginx 请求量、状态码分布、错误请求 TOP URL/IP/UA 与耗时如何？",
         category="应用与中间件",
-        description="Nginx 访问日志远端 awk 聚合",
         params=WINDOW_PARAMS
         + (
             Param(
