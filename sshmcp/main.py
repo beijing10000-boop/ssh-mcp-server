@@ -9,7 +9,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from . import store, access, jobs, console_api, zabbix, maintenance
+from . import __version__, store, access, jobs, console_api, zabbix, maintenance
 from .api import router
 from .auth import router as auth_router, trusted_origin
 from .mcp_tools import mcp
@@ -23,6 +23,7 @@ mcp_app = mcp.streamable_http_app()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     store.init_db()
+    access.extend_client_actions()
     async with mcp.session_manager.run():
         task = asyncio.create_task(maintenance.periodic())
         try:
@@ -35,7 +36,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Linux 智能诊断 MCP 服务器",
-    version="0.5.0",
+    version=__version__,
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -85,7 +86,7 @@ async def secure_transport(request: Request, call_next):
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "version": "0.5.0", "service": "ssh-mcp-server"}
+    return {"ok": True, "version": __version__, "service": "ssh-mcp-server"}
 
 
 @app.get("/setup")

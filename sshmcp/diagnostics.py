@@ -17,9 +17,13 @@ from contextlib import suppress
 import paramiko
 from paramiko import SSHException
 
-from . import store, insights, operations, observations, triage
+from . import store, insights, operations, observations, triage, extensions
 
 PREFIX = "PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; LC_ALL=C; export LC_ALL=C; "
+# A synchronous MCP call waits this long for the per-host slot before giving up.
+# AI clients issue several independent diagnostics of one host at once; the
+# executor serialises them here instead of failing the later ones as "busy".
+INLINE_WAIT_SECONDS = 30
 # Process state counts, D-state waits and a 1 s CPU delta from two /proc/*/stat
 # samples (utime+stime, fields 14-15 after the parenthesised comm). Read-only,
 # nothing written to disk; the snapshot is held in shell variables only.
@@ -156,9 +160,36 @@ capture_peers
 INSIGHT_ACTIONS = {"directory", "peer_connections", "peer_traffic"}
 STANDARD_ONLY = INSIGHT_ACTIONS | operations.NEW_ACTIONS | {"triage"}
 
+
+def standard_only(action):
+    """Extension actions and the v0.3+ scripts need the standard SSH mode."""
+    return action in STANDARD_ONLY or extensions.spec_for(action) is not None
+
+
 SERVICE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$")
+# key=value and key: value pairs whose key names a secret, including dotted or
+# camel-cased Java/Spring properties (-Dspring.datasource.password=, keyStorePassword=).
+# key=value / key: value, never across a line break (an empty `-Dx.password=`
+# must not swallow the next line). `db_pwd` / `pwd.x` count; the PWD and OLDPWD
+# directory variables do not.
 REDACTION = re.compile(
-    r"(?i)\b(password|passwd|token|secret|api[_-]?key|authorization)\b([\"']?\s*[:=]\s*)(?:bearer\s+)?(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+    r"(?i)([\w.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key"
+    r"|private[_-]?key|credential|authorization)[\w.-]*"
+    r"|[\w.-]*[_.-]pwd[\w.-]*|pwd[_.-][\w.-]*)"
+    r"([\"']?[ \t]*[:=][ \t]*)(?:bearer[ \t]+)?(?:\"[^\"\n]*\"|'[^'\n]*'|[^\s,;&]+)"
+)
+# `--password value` style options: the secret is the next argument.
+FLAG_SECRETS = re.compile(
+    r"(?i)((?<![\w.-])--?[\w.-]*(?:password|passwd|passphrase|secret|token"
+    r"|api[_-]?key|access[_-]?key|credential)[\w.-]*)"
+    r"([ \t]+)(?!-)(?:\"[^\"\n]*\"|'[^'\n]*'|\S+)"
+)
+# user:password@ in any URL scheme (jdbc:mysql://, redis://:pw@, amqp://, https://).
+URL_CREDENTIALS = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^\s/@:]*:[^\s/@]+@")
+# Cloud access keys and JWTs stand on their own, without a key= prefix.
+BARE_SECRETS = re.compile(
+    r"\b(?:AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,30})\b"
+    r"|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
 )
 
 
@@ -170,8 +201,10 @@ def redact_output(text: str) -> str:
         text,
         flags=re.S,
     )
-    text = re.sub(r"(https?://)[^\s/@:]+:[^\s/@]+@", r"\1[REDACTED]@", text)
-    return REDACTION.sub(lambda m: m.group(1) + m.group(2) + "[REDACTED]", text)
+    text = URL_CREDENTIALS.sub(r"\1[REDACTED]@", text)
+    text = BARE_SECRETS.sub("[REDACTED]", text)
+    text = REDACTION.sub(lambda m: m.group(1) + m.group(2) + "[REDACTED]", text)
+    return FLAG_SECRETS.sub(lambda m: m.group(1) + m.group(2) + "[REDACTED]", text)
 
 
 class SSHDiagnosticError(RuntimeError):
@@ -201,13 +234,22 @@ def command_for(
     directory_root: str | None = None,
     *,
     symptom=None,
+    options=None,
 ) -> str:
     if action == "triage":
-        if directory_root is not None:
-            raise ValueError("组合诊断不接收目录参数")
+        if directory_root is not None or options:
+            raise ValueError("组合诊断不接收目录或附加参数")
         return PREFIX + triage.command(symptom, service, minutes, command_for)
     if symptom is not None:
         raise ValueError("仅组合诊断接收 symptom")
+    spec = extensions.spec_for(action)
+    if spec is not None:
+        # Extension actions take every parameter through validated `options`.
+        if service or directory_root is not None:
+            raise ValueError("该诊断动作的参数须通过 options 传入")
+        return PREFIX + spec.script(extensions.validate_options(spec, options))
+    if options:
+        raise ValueError("此诊断动作不接受附加参数")
     if (
         isinstance(minutes, bool)
         or not isinstance(minutes, int)
@@ -247,6 +289,7 @@ def command_for(
             raise ValueError("内核告警不接受服务名")
         return (
             PREFIX
+            + operations.JOURNAL_GUARD
             + "journalctl --no-pager -q -k --since '-"
             + str(minutes)
             + " min' -p warning -n 100 -o short-iso"
@@ -258,17 +301,51 @@ def command_for(
     unit = shlex.quote(service)
     if action == "service":
         return PREFIX + (
-            "systemctl show --no-pager --property="
-            "Id,ActiveState,SubState,Result,MainPID,ExecMainStatus,ActiveEnterTimestamp -- "
-            + unit
+            "systemctl show --no-pager --property=" + SERVICE_PROPERTIES + " -- " + unit
         )
     return PREFIX + (
-        "journalctl --no-pager -q -u "
+        operations.JOURNAL_GUARD
+        + "journalctl --no-pager -q -u "
         + unit
         + " --since '-"
         + str(minutes)
         + " min' -n 120 -o short-iso"
     )
+
+
+# LoadState tells a missing unit from a stopped one; NRestarts and the
+# timestamps show restart loops and when the state last changed.
+SERVICE_PROPERTIES = (
+    "Id,LoadState,UnitFileState,ActiveState,SubState,Result,MainPID,ExecMainStatus,"
+    "ExecMainCode,NRestarts,Restart,ActiveEnterTimestamp,InactiveEnterTimestamp,"
+    "ExecMainStartTimestamp,StatusText,MemoryCurrent,TasksCurrent,FragmentPath"
+)
+# stderr lines that mean the main command itself could not run; other
+# warnings (ip deprecations, locale notices) do not make a result partial.
+FATAL_STDERR = re.compile(
+    r"(?i)command not found|No such file or directory|Permission denied|"
+    r"not permitted|cannot open|Failed to connect|Connection refused|"
+    r"insufficient|not seeing messages|Usage:|invalid option"
+)
+# Known-harmless noise: df cannot stat other users' FUSE/gvfs mounts or
+# binfmt_misc even as root; that does not make the local filesystems incomplete.
+BENIGN_STDERR = re.compile(
+    r"(?i)^df: .*(gvfs|/run/user/|fuse|binfmt_misc|/proc/sys/fs|doc: )"
+)
+
+
+def fatal_stderr(error, code):
+    """stderr makes a result partial only when it is not known noise."""
+    if not error:
+        return False
+    lines = [
+        line
+        for line in error.splitlines()
+        if line.strip() and not BENIGN_STDERR.search(line.strip())
+    ]
+    if not lines:
+        return False
+    return code not in (0, None) or any(FATAL_STDERR.search(line) for line in lines)
 
 
 def host_fingerprint(value: str) -> str:
@@ -356,11 +433,12 @@ def execute(
     cancelled=lambda: False,
     expected_revision=None,
     symptom=None,
+    options=None,
     background=False,
     preflight=lambda: None,
 ) -> dict:
     global _BACKGROUND_ACTIVE
-    deadline = time.monotonic() + (180 if background else 2)
+    deadline = time.monotonic() + (180 if background else INLINE_WAIT_SECONDS)
     with _SLOTS:
         while (
             len(_ACTIVE_HOSTS) >= 4
@@ -388,6 +466,7 @@ def execute(
             cancelled=cancelled,
             expected_revision=expected_revision,
             symptom=symptom,
+            options=options,
         )
     finally:
         with _SLOTS:
@@ -406,6 +485,7 @@ def _execute_inner(
     cancelled=lambda: False,
     expected_revision=None,
     symptom=None,
+    options=None,
 ) -> dict:
     host = store.get_host(host_id)
     if cancelled():
@@ -414,9 +494,13 @@ def _execute_inner(
         raise SSHDiagnosticError("主机配置已变更，请重新提交诊断")
     if not host.get("host_key"):
         raise SSHDiagnosticError("未核验 SSH 主机公钥；请先批量获取并确认 SHA256 指纹")
-    command = command_for(action, service, minutes, directory_root, symptom=symptom)
+    spec = extensions.spec_for(action)
+    options = extensions.validate_options(spec, options) if spec is not None else None
+    command = command_for(
+        action, service, minutes, directory_root, symptom=symptom, options=options
+    )
     if host.get("mode") == "gateway":
-        if action in STANDARD_ONLY:
+        if standard_only(action):
             raise SSHDiagnosticError(
                 "当前 B 模式强制命令网关尚未支持此诊断动作；请使用已批准的 A 模式主机"
             )
@@ -441,19 +525,31 @@ def _execute_inner(
         chan.exec_command(command)
         stdout, stderr = bytearray(), bytearray()
         output_limit = (
-            262144
+            spec.output_limit
+            if spec is not None
+            else 262144
             if action == "peer_traffic"
             else 131072
             if action == "triage"
             else 32768
         )
-        deadline = time.monotonic() + (60 if action == "triage" else 20)
-        truncated = False
+        seconds = spec.timeout if spec is not None else 60 if action == "triage" else 20
+        deadline = time.monotonic() + seconds
+        truncated = timed_out = False
         while True:
             if cancelled():
                 raise SSHDiagnosticError("任务已取消")
             if time.monotonic() > deadline:
-                raise SSHDiagnosticError("SSH 诊断执行超时（单项 20 秒 / 组合 60 秒）")
+                # Keep what the slow host already produced: on an I/O-stalled or
+                # overloaded machine the partial ps/journal output is the evidence.
+                if not stdout:
+                    raise SSHDiagnosticError(
+                        f"SSH 诊断执行超时（本动作上限 {seconds} 秒）"
+                        if spec is not None
+                        else "SSH 诊断执行超时（单项 20 秒 / 组合 60 秒）"
+                    )
+                timed_out = True
+                break
             for ready, recv, dest, limit in (
                 (chan.recv_ready, chan.recv, stdout, output_limit),
                 (chan.recv_stderr_ready, chan.recv_stderr, stderr, 2048),
@@ -472,7 +568,7 @@ def _execute_inner(
             ):
                 break
             time.sleep(0.03)
-        code = None if truncated else chan.recv_exit_status()
+        code = None if truncated or timed_out else chan.recv_exit_status()
         output = redact_output(stdout[:output_limit].decode("utf-8", "replace"))
         error = redact_output(stderr[:2048].decode("utf-8", "replace"))
         if host.get("mode") == "gateway" and not output.startswith(
@@ -492,21 +588,43 @@ def _execute_inner(
                 raise SSHDiagnosticError(
                     "远程连接测试未返回预期 Linux 身份信息，请检查 SSH 强制命令或资产类型"
                 )
+        stderr_fatal = fatal_stderr(error, code)
         result = {
             "host_id": host_id,
             "host": host["name"],
             "action": action,
             "status": "partial"
-            if truncated or code != 0 or error or "CAPABILITY_MISSING:" in output
+            if truncated
+            or timed_out
+            or code != 0
+            or stderr_fatal
+            or "CAPABILITY_MISSING:" in output
             else "success",
             "exit_code": code,
             "output": output,
             "stderr": error,
             "truncated": truncated,
+            "timed_out": timed_out,
+            "incomplete_reason": (
+                "timeout"
+                if timed_out
+                else "output_limit"
+                if truncated
+                else "exit_code"
+                if code not in (0, None)
+                else "stderr"
+                if stderr_fatal
+                else None
+            ),
             "duration_ms": int((time.monotonic() - began) * 1000),
             "captured_at": datetime.now(timezone.utc).isoformat(),
             "evidence": "SSH 实时只读采集；空结果和单次快照不能排除历史故障",
         }
+        if error and not stderr_fatal:
+            result["warnings"] = error.splitlines()[:5]
+        if spec is not None:
+            result["request_options"] = options
+            result["risk"] = spec.risk
         if action in INSIGHT_ACTIONS:
             if action == "directory":
                 data = insights.parse_directory(output, directory_root)
@@ -528,7 +646,7 @@ def _execute_inner(
                 ""  # Avoid leaking raw socket/directory inventory to LLM.
             )
         if action == "triage":
-            result.update(triage.parse(output, symptom, truncated))
+            result.update(triage.parse(output, symptom, truncated or timed_out))
             if any(step["status"] != "success" for step in result["steps"]):
                 result["status"] = "partial"
         else:
@@ -539,6 +657,7 @@ def _execute_inner(
                     data=result.get("data"),
                     status=result["status"],
                     truncated=truncated,
+                    options=options,
                 )
             )
         return result

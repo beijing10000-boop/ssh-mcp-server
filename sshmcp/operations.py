@@ -64,12 +64,21 @@ SCRIPTS = {
 WINDOW_ACTIONS = {"log_errors", "oom"}
 NEW_ACTIONS = set(SCRIPTS) | WINDOW_ACTIONS
 
+# journalctl -q hides the "not seeing messages from other users" hint, so an
+# unprivileged account would return nothing with exit 0 and look healthy.
+# Say so explicitly: the marker is parsed into a journal_access finding and
+# the command still runs (the account may see its own services).
+JOURNAL_GUARD = (
+    "if ! command -v journalctl >/dev/null 2>&1; then "
+    "printf 'CAPABILITY_MISSING:journalctl\\n'; exit 69; fi; "
+    'if [ "$(id -u)" != 0 ] && ! id -nG 2>/dev/null | tr " " "\\n" | '
+    "grep -qxE 'systemd-journal|adm|wheel|root'; then "
+    "printf 'CAPABILITY_MISSING:journal-permission\\n'; fi; "
+)
+
 
 def window_script(action, minutes):
-    guard = (
-        "if ! command -v journalctl >/dev/null 2>&1; then "
-        "printf 'CAPABILITY_MISSING:journalctl\\n'; exit 69; fi; "
-    )
+    guard = JOURNAL_GUARD
     if action == "log_errors":
         return (
             guard

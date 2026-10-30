@@ -4,8 +4,6 @@ from copy import deepcopy
 import math
 import re
 
-from .catalog import TITLES
-
 LEVELS = {"critical": 0, "warning": 1, "info": 2}
 
 
@@ -242,7 +240,19 @@ def services(text, summary, findings):
     props = dict(re.findall(r"(?m)^(\w+)=(.*)$", text))
     summary["properties"] = {k: v[:160] for k, v in props.items()}
     state = props.get("ActiveState")
-    if state and state not in {"active", "reloading", "activating"}:
+    if props.get("LoadState") == "not-found":
+        # systemctl show exits 0 for an unknown unit and reports it as
+        # inactive/dead: that is not a stopped service, it is a wrong name.
+        findings.append(
+            {
+                "level": "warning",
+                "metric": "unit_not_found",
+                "value": props.get("Id") or "unknown",
+                "threshold": "loaded",
+                "hint": "systemd 中没有这个单元：核对单元名（如 nginx 与 openresty），或改用进程、端口证据；不能据此判定服务已停止",
+            }
+        )
+    elif state and state not in {"active", "reloading", "activating"}:
         findings.append(
             {
                 "level": "warning",
@@ -252,10 +262,35 @@ def services(text, summary, findings):
                 "hint": "确认该服务是否按设计停用；结合 Result 与日志核查",
             }
         )
+    restarts = number(props.get("NRestarts"))
+    if restarts is not None:
+        metric(
+            summary,
+            findings,
+            "service_restarts",
+            restarts,
+            threshold=1,
+            hint="自上次手动启动以来 systemd 自动重启过该服务；查看 Result、退出码与重启前后的日志",
+        )
+    if props.get("Result") not in (None, "", "success"):
+        findings.append(
+            {
+                "level": "warning",
+                "metric": "service_result",
+                "value": props["Result"],
+                "threshold": "success",
+                "hint": "上一次运行以非成功结果结束（exit-code / signal / timeout / oom-kill 等）",
+            }
+        )
+    rows = [
+        line.split()
+        for line in text.splitlines()
+        if ".service" in line and not line.startswith("AIOPS_GATEWAY")
+    ]
     failed = [
-        l.split()[0].lstrip("●")
-        for l in text.splitlines()
-        if ".service" in l and ("failed" in l or summary["action"] == "failed_services")
+        row[0].lstrip("●")
+        for row in rows
+        if row and ("failed" in row or summary["action"] == "failed_services")
     ]
     metric(
         summary,
@@ -266,6 +301,21 @@ def services(text, summary, findings):
         hint="检查失败服务的依赖、退出原因和日志；不自动重启",
     )
     summary["failed_services"] = failed[:60]
+    if summary["action"] == "service_inventory":
+        summary["units"] = [
+            {
+                "unit": row[0].lstrip("●"),
+                "load": row[1] if len(row) > 1 else "",
+                "active": row[2] if len(row) > 2 else "",
+                "sub": row[3] if len(row) > 3 else "",
+            }
+            for row in rows
+            if row and row[0].lstrip("●").endswith(".service")
+        ][:100]
+        counts = {}
+        for unit in summary["units"]:
+            counts[unit["active"]] = counts.get(unit["active"], 0) + 1
+        summary["active_counts"] = counts
 
 
 def time_sync(text, summary, findings):
@@ -284,20 +334,47 @@ def time_sync(text, summary, findings):
         )
 
 
+LOG_ENTRY_CHARS = 240
+LOG_ENTRY_ROWS = 40
+LOG_PATTERNS = (
+    (
+        "oom",
+        r"(?i)\boom[- ]kill|out of memory|killed process|memory cgroup out of memory",
+    ),
+    (
+        "io_error",
+        r"(?i)i/o error|blk_update_request|ext4-fs error|xfs_|buffer i/o|read-only file system|remounting|medium error",
+    ),
+    ("network", r"(?i)link is down|link down|nic link|carrier lost|no carrier"),
+    (
+        "service",
+        r"(?i)failed to start|failed with result|start request repeated too quickly|main process exited|entered failed state",
+    ),
+    (
+        "kernel",
+        r"(?i)segfault|soft lockup|hung_task|hung task|nmi watchdog|general protection|call trace|bug:",
+    ),
+    (
+        "auth",
+        r"(?i)failed password|authentication failure|invalid user|possible break-in",
+    ),
+)
+
+
 def logs(text, summary, findings):
     rows = [
         l
         for l in text.splitlines()
         if l.strip() and not l.startswith(("-- No entries", "AIOPS_GATEWAY"))
     ]
-    errors = [
-        l
-        for l in rows
-        if re.search(
-            r"(?i)\boom[- ]kill|out of memory|killed process|memory cgroup out of memory",
-            l,
-        )
-    ]
+    missing = {m for m in re.findall(r"CAPABILITY_MISSING:([\w-]+)", text)}
+    rows = [l for l in rows if not l.startswith("CAPABILITY_MISSING:")]
+    matched = {}
+    for line in rows:
+        for kind, pattern in LOG_PATTERNS:
+            if re.search(pattern, line):
+                matched.setdefault(kind, []).append(line[:LOG_ENTRY_CHARS])
+    errors = matched.get("oom", [])
     metric(summary, findings, "observed_log_lines", len(rows))
     metric(
         summary,
@@ -308,6 +385,27 @@ def logs(text, summary, findings):
         critical=1,
         hint="本窗口内发现 OOM 线索；核查 cgroup 限额、内存增长与被终止的进程",
     )
+    for kind, hint in (
+        ("io_error", "内核报告磁盘/文件系统 I/O 错误；核查块设备、RAID 与挂载状态"),
+        (
+            "service",
+            "有服务启动失败或异常退出；用 service_detail 查看退出原因与重启记录",
+        ),
+        (
+            "kernel",
+            "内核异常（segfault / lockup / hung task）线索；结合负载与 D 状态进程核查",
+        ),
+    ):
+        if matched.get(kind):
+            findings.append(
+                {
+                    "level": "warning",
+                    "metric": "log_" + kind,
+                    "value": len(matched[kind]),
+                    "threshold": 1,
+                    "hint": hint,
+                }
+            )
     if summary["action"] in {"kernel", "log_errors"} and rows:
         findings.append(
             {
@@ -316,6 +414,29 @@ def logs(text, summary, findings):
                 "value": len(rows),
                 "threshold": 1,
                 "hint": "只统计有界窗口中的返回行数；详情中核查具体事件，不等同于故障次数",
+            }
+        )
+    # The model sees the summary only: keep the evidence lines with it,
+    # bounded, instead of counts that nothing can be quoted from.
+    summary["entries"] = [line[:LOG_ENTRY_CHARS] for line in rows[-LOG_ENTRY_ROWS:]]
+    summary["entries_total"] = len(rows)
+    summary["matched"] = {kind: lines[:20] for kind, lines in matched.items()}
+    stamps = [
+        m.group(0)
+        for line in rows
+        if (m := re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4}", line))
+    ]
+    if stamps:
+        summary["first_at"], summary["last_at"] = stamps[0], stamps[-1]
+    if "journal-permission" in missing:
+        summary["journal_access"] = "limited"
+        findings.append(
+            {
+                "level": "warning",
+                "metric": "journal_access",
+                "value": "limited",
+                "threshold": "systemd-journal/adm group or root",
+                "hint": "诊断账号不在 systemd-journal/adm 组：journalctl 只显示自己的日志，空结果不能视为无异常",
             }
         )
     summary["coverage"] = "有界日志窗口；无匹配不能证明历史未发生故障"
@@ -446,6 +567,54 @@ def connection(text, summary, findings):
 def health(text, summary, findings):
     for parser in (cpu, memory, disk):
         parser(text, summary, findings)
+    top = []
+    for line in section_text(text, "高 CPU 进程").splitlines():
+        fields = line.split()
+        if len(fields) >= 4 and fields[0].isdigit():
+            top.append(
+                {
+                    "pid": int(fields[0]),
+                    "name": fields[1],
+                    "cpu_percent": number(fields[2]),
+                    "memory_percent": number(fields[3]),
+                }
+            )
+    if top:
+        summary["top_processes"] = top[:10]
+
+
+def section_text(text, title):
+    """Text of a `[title]` block (health-style sections) up to the next block."""
+    match = re.search(r"(?ms)^\[" + re.escape(title) + r"\]\n(.*?)(?=^\[|\Z)", text)
+    return match[1] if match else ""
+
+
+def sockets(text, summary, findings):
+    listening = []
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) >= 4 and fields[0] == "LISTEN":
+            local = fields[3]
+            port = local.rsplit(":", 1)[-1]
+            listening.append(
+                {
+                    "local": local,
+                    "port": int(port) if port.isdigit() else port,
+                    "backlog": number(fields[2]),
+                }
+            )
+    summary["listening"] = listening[:60]
+    stats = dict(re.findall(r"(?m)^(TCP|UDP|RAW|INET):\s+(\d+)", text))
+    estab = re.search(r"estab (\d+)", text)
+    if stats or estab:
+        summary["socket_stats"] = {
+            **{k.lower(): int(v) for k, v in stats.items()},
+            **({"tcp_established": int(estab[1])} if estab else {}),
+        }
+    metric(summary, findings, "listening_ports", len(listening))
+    summary["coverage"] = (
+        "当前监听端口与 TCP 汇总；不含进程归属，端口归属用 service_map"
+    )
 
 
 def processes(text, summary, findings):
@@ -658,6 +827,7 @@ PARSERS = {
     "oom": logs,
     "io": io,
     "network": network,
+    "sockets": sockets,
     "tcp_states": tcp,
     "capabilities": capabilities,
     "security_status": security,
@@ -687,15 +857,29 @@ for _action in (
     PARSERS.setdefault(_action, table_rows)
 
 
-def analyze(action, text, *, data=None, status="success", truncated=False):
+def analyze(
+    action, text, *, data=None, status="success", truncated=False, options=None
+):
+    from .catalog import TITLES
+    from .extensions import spec_for
+
+    spec = spec_for(action)
     summary = {
         "action": action,
-        "title": TITLES.get(action, action),
+        # A registered action carries its own title (TITLES is filled at import).
+        "title": spec.title if spec is not None else TITLES.get(action, action),
         "metrics": [],
         "coverage": "当前有界快照；规则仅提供排查线索",
     }
     findings = []
-    PARSERS[action](text, summary, findings)
+    if action in PARSERS:
+        PARSERS[action](text, summary, findings)
+    elif spec is not None:
+        if options:
+            summary["request"] = dict(options)
+        spec.parse(text, summary, findings, options or {})
+    else:
+        table_rows(text, summary, findings)
     if data is not None:
         summary.pop("rows", None)
         summary["analysis"] = data
@@ -707,7 +891,7 @@ def analyze(action, text, *, data=None, status="success", truncated=False):
                 "metric": "collection_coverage",
                 "value": missing or status,
                 "threshold": "complete",
-                "hint": "采集未完整完成，不能用缺失数据排除故障；查看退出码、截断标记及原始输出",
+                "hint": "采集未完整完成，不能用缺失数据排除故障；查看退出码、截断标记、incomplete_reason 及原始输出",
             }
         )
     summary["assessment"] = (
@@ -719,6 +903,13 @@ def analyze(action, text, *, data=None, status="success", truncated=False):
     return {"summary": summary, "findings": findings}
 
 
+def parseable(action):
+    """Classic actions have a parser here; extension actions carry their own."""
+    from .extensions import spec_for
+
+    return action in PARSERS or spec_for(action) is not None
+
+
 def present(value, detail="summary"):
     if detail not in {"summary", "full"}:
         raise ValueError("detail 必须为 summary 或 full")
@@ -727,7 +918,7 @@ def present(value, detail="summary"):
     def visit(node):
         if isinstance(node, dict):
             if "output" in node:
-                if "summary" not in node and node.get("action") in PARSERS:
+                if "summary" not in node and parseable(node.get("action")):
                     node.update(
                         analyze(
                             node["action"],
@@ -735,6 +926,7 @@ def present(value, detail="summary"):
                             data=node.get("data"),
                             status=node["status"],
                             truncated=node.get("truncated", False),
+                            options=node.get("request_options"),
                         )
                     )
                 if detail == "summary":

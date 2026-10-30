@@ -1,4 +1,4 @@
-"""Scenario templates are fixed actions executed sequentially in one SSH channel."""
+"""Scenario templates and ad-hoc action lists executed sequentially in one SSH channel."""
 
 import re
 from . import observations
@@ -11,6 +11,7 @@ SCENARIOS = {
     "service_down": ("service", "failed_services", "logs"),
     "network": ("network", "sockets", "tcp_states", "time_sync"),
 }
+STEP_LIMIT = 32768
 
 
 def actions(symptom):
@@ -19,11 +20,12 @@ def actions(symptom):
     return SCENARIOS[symptom]
 
 
-def command(symptom, service, minutes, command_for):
-    if service and symptom != "service_down":
-        raise ValueError("此组合诊断不接收服务参数")
+def command_many(steps, service, minutes, command_for):
+    """Wrap each fixed action so its output and exit code stay separable."""
+    if not steps or len(set(steps)) != len(steps):
+        raise ValueError("采集步骤不能为空或重复")
     parts = []
-    for action in actions(symptom):
+    for action in steps:
         # command_for remains the sole validator and fixed-command source.
         script = command_for(
             action, service if action in {"service", "logs"} else None, minutes
@@ -34,10 +36,16 @@ def command(symptom, service, minutes, command_for):
     return "; ".join(parts)
 
 
-def parse(text, symptom, truncated=False):
+def command(symptom, service, minutes, command_for):
+    if service and symptom != "service_down":
+        raise ValueError("此组合诊断不接收服务参数")
+    return command_many(actions(symptom), service, minutes, command_for)
+
+
+def parse_many(text, steps, truncated=False, *, coverage_metric="triage_coverage"):
     results = []
     findings = []
-    for action in actions(symptom):
+    for action in steps:
         m = re.search(
             rf"(?:^|\n)__SSHMCP_BEGIN_{action}__\n(.*?)\n__SSHMCP_END_{action}__:(\d+)(?:\n|$)",
             text,
@@ -58,8 +66,8 @@ def parse(text, symptom, truncated=False):
                 "action": action,
                 "status": status,
                 "exit_code": code,
-                "output": output[:32768],
-                "truncated": len(output) > 32768,
+                "output": output[:STEP_LIMIT],
+                "truncated": len(output) > STEP_LIMIT,
             }
             result.update(
                 observations.analyze(
@@ -75,7 +83,7 @@ def parse(text, symptom, truncated=False):
         findings.append(
             {
                 "level": "info",
-                "metric": "triage_coverage",
+                "metric": coverage_metric,
                 "value": "partial",
                 "threshold": "complete",
                 "hint": "组合诊断包含未完成动作，不能排除未采集部分的问题",
@@ -85,7 +93,6 @@ def parse(text, symptom, truncated=False):
     return {
         "summary": {
             "action": "triage",
-            "symptom": symptom,
             "metrics": [],
             "completed": sum(r["status"] == "success" for r in results),
             "total": len(results),
@@ -94,3 +101,9 @@ def parse(text, symptom, truncated=False):
         "findings": findings,
         "steps": results,
     }
+
+
+def parse(text, symptom, truncated=False):
+    result = parse_many(text, actions(symptom), truncated)
+    result["summary"]["symptom"] = symptom
+    return result

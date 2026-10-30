@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from typing import Literal
+from typing import Annotated, Literal
 from functools import wraps
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+from pydantic import Field
 from . import store, diagnostics, access, jobs, observations
+from .extensions import collect as collect_spec
 
 mcp = FastMCP(
     "Linux SSH 智能诊断",
@@ -35,6 +37,7 @@ def offload(fn):
     summarized = fn.__name__.startswith("ssh_diagnose_") or fn.__name__ in {
         "ssh_test_connection",
         "ssh_triage",
+        "ssh_collect",
         "ssh_get_diagnostic_job",
         "ssh_get_diagnostic_batch",
     }
@@ -145,7 +148,7 @@ def ssh_resolve_target(address: str) -> dict:
     address = store.private_ip(address)
     with store.db() as c:
         row = c.execute(
-            "SELECT id,name,address,zabbix_hostid,revision,enabled,host_key,credential_id,asset_type FROM hosts WHERE address=?",
+            "SELECT id,name,address,zabbix_hostid,revision,enabled,host_key,credential_id,asset_type,mode FROM hosts WHERE address=?",
             (address,),
         ).fetchone()
     if not row or not access.host_allowed(row["id"]):
@@ -155,18 +158,7 @@ def ssh_resolve_target(address: str) -> dict:
             "error_code": "unavailable",
         }
     host = dict(row)
-    if (
-        not host["enabled"]
-        or host["asset_type"] != "linux"
-        or not host["host_key"]
-        or not host["credential_id"]
-    ):
-        return {
-            "status": "failed",
-            "error": "主机不存在、未就绪或不在当前客户端授权范围内",
-            "error_code": "unavailable",
-        }
-    return {
+    return _not_ready(host) or {
         "status": "success",
         "host_id": host["id"],
         "name": host["name"],
@@ -174,7 +166,42 @@ def ssh_resolve_target(address: str) -> dict:
         "zabbix_hostid": host["zabbix_hostid"],
         "revision": host["revision"],
         "device_type": "linux",
+        "asset_type": host["asset_type"],
+        "mode": host.get("mode") or "standard",
     }
+
+
+def _not_ready(host):
+    """Structured refusal for an authorized but unusable asset.
+
+    `not_linux` lets an AI platform pick the Zabbix-only path for Windows or
+    network devices; `not_ready` marks a Linux host that is registered but not
+    yet verified or bound. Unknown or unauthorized hosts stay `unavailable`.
+    """
+    if host["asset_type"] != "linux":
+        return {
+            "status": "failed",
+            "error": f"该资产类型为 {host['asset_type']}，不支持 Linux SSH 诊断",
+            "error_code": "not_linux",
+            "asset_type": host["asset_type"],
+            "name": host["name"],
+        }
+    if not host["enabled"] or not host["host_key"] or not host["credential_id"]:
+        reason = (
+            "主机已停用"
+            if not host["enabled"]
+            else "主机公钥尚未核验"
+            if not host["host_key"]
+            else "主机尚未绑定 SSH 凭据"
+        )
+        return {
+            "status": "failed",
+            "error": "Linux 主机已登记但尚未就绪：" + reason,
+            "error_code": "not_ready",
+            "asset_type": "linux",
+            "name": host["name"],
+        }
+    return None
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -191,7 +218,7 @@ def _resolve_host(zabbix_hostid):
         raise ValueError("Zabbix Host ID 格式无效")
     with store.db() as c:
         rows = c.execute(
-            "SELECT id,name,address,zabbix_hostid,revision,enabled,host_key,credential_id,asset_type FROM hosts WHERE zabbix_hostid=?",
+            "SELECT id,name,address,zabbix_hostid,revision,enabled,host_key,credential_id,asset_type,mode FROM hosts WHERE zabbix_hostid=?",
             (zabbix_hostid,),
         ).fetchall()
     if len(rows) != 1:
@@ -201,24 +228,20 @@ def _resolve_host(zabbix_hostid):
             "error_code": "mapping_unresolved",
         }
     host = dict(rows[0])
-    if (
-        not access.host_allowed(host["id"])
-        or host["asset_type"] != "linux"
-        or not host["enabled"]
-        or not host["host_key"]
-        or not host["credential_id"]
-    ):
+    if not access.host_allowed(host["id"]):
         return {
             "status": "failed",
             "error": "关联主机未就绪或当前客户端无权访问",
             "error_code": "unavailable",
         }
-    return {
+    return _not_ready(host) or {
         "status": "success",
         "host_id": host["id"],
         "name": host["name"],
         "address": host["address"],
         "device_type": "linux",
+        "asset_type": host["asset_type"],
+        "mode": host.get("mode") or "standard",
         "zabbix_hostid": host["zabbix_hostid"],
         "revision": host["revision"],
     }
@@ -400,6 +423,8 @@ def _run(
     directory_root: str | None = None,
     expected_revision: int | None = None,
     symptom: str | None = None,
+    options: dict | None = None,
+    enforce: tuple[str, ...] | None = None,
 ) -> dict:
     try:
         if type(host_id) is not int or host_id < 1:
@@ -408,7 +433,9 @@ def _run(
             type(expected_revision) is not int or expected_revision < 1
         ):
             raise ValueError("主机版本必须是正整数")
-        actor = access.enforce(host_id, action)
+        # A multi-step collection is authorized per step, never as a whole.
+        for step in enforce or (action,):
+            actor = access.enforce(host_id, step)
         result = jobs.run_inline(
             host_id,
             action,
@@ -418,6 +445,7 @@ def _run(
             directory_root,
             expected_revision=expected_revision,
             symptom=symptom,
+            options=options,
         )
         return result
     except Exception as exc:
@@ -430,38 +458,64 @@ def _run(
             else type(exc).__name__
         )
         who = access.principal.get()
+        code = error_code(exc, error)
+        # The same parameter summary as a successful job (actions=, minutes=…);
+        # values that failed validation are not echoed into the audit trail.
+        detail = (
+            jobs.audit_detail(
+                {
+                    "service": service,
+                    "minutes": minutes,
+                    "directory_root": directory_root,
+                    "options": options,
+                }
+            )
+            if code != "invalid_argument"
+            else ""
+        )
         store.audit(
             "mcp:" + (who["id"] if who else "unauthenticated"),
             action,
             str(host_id),
             "failed",
-            type(exc).__name__,
+            (type(exc).__name__ + ";" + code + ";" + detail)[:240],
         )
         return {
             "host_id": host_id,
             "action": action,
             "status": "failed",
             "error": diagnostics.redact_output(error)[:250],
-            "error_code": error_code(exc, error),
+            "error_code": code,
         }
 
 
 ERROR_CODES = (
+    ("繁忙", "busy"),
     ("超时", "timeout"),
     ("已变更", "revision_changed"),
     ("取消", "cancelled"),
     ("公钥", "host_unverified"),
     ("网关", "unsupported"),
+    ("尚未就绪", "not_ready"),
+    ("不支持 Linux", "not_linux"),
 )
 
 
 def error_code(exc, message):
-    """Stable machine-readable failure class; `error` stays human readable."""
+    """Stable machine-readable failure class; `error` stays human readable.
+
+    Messages are matched before the generic ValueError class so that a stale
+    revision or an unverified host key raised while creating the job keeps
+    its specific code instead of `invalid_argument`.
+    """
     if isinstance(exc, PermissionError):
         return "forbidden"
+    matched = next((code for word, code in ERROR_CODES if word in message), None)
+    if matched:
+        return matched
     if isinstance(exc, ValueError):
         return "invalid_argument"
-    return next((code for word, code in ERROR_CODES if word in message), "failed")
+    return "failed"
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -564,14 +618,239 @@ def ssh_diagnose_security_status(
     return _run(host_id, "security_status", expected_revision=expected_revision)
 
 
+def _options(**values) -> dict:
+    """Only explicitly given parameters; the registry fills documented defaults."""
+    return {key: value for key, value in values.items() if value is not None}
+
+
+Minutes = Annotated[
+    int, Field(ge=1, le=1440, description="回溯窗口（分钟）；给出 since/until 时忽略")
+]
+Since = Annotated[
+    int | None,
+    Field(ge=0, description="窗口开始（Unix 秒）；告警诊断取告警时间前 15 分钟"),
+]
+Until = Annotated[
+    int | None,
+    Field(
+        ge=0,
+        description="窗口结束（Unix 秒）；缺省为当前时间，与 since 相距最多 24 小时",
+    ),
+]
+Revision = Annotated[
+    int | None, Field(ge=1, description="解析主机时取得的 revision；不一致则拒绝执行")
+]
+
+
+@mcp.tool(annotations=READ_ONLY)
+@offload
+def ssh_diagnose_nginx(
+    host_id: int, minutes: Minutes = 30, expected_revision: Revision = None
+) -> dict:
+    """发现 Nginx 二进制、配置、access/error 日志路径与轮转文件，读取 nginx 进程、监听端口、systemd 状态和 upstream/超时配置摘要，并统计最近 minutes 分钟 error.log 的级别分布、上游超时/连接失败/无可用上游、worker_connections 不足等线索及代表性日志行；不修改配置、不重载服务。"""
+    return _run(
+        host_id,
+        "nginx",
+        expected_revision=expected_revision,
+        options=_options(minutes=minutes),
+    )
+
+
+@mcp.tool(annotations=READ_ONLY)
+@offload
+def ssh_diagnose_nginx_access(
+    host_id: int,
+    minutes: Minutes = 30,
+    since: Since = None,
+    until: Until = None,
+    path: Annotated[
+        str | None,
+        Field(
+            max_length=200,
+            description="访问日志路径；只接受 Nginx 配置中声明的 access_log 或标准日志目录下的文件，缺省自动选择",
+        ),
+    ] = None,
+    status: Annotated[
+        str | None,
+        Field(
+            pattern=r"^(all|[2-5]xx|[1-5][0-9]{2})$",
+            description="只统计该状态的请求 TOP：all、4xx、5xx 或具体状态码（如 502）",
+        ),
+    ] = None,
+    keyword: Annotated[
+        str | None,
+        Field(max_length=64, description="按原文子串过滤请求行（URL、IP、UA 等）"),
+    ] = None,
+    top: Annotated[int, Field(ge=5, le=30, description="TOP 条数")] = 10,
+    expected_revision: Revision = None,
+) -> dict:
+    """在远端用 awk 聚合 Nginx 访问日志：时间窗口（minutes，或 since/until Unix 秒，最长 24 小时）内的请求总数、状态码分布（2xx/3xx/4xx/5xx 与具体码）、错误请求 TOP URL / 客户端 IP / User-Agent、每分钟请求与 5xx 趋势、request_time 与 upstream_response_time 统计（日志格式含这些字段时）。只读取文件尾部有限字节，不返回整份日志；窗口被轮转文件切断时说明覆盖范围。"""
+    return _run(
+        host_id,
+        "nginx_access",
+        expected_revision=expected_revision,
+        options=_options(
+            minutes=minutes,
+            since=since,
+            until=until,
+            path=path,
+            status=status,
+            keyword=keyword,
+            top=top,
+        ),
+    )
+
+
+@mcp.tool(annotations=READ_ONLY)
+@offload
+def ssh_diagnose_syslog(
+    host_id: int,
+    minutes: Minutes = 30,
+    since: Since = None,
+    until: Until = None,
+    unit: Annotated[
+        str | None,
+        Field(
+            pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$",
+            description="只看该 systemd 单元（如 nginx.service）",
+        ),
+    ] = None,
+    priority: Annotated[
+        Literal["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"],
+        Field(description="最低级别（journalctl -p）；回退到文件日志时按关键字近似"),
+    ] = "warning",
+    keyword: Annotated[
+        str | None, Field(max_length=64, description="按子串过滤（不区分大小写）")
+    ] = None,
+    pid: Annotated[
+        int | None, Field(ge=1, le=4194304, description="只看该进程的日志")
+    ] = None,
+    lines: Annotated[
+        int, Field(ge=20, le=300, description="返回的代表性日志上限")
+    ] = 120,
+    expected_revision: Revision = None,
+) -> dict:
+    """按时间窗口读取系统日志：优先 journalctl（unit、priority、keyword、pid 过滤），journald 不可用、无权限或未覆盖该窗口时回退 /var/log/messages、syslog、secure、auth.log 并说明来源。返回按级别/单元的计数，OOM、磁盘 I/O 错误、网络链路、服务启动失败、内核异常与登录失败等分类线索，以及代表性日志行；输出脱敏；空结果会区分“无日志”与“无权限”。"""
+    return _run(
+        host_id,
+        "syslog",
+        expected_revision=expected_revision,
+        options=_options(
+            minutes=minutes,
+            since=since,
+            until=until,
+            unit=unit,
+            priority=priority,
+            keyword=keyword,
+            pid=pid,
+            lines=lines,
+        ),
+    )
+
+
+@mcp.tool(annotations=READ_ONLY)
+@offload
+def ssh_diagnose_java(host_id: int, expected_revision: Revision = None) -> dict:
+    """盘点 Java 进程（最多 20 个）：PID、用户、运行时长、RSS、CPU/内存占比、线程数、打开文件数、对应 systemd 单元、JAR 或主类、应用名（spring.application.name / -Dapp 等）、-Xms/-Xmx/-Xss 与 GC/元空间参数、GC 日志与应用日志位置、JDK 路径与版本；启动命令中的密码、Token、密钥等敏感参数自动脱敏，完整启动命令仅在 detail=full 时附带。只读 /proc、cgroup 内存上限与 JDK release 文件，不附加到 JVM。"""
+    return _run(host_id, "java", expected_revision=expected_revision)
+
+
+@mcp.tool(annotations=READ_ONLY)
+@offload
+def ssh_diagnose_jvm(
+    host_id: int,
+    pid: Annotated[int, Field(ge=1, le=4194304, description="Java 进程 PID")],
+    probes: Annotated[
+        list[Literal["heap_info", "vm_flags", "gc_stat", "gc_log"]] | None,
+        Field(description="探针列表，缺省 heap_info、vm_flags、gc_stat"),
+    ] = None,
+    expected_revision: Revision = None,
+) -> dict:
+    """对指定 Java 进程执行有界 JVM 探针：heap_info（jcmd GC.heap_info，各代用量）、vm_flags（jcmd VM.flags，生效的堆与 GC 参数）、gc_stat（jstat -gc，GC 次数与累计耗时）、gc_log（GC 日志尾部 40 行）。jcmd 会短暂进入安全点，属中等开销，生产高峰期谨慎使用；缺少 jcmd/jstat 或无法以 JVM 所属用户附加时返回能力缺失。不捕获 SIGQUIT（-Xrs、jsvc 父进程）或禁用 attach 的进程跳过 jcmd，以免终止进程；GC 日志只在文件属主与 JVM 用户一致时读取。"""
+    return _run(
+        host_id,
+        "jvm",
+        expected_revision=expected_revision,
+        options=_options(pid=pid, probes=probes),
+    )
+
+
+@mcp.tool(annotations=READ_ONLY)
+@offload
+def ssh_diagnose_service_detail(
+    host_id: int,
+    service: Annotated[
+        str,
+        Field(
+            pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$",
+            description="systemd 单元名，如 nginx.service、app@1.service",
+        ),
+    ],
+    minutes: Minutes = 30,
+    expected_revision: Revision = None,
+) -> dict:
+    """指定 systemd 服务的深度诊断：状态、Result、退出码、重启次数与重启策略、启动时间、MainPID、内存/任务数、启动命令（ExecStart）、运行用户与工作目录、单元文件与 drop-in、cgroup 内进程、监听端口、最近 minutes 分钟日志，以及近 24 小时的异常退出/重启记录；单元不存在时明确返回 unit_not_found，不会把不存在的单元说成“已停止”。不启动、不重启、不修改服务。"""
+    return _run(
+        host_id,
+        "service_detail",
+        expected_revision=expected_revision,
+        options=_options(service=service, minutes=minutes),
+    )
+
+
+@mcp.tool(annotations=READ_ONLY)
+@offload
+def ssh_diagnose_service_map(host_id: int, expected_revision: Revision = None) -> dict:
+    """服务发现：监听端口 → 进程（PID、程序名、用户）→ systemd 单元 / 容器的映射（最多 80 行），附进程 RSS 与运行时长；用于定位“哪个服务占用哪个端口”和“端口是否在监听”。"""
+    return _run(host_id, "service_map", expected_revision=expected_revision)
+
+
+@mcp.tool(annotations=READ_ONLY)
+@offload
+def ssh_collect(
+    host_id: int,
+    actions: Annotated[
+        list[Literal[collect_spec.COLLECTABLE]],
+        Field(min_length=1, max_length=6, description="按顺序执行的固定诊断动作"),
+    ],
+    service: Annotated[
+        str | None,
+        Field(
+            pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$",
+            description="service / logs 步骤的 systemd 单元名",
+        ),
+    ] = None,
+    minutes: Annotated[
+        int, Field(ge=1, le=120, description="日志类步骤的回溯窗口（分钟）")
+    ] = 30,
+    expected_revision: Revision = None,
+) -> dict:
+    """在一次 SSH 会话内顺序执行 1–6 个固定诊断（如 cpu、processes、pressure），每个步骤单独返回 exit_code、summary 与 findings，并合并为带 source_action 的总 findings；比逐个调用更快，且不会因同主机互斥而排队。每个步骤都需要本客户端已获得该动作的授权。"""
+    steps = list(dict.fromkeys(actions or []))
+    return _run(
+        host_id,
+        "collect",
+        expected_revision=expected_revision,
+        options=_options(actions=steps, service=service, minutes=minutes),
+        enforce=tuple(steps) or ("collect",),
+    )
+
+
 @mcp.tool(annotations=READ_ONLY)
 @offload
 def ssh_list_tool_catalog() -> list[dict]:
-    """按分类列出当前客户端获准使用的诊断动作及参数要求。"""
+    """按分类列出当前客户端获准使用的诊断动作、参数结构（params）与风险等级。"""
     from .catalog import entries
 
     who = access.identity()
-    return [e for e in entries() if e["id"] in who["actions"]]
+    granted = set(who["actions"])
+    return [
+        e
+        for e in entries()
+        if e["id"] in granted
+        # The multi-step collector is usable whenever any step is granted.
+        or (e["id"] == "collect" and granted & set(collect_spec.COLLECTABLE))
+    ]
 
 
 @mcp.tool(annotations=READ_ONLY)

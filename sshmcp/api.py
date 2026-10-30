@@ -93,6 +93,7 @@ class RunIn(BaseModel):
     service: str | None = None
     minutes: int = Field(default=30, ge=1, le=120)
     directory_root: str | None = None
+    options: dict | None = None
 
 
 def safe_host_input(item: HostIn) -> dict:
@@ -416,14 +417,29 @@ def host_test(host_id: int, actor=Depends(admin)):
 @router.post("/hosts/{host_id}/diagnose")
 def host_diagnose(host_id: int, body: RunIn, actor=Depends(admin)):
     return _execute(
-        host_id, body.action, body.service, body.minutes, actor, body.directory_root
+        host_id,
+        body.action,
+        body.service,
+        body.minutes,
+        actor,
+        body.directory_root,
+        body.options,
     )
 
 
-def _execute(host_id, action, service, minutes, actor, directory_root=None):
+def _execute(
+    host_id, action, service, minutes, actor, directory_root=None, options=None
+):
     try:
         result = jobs.run_inline(
-            host_id, action, actor, service, minutes, directory_root, source="web"
+            host_id,
+            action,
+            actor,
+            service,
+            minutes,
+            directory_root,
+            source="web",
+            options=options,
         )
     except Exception as exc:
         error = (

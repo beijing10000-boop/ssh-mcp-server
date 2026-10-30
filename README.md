@@ -2,13 +2,15 @@
 
 > 独立部署、中文优先、免 Agent 的 Linux SSH 诊断服务。默认 Web/MCP 端口 **9099**。
 
-**当前版本：v0.5.0（待真实环境联调）**
+**当前版本：v0.6.0（待真实环境联调）**
+
+v0.6.0 新增 8 个只读 MCP 工具：Nginx 运行状态与 error.log 线索、Nginx 访问日志的状态码/TOP/分钟趋势聚合、按时间窗口检索系统日志（journalctl 优先、/var/log 回退）、Java 进程盘点与 JVM 堆/GC 探针、systemd 服务深度诊断、端口与服务映射，以及在一次 SSH 会话内执行 1–6 个固定诊断的 `ssh_collect`。参数由服务端注册表逐项校验，诊断目录返回结构化参数与风险等级；同主机排队等待延长到 30 秒，超时保留已读输出，日志结果在摘要中直接给出代表性日志行与分类命中，脱敏覆盖 Java 启动参数、连接串、云访问密钥与 JWT。已有日志、端口或服务权限的客户端启动时自动获得对应新动作（`jvm` 须手动授权），Web 支持编辑客户端权限且令牌不变。无数据库迁移，B 模式不支持新动作。详见 [v0.6.0 说明](docs/RELEASE-v0.6.0.md)。
 
 v0.5.0 增强 CPU 与进程诊断：CPU 摘要补充 5/15 分钟负载、vmstat 1 秒采样和阻塞任务数，每核负载告警线与 Zabbix 默认值（1.5）对齐，并在“负载高但 CPU 空闲”时给出 D 状态或宿主机争抢线索；A 模式进程诊断新增进程状态计数、D 状态进程及 wchan 和最近 1 秒 CPU 增量。授权目录返回每个动作的 MCP 工具名，失败结果新增稳定的 `error_code`。详见 [v0.5.0 说明](docs/RELEASE-v0.5.0.md)。
 
 v0.4.2 增强现有 `ssh_diagnose_memory_processes` 的进程身份摘要：在 RSS TOP 24 中按需读取本机 `/proc/<pid>/cmdline` 和 cgroup，仅提取严格白名单校验的 JAR 文件基名或 systemd 服务单元名，不返回完整启动参数、环境变量或凭据。进程未能可靠识别时不猜测应用名称；仍只执行固定只读命令。无新诊断动作、无新 MCP 权限和数据库迁移，独立 SSH MCP 服务需要重建后才能生效。
 
-从 Zabbix MCP 分批发现 Linux 资产，保留 Host ID 与主机组；通过页面预览登记、绑定凭据、公钥核验与 SSH 测试完成接入。提供 32 类单项只读诊断、6 个固定组合场景、43 个 MCP 工具、后台批量任务与客户端范围授权。支持按已登记 IP 精确解析主机，实时诊断不依赖 Zabbix 在线或 Host ID 映射。
+从 Zabbix MCP 分批发现 Linux 资产，保留 Host ID 与主机组；通过页面预览登记、绑定凭据、公钥核验与 SSH 测试完成接入。提供 39 类单项只读诊断（含 v0.6.0 新增 7 类）、单会话多项采集、6 个固定组合场景、51 个 MCP 工具、后台批量任务与客户端范围授权。支持按已登记 IP 精确解析主机，实时诊断不依赖 Zabbix 在线或 Host ID 映射。
 
 ![运维总览：截图使用隔离测试资产](docs/screenshots/overview-1440.png)
 
@@ -54,7 +56,7 @@ docker compose exec ssh-mcp cat /app/data/bootstrap.token
 
 需开放给可信内网时，在项目目录创建 `.env`，并设置 `WEB_BIND_IP=内网绑定IP`；建议同时通过防火墙限制允许访问的源地址。
 
-本次升级见 [v0.4 发布与迁移说明](docs/RELEASE-v0.4.md)。配置入口见 [v0.3.1 系统配置说明](docs/RELEASE-v0.3.1.md)。请先阅读 [v0.3 优化与升级说明](docs/RELEASE-v0.3.md)，以及 [安装部署](docs/INSTALLATION.md)、[v0.2 升级与验证](docs/RELEASE-v0.2.md)、[架构评估](docs/ARCHITECTURE.md)、[AI 平台改造方案](docs/AI-PLATFORM-INTEGRATION.md)、[MCP 接入](docs/MCP.md)、[安全说明](docs/SECURITY.md)、[目录与 IP 流量分析](docs/INSIGHTS.md)。
+本次升级见 [v0.6.0 说明](docs/RELEASE-v0.6.0.md)，备份与迁移步骤见 [v0.4 发布与迁移说明](docs/RELEASE-v0.4.md)。配置入口见 [v0.3.1 系统配置说明](docs/RELEASE-v0.3.1.md)。请先阅读 [v0.3 优化与升级说明](docs/RELEASE-v0.3.md)，以及 [安装部署](docs/INSTALLATION.md)、[v0.2 升级与验证](docs/RELEASE-v0.2.md)、[架构评估](docs/ARCHITECTURE.md)、[AI 平台改造方案](docs/AI-PLATFORM-INTEGRATION.md)、[MCP 接入](docs/MCP.md)、[安全说明](docs/SECURITY.md)、[目录与 IP 流量分析](docs/INSIGHTS.md)。
 
 ## 核心能力
 
@@ -67,13 +69,13 @@ docker compose exec ssh-mcp cat /app/data/bootstrap.token
 | SSH 凭据 | 上传 OpenSSH/PEM 私钥文件或粘贴内容，支持私钥口令与轮换，验证后加密保存 |
 | 接入验证 | 批量绑定 SSH 凭据、账号和跳板；公钥核验后批量测试，清楚显示逐台准备状态 |
 | 主机公钥获取 | 支持批量探测、逐行预检与匹配项确认，确认时再次检查目标，绝不自动信任 |
-| SSH 诊断 | 32 类固定单项 + 6 个组合场景；结构化 summary/findings，磁盘/内存/负载阈值与证据展示 |
+| SSH 诊断 | 39 类固定单项（含 Nginx、系统日志、Java/JVM、服务详情、端口映射）+ 单会话多项采集 + 6 个组合场景；结构化 summary/findings，磁盘/内存/负载阈值与证据展示 |
 | 诊断任务 | 显式搜索目标、逐台接受/跳过、批次进度、仅重试失败项；4 名额中预留 1 个给同步调用 |
 | 目录空间排行 | 对 /data、/var 等安全路径执行限时一层 du，占用空间从大到小排序 |
 | IP 连接数排行 | 从 ss 统计当前远端 IP 的 TCP 连接总数和已建立数量 |
 | IP 流量采样 | 使用 ss -ti 的 TCP 字节计数做约 3 秒同连接增量排名（有明确覆盖限制） |
-| MCP 工具 | 42 个工具；批量 Host ID 解析、按组搜索、默认摘要、独立 triage 授权、批次分页查询 |
-| 访问控制 | 每客户端限定主机组和诊断动作、有效期 1–365 天、独立撤销；旧全局令牌可停用 |
+| MCP 工具 | 51 个工具；批量 Host ID 解析、按组搜索、默认摘要、独立 triage 授权、批次分页查询、目录返回结构化参数与风险等级 |
+| 访问控制 | 每客户端限定主机组和诊断动作、有效期 1–365 天、可编辑权限（令牌不变）、独立撤销；旧全局令牌可停用 |
 | 部署 | 单容器 + SQLite，独立端口 9099，日志轮转 |
 
 ## 与现有 AI Ops Platform 关系
