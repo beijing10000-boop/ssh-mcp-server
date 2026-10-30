@@ -1,36 +1,7 @@
 "use strict";
-const iconPaths = {
-  overview:
-    '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
-  hosts:
-    '<rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h5M12 17.5h5"/>',
-  zabbix: '<path d="M12 3v12m-4-4 4 4 4-4M4 16v5h16v-5"/>',
-  groups:
-    '<rect x="8" y="3" width="8" height="6" rx="1"/><rect x="2" y="16" width="8" height="5" rx="1"/><rect x="14" y="16" width="8" height="5" rx="1"/><path d="M12 9v4M6 16v-3h12v3"/>',
-  credentials:
-    '<circle cx="8" cy="8" r="5"/><path d="m12 12 9 9m-3-3 3-3m-6 0 3-3"/>',
-  proxies: '<path d="M3 7h18m-4-4 4 4-4 4M21 17H3m4-4-4 4 4 4"/>',
-  keys: '<path d="m12 3 8 4v5c0 5-8 9-8 9s-8-4-8-9V7l8-4Z"/><path d="m8 12 3 3 5-6"/>',
-  diagnostics: '<path d="M3 12h4l3-8 4 16 3-8h4"/>',
-  history: '<path d="M3 10a9 9 0 1 1 1 8M3 3v7h7m2-3v6l4 2"/>',
-  audit: '<path d="M8 3H5v18h14V3h-3M9 2h6v4H9zM8 11h8M8 15h8"/>',
-  settings:
-    '<path d="M4 6h16M4 12h16M4 18h16"/><circle cx="8" cy="6" r="2" fill="currentColor"/><circle cx="16" cy="12" r="2" fill="currentColor"/><circle cx="10" cy="18" r="2" fill="currentColor"/>',
-  terminal: '<path d="m5 7 5 5-5 5m8 0h6"/>',
-  moon: '<path d="M20 14A8 8 0 0 1 10 4a8 8 0 1 0 10 10Z"/>',
-  menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
-  close: '<path d="m6 6 12 12M6 18 18 6"/>',
-};
-function icon(name) {
-  return (
-    '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-    (iconPaths[name] || iconPaths.diagnostics) +
-    "</svg>"
-  );
-}
+// Icons, the theme switch and the narrow-screen drawer come from ui-kit.js.
+const icon = UIKit.icon;
 function initPresentation() {
-  for (const el of document.querySelectorAll("[data-icon]"))
-    el.innerHTML = icon(el.dataset.icon);
   document.documentElement.dataset.density =
     localStorage.getItem("ssh-density") || "comfortable";
   updateDensity();
@@ -686,7 +657,7 @@ async function dashboard() {
       btn("open-settings/clients", "管理授权"),
     ) +
     panel(
-      "最近 findings",
+      "最近诊断发现",
       `<p class="help">${esc(data.findings_scope)}</p>` + findings,
     ) +
     "</div>" +
@@ -713,7 +684,6 @@ document.addEventListener("click", async (e) => {
     id = b.dataset.id;
   if (
     ![
-      "toggle-nav",
       "density-toggle",
       "funnel-filter",
       "scenario-template",
@@ -725,13 +695,6 @@ document.addEventListener("click", async (e) => {
   e.preventDefault();
   e.stopImmediatePropagation();
   try {
-    if (a === "toggle-nav") {
-      document.body.classList.toggle("nav-open");
-      $("#menu-toggle").setAttribute(
-        "aria-expanded",
-        document.body.classList.contains("nav-open"),
-      );
-    }
     if (a === "density-toggle") {
       const density =
         document.documentElement.dataset.density === "compact"

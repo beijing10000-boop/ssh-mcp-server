@@ -88,6 +88,8 @@ const date = (s) =>
 const epochDate = (seconds) => date(new Date(seconds * 1000).toISOString());
 const badge = (s) =>
   `<span class="status ${esc(s)}">${esc(statuses[s] || s)}</span>`;
+// A status chip whose text is not one of the state labels above.
+const chip = (text, tone = "") => `<span class="status ${tone}">${esc(text)}</span>`;
 const actionName = (action) => toolById(action)?.name || action;
 const sourceName = (source) => (source === "mcp" ? "MCP 客户端" : "Web 控制台");
 function go(page) {
@@ -129,7 +131,7 @@ async function api(path, method = "GET", body) {
     currentUser = null;
     $("#app").hidden = true;
     $("#login").hidden = false;
-    throw new Error("身份验证失效，请重新登录");
+    throw Object.assign(new Error("身份验证失效，请重新登录"), { status: 401 });
   }
   if (!result.ok) {
     const info = payload.detail;
@@ -154,6 +156,9 @@ function notice(text, failure = false) {
   box.hidden = !text;
   box.textContent = text || "";
   box.classList.toggle("error", failure);
+  // A floating notice: errors stay longer, a click dismisses it early.
+  clearTimeout(state.noticeTimer);
+  if (text) state.noticeTimer = setTimeout(() => notice(""), failure ? 12000 : 6000);
 }
 const btn = (name, text, id = "", kind = "") =>
   `<button type="button" class="btn small ${kind}" data-action="${esc(name)}" data-id="${esc(id)}">${esc(text)}</button>`;
@@ -263,7 +268,7 @@ async function pageHosts() {
           : "");
       return (
         `<tr><td><input class="row-check host-selected" type="checkbox" data-id="${h.id}" aria-label="选中${esc(h.name)}" ${state.selected.has(h.id) ? "checked" : ""}/></td>` +
-        `<td>${btn("host-detail", h.name, h.id)}<small>资产 ID ${h.id} · Zabbix Host ID ${esc(h.zabbix_hostid || "未关联")}</small></td>` +
+        `<td><button type="button" class="text-button cell-title" data-action="host-detail" data-id="${h.id}">${esc(h.name)}</button><small>资产 ID ${h.id} · Zabbix Host ID ${esc(h.zabbix_hostid || "未关联")}</small></td>` +
         `<td class="mono">${esc(h.address)}:${h.port}<small>${esc(h.username)}${h.proxy_id ? " · 跳板 " + h.proxy_id : " · 直连"}</small></td>` +
         `<td>${esc(h.mode === "gateway" ? "B · 受限网关" : "A · 免 Agent")}</td>` +
         `<td><button type="button" class="readiness-button" data-action="prepare-host" data-id="${h.id}">${badge(h.readiness || "untested")}</button><small>${esc(groupNames)}</small></td>` +
@@ -477,7 +482,7 @@ async function pageKeys() {
     "批量导入可信指纹",
     '<p class="muted">批量核验无需逐台点击弹窗。请先通过服务器控制台、Ansible 可信通道或已有可信资产台账取得真实 SHA256 指纹，再按「主机 ID/IP + [可选算法] + SHA256 指纹」逐行粘贴；支持从已开启 SSH 主机身份校验的 Ansible 清单导入。<strong>不能直接复制本页面扫描到的指纹作为可信来源。</strong> 先逐行预检，确认后只保存匹配项；不匹配会记录安全审计。</p>' +
       `<p class="muted">当前批次待确认：${matching.length} 台</p>` +
-      `<textarea id="trusted-fingerprints" aria-label="独立可信指纹清单" rows="7" placeholder="1 SHA256:独立可信渠道获取的指纹&#10;172.20.200.93 ssh-ed25519 SHA256:独立可信渠道获取的指纹">${esc(state.manifest)}</textarea>` +
+      `<textarea id="trusted-fingerprints" aria-label="独立可信指纹清单" rows="7" placeholder="1 SHA256:独立可信渠道获取的指纹&#10;192.0.2.10 ssh-ed25519 SHA256:独立可信渠道获取的指纹">${esc(state.manifest)}</textarea>` +
       `<div class="modal-actions">${btn("confirm-batch-from-manifest", "核对并保存可信指纹", "", "primary")}</div>`,
   );
   return results + trust;
@@ -684,7 +689,7 @@ async function pageClients() {
         `<tr><td><strong>${esc(c.name)}</strong><small class="mono">${esc(c.prefix)}…</small></td>` +
         `<td>${esc(scope)}<small>${c.actions.length} 项诊断权限${esc(costlyActions(c.actions))}</small></td>` +
         `<td>${epochDate(c.expires_at)}<small>最近使用 ${date(c.last_used_at)}</small></td>` +
-        `<td>${badge(!c.enabled ? "已撤销" : c.expired ? "已过期" : "有效")}</td><td>${actions}</td></tr>`
+        `<td>${!c.enabled ? chip("已撤销", "disabled") : c.expired ? chip("已过期", "warning") : chip("有效", "success")}</td><td>${actions}</td></tr>`
       );
     })
     .join("");
@@ -709,7 +714,7 @@ async function pageClients() {
     ) +
     panel(
       "原始兼容令牌",
-      `<p>当前状态：${badge(data.legacy_enabled ? "已启用" : "已停用")}</p>` +
+      `<p>当前状态：${data.legacy_enabled ? chip("已启用", "success") : chip("已停用", "disabled")}</p>` +
         '<p class="muted">原始 mcp.token 拥有全部主机权限。迁移到独立客户端后可在此停用；不会影响飞书登录。</p>' +
         btn(
           "toggle-legacy",
@@ -1166,11 +1171,11 @@ const settingsTabs = [
 async function pageSettings() {
   const tab = state.settingsTab;
   const tabs =
-    '<nav class="settings-tabs" aria-label="系统配置分类">' +
+    '<nav class="segmented" aria-label="系统配置分类">' +
     settingsTabs
       .map(
         ([id, title]) =>
-          `<button class="category-chip ${tab === id ? "active" : ""}" data-action="settings-tab" data-id="${id}" aria-pressed="${tab === id}">${title}</button>`,
+          `<button type="button" class="${tab === id ? "active" : ""}" data-action="settings-tab" data-id="${id}" aria-pressed="${tab === id}">${title}</button>`,
       )
       .join("") +
     "</nav>";
@@ -1366,7 +1371,12 @@ async function login() {
     currentUser = await api("/auth/me");
     csrfToken = currentUser.csrf || "";
     state.tools = await api("/tools");
-    $("#whoami").textContent = currentUser.name + " · 飞书管理员";
+    $("#whoami").textContent = currentUser.name;
+    $("#avatar").textContent = String(currentUser.name || "?").slice(0, 1);
+    fetch("/healthz")
+      .then((r) => r.json())
+      .then((h) => ($("#version").textContent = "v" + h.version))
+      .catch(() => ($("#version").textContent = "版本未知"));
     $("#login").hidden = true;
     $("#app").hidden = false;
     await render();
@@ -1375,14 +1385,17 @@ async function login() {
   } catch (e) {
     $("#app").hidden = true;
     $("#login").hidden = false;
-    $("#login-error").hidden = false;
-    $("#login-error").textContent = e.message;
+    const message = $("#login-error");
+    // Not being signed in yet is the normal state of this screen, not an error.
+    message.textContent = e.status === 401 ? "" : e.message;
     try {
       const r = await fetch("/api/v1/setup/status");
-      if (r.ok && (await r.json()).setup_required)
-        $("#login-error").textContent =
-          "首次部署，请先完成飞书绑定与管理员初始化。";
+      if (r.ok && (await r.json()).setup_required) {
+        message.textContent = "系统尚未初始化，请先进入初始化向导。";
+        message.className = "notice";
+      }
     } catch {}
+    message.hidden = !message.textContent;
   }
 }
 $("#logout").addEventListener("click", async () => {
@@ -1398,11 +1411,10 @@ $("#nav").addEventListener("click", (e) => {
   const b = e.target.closest("[data-page]");
   if (b) {
     notice("");
-    document.body.classList.remove("nav-open");
-    $("#menu-toggle").setAttribute("aria-expanded", "false");
     go(b.dataset.page);
   }
 });
+$("#notice").addEventListener("click", () => notice(""));
 $("#editor-close").addEventListener("click", closeModal);
 $("#editor-cancel").addEventListener("click", closeModal);
 $("#editor").addEventListener("cancel", () => clearEditor());
@@ -2221,15 +2233,5 @@ document.addEventListener("click", async (e) => {
   }
 });
 window.addEventListener("hashchange", render);
-const theme =
-  localStorage.getItem("ssh-theme") ||
-  (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-document.documentElement.dataset.theme = theme;
-$("#theme-toggle").addEventListener("click", () => {
-  const value =
-    document.documentElement.dataset.theme === "dark" ? "light" : "dark";
-  document.documentElement.dataset.theme = value;
-  localStorage.setItem("ssh-theme", value);
-});
 initPresentation();
 login();

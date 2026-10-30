@@ -84,7 +84,9 @@ try:
         raise RuntimeError("Fixture did not start")
     with sync_playwright() as p:
         browser = p.chromium.launch(
-            headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
+            headless=True,
+            channel=os.getenv("SSHMCP_BROWSER_CHANNEL") or None,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
         )
         page = browser.new_page(
             viewport={"width": 1440, "height": 1080}, device_scale_factor=1
@@ -400,7 +402,7 @@ try:
         page.locator('[data-action="open-settings/zabbix"]').click()
         page.locator("#zabbix-connection-form").wait_for()
         assert page.locator('#nav [data-page="settings"].active').count() == 1
-        assert page.locator(".settings-tabs button").count() == 4
+        assert page.locator(".segmented button").count() == 4
         page.locator('[data-action="settings-tab"][data-id="retention"]').click()
         page.locator("#retention-form").wait_for()
         page.get_by_label("诊断结果（天）", exact=True).fill("45")
@@ -645,7 +647,8 @@ try:
         page.locator("#menu-toggle").click()
         page.locator('#nav [data-page="hosts"]').click()
         page.get_by_role("heading", name="主机与设备资产", exact=True).wait_for()
-        assert not page.locator(".sidebar").is_visible()
+        # The drawer slides out; wait for the animation instead of sampling it.
+        page.locator(".sidebar").wait_for(state="hidden", timeout=2000)
         page.locator("#density-toggle").click()
         assert page.locator("html").get_attribute("data-density") == "compact"
         checks.append(
