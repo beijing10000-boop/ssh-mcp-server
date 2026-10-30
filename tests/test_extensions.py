@@ -447,6 +447,57 @@ def test_clients_extended_before_the_marker_existed_are_not_extended_again(clien
     assert _extension_audits() == 2
 
 
+def test_deleted_group_neither_blocks_nor_widens_client_edits(client, key_pair):
+    def group(name):
+        return client.post(
+            "/api/v1/groups", headers=auth(), json={"name": name}
+        ).json()["id"]
+
+    def edit(ident, **body):
+        return client.put(f"/api/v1/mcp/clients/{ident}", headers=auth(), json=body)
+
+    def row(ident):
+        return next(
+            c
+            for c in client.get("/api/v1/mcp/clients").json()["items"]
+            if c["id"] == ident
+        )
+
+    kept, gone, only = group("kept"), group("gone"), group("only")
+    inside = ready_host(client, key_pair, group=kept)
+    ready_host(client, key_pair, address="10.20.0.11", group=gone, zabbix="102")
+    created = client.post(
+        "/api/v1/mcp/clients",
+        headers=auth(),
+        json={"name": "scoped", "group_ids": [kept, gone], "actions": ["cpu"]},
+    ).json()
+    lone = client.post(
+        "/api/v1/mcp/clients",
+        headers=auth(),
+        json={"name": "lone", "group_ids": [only], "actions": ["cpu"]},
+    ).json()["id"]
+    for ident in (gone, only):
+        assert (
+            client.delete(f"/api/v1/groups/{ident}", headers=auth()).status_code == 200
+        )
+    # Omitting group_ids keeps the scope that still exists.
+    response = edit(created["id"], actions=["cpu", "memory"])
+    assert response.status_code == 200, response.text
+    assert row(created["id"])["group_ids"] == [kept]
+    assert row(created["id"])["all_hosts"] == 0
+    assert row(created["id"])["actions"] == ["cpu", "memory"]
+    hosts = mcp_call(client, created["token"], "ssh_list_hosts")[1]["result"]
+    assert [h["id"] for h in hosts] == [inside]
+    # A deleted group given explicitly is still rejected.
+    assert edit(created["id"], actions=["cpu"], group_ids=[gone]).status_code == 422
+    # A client left without any group must choose a scope; never all hosts.
+    response = edit(lone, actions=["cpu", "memory"])
+    assert (
+        response.status_code == 422 and "请选择授权主机组" in response.json()["detail"]
+    )
+    assert row(lone)["all_hosts"] == 0 and row(lone)["actions"] == ["cpu"]
+
+
 def test_redaction_covers_startup_commands_and_connection_strings():
     cases = {
         "java -Dspring.datasource.password=Hunter2 -jar app.jar": "Hunter2",

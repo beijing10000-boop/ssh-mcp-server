@@ -241,9 +241,14 @@ def update(client_id: str, body: ClientUpdate, actor=Depends(admin)):
         if not row:
             raise HTTPException(404, "MCP 客户端不存在或已撤销")
         all_hosts = row["all_hosts"] if body.all_hosts is None else int(body.all_hosts)
-        group_ids = (
-            json.loads(row["group_ids"]) if body.group_ids is None else body.group_ids
-        )
+        if body.group_ids is None:
+            # Keep the saved scope minus groups deleted since: group ids are never
+            # reused (AUTOINCREMENT), so a deleted id matches no host and dropping
+            # it narrows nothing. Explicitly given ids are still checked below.
+            known = {r[0] for r in c.execute("SELECT id FROM groups")}
+            group_ids = [g for g in json.loads(row["group_ids"]) if g in known]
+        else:
+            group_ids = body.group_ids
         if not all_hosts and not group_ids:
             raise HTTPException(422, "请选择授权主机组，或明确勾选全部主机")
         _require_groups(c, group_ids)
