@@ -201,7 +201,8 @@ async function prepareHost(id) {
       api("/proxies"),
       api("/groups"),
     ]);
-    openModal("编辑并启用资产 · " + h.name, hostFields(h), (form) =>
+    // The dialog exists to enable the host, so the box starts checked.
+    openModal("编辑并启用资产 · " + h.name, hostFields({ ...h, enabled: true }), (form) =>
       api("/hosts/" + h.id, "PUT", hostBody(form)),
     );
     return;
@@ -322,14 +323,16 @@ async function precheckManifest() {
             matched_only: true,
           });
           state.manifest = "";
-          const saved = `已保存 ${r.count} 台；跳过 ${r.skipped.length} 台。`;
-          notice(
-            saved +
+          // The editor shows the returned notice after it closes; keep the
+          // re-scan warning in it rather than in a notice it would replace.
+          return {
+            ...r,
+            notice:
+              `已保存 ${r.count} 台；跳过 ${r.skipped.length} 台。` +
               (r.skipped.length
                 ? "目标在预检后发生变化，请重新扫描并核验。"
                 : ""),
-          );
-          return { ...r, notice: saved };
+          };
         }
       : null,
   );

@@ -237,6 +237,18 @@ function currentHost(id) {
   return state.hosts.find((h) => String(h.id) === String(id));
 }
 
+// The trusted-console command that prints the fingerprint for a host key
+// algorithm (all ECDSA curves share ssh_host_ecdsa_key).
+function hostKeyCommand(algorithm) {
+  const file = /^(ssh-rsa|rsa-sha2-)/.test(algorithm || "")
+    ? "rsa"
+    : /^ecdsa-sha2-/.test(algorithm || "")
+      ? "ecdsa"
+      : algorithm === "ssh-ed25519"
+        ? "ed25519"
+        : "*";
+  return `ssh-keygen -lf /etc/ssh/ssh_host_${file}_key.pub -E sha256`;
+}
 async function pageHosts() {
   const [data, groups, credentials, proxies] = await Promise.all([
     api("/inventory/hosts?" + hostQuery() + "&page=" + state.hostPage),
@@ -269,8 +281,8 @@ async function pageHosts() {
       return (
         `<tr><td><input class="row-check host-selected" type="checkbox" data-id="${h.id}" aria-label="选中${esc(h.name)}" ${state.selected.has(h.id) ? "checked" : ""}/></td>` +
         `<td><button type="button" class="text-button cell-title" data-action="host-detail" data-id="${h.id}">${esc(h.name)}</button><small>资产 ID ${h.id} · Zabbix Host ID ${esc(h.zabbix_hostid || "未关联")}</small></td>` +
-        `<td class="mono">${esc(h.address)}:${h.port}<small>${esc(h.username)}${h.proxy_id ? " · 跳板 " + h.proxy_id : " · 直连"}</small></td>` +
-        `<td>${esc(h.mode === "gateway" ? "B · 受限网关" : "A · 免 Agent")}</td>` +
+        `<td class="mono">${esc(h.address)}:${h.port}<small>${esc(h.username)}${h.proxy_id ? " · 跳板 " + esc(proxies.find((p) => p.id === h.proxy_id)?.name || h.proxy_id) : " · 直连"}</small></td>` +
+        `<td>${esc(h.mode === "gateway" ? "B · 受限强制命令网关" : "A · 标准免 Agent")}</td>` +
         `<td><button type="button" class="readiness-button" data-action="prepare-host" data-id="${h.id}">${badge(h.readiness || "untested")}</button><small>${esc(groupNames)}</small></td>` +
         `<td class="date">${date(h.last_test_at)}<small>诊断 ${date(h.last_diagnostic_at)}</small></td>` +
         `<td><div class="actions">${actions}</div></td></tr>`
@@ -362,7 +374,7 @@ async function pageCredentials() {
         state.credentials
           .map(
             (x) =>
-              `<tr><td>${x.id}</td><td>${esc(x.name)}</td><td>${esc(x.created_at)}</td><td>${btn("rotate-credential", "轮换", x.id)}</td></tr>`,
+              `<tr><td>${x.id}</td><td>${esc(x.name)}</td><td>${date(x.created_at)}</td><td>${btn("rotate-credential", "轮换", x.id)}</td></tr>`,
           )
           .join(""),
       ),
@@ -422,12 +434,7 @@ async function pageKeys() {
           r.previous_fingerprint &&
           r.fingerprint &&
           r.previous_fingerprint !== r.fingerprint;
-        const command =
-          r.algorithm === "ssh-rsa"
-            ? "ssh-keygen -lf /etc/ssh/ssh_host_rsa_key.pub -E sha256"
-            : r.algorithm === "ecdsa-sha2-nistp256"
-              ? "ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub -E sha256"
-              : "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256";
+        const command = hostKeyCommand(r.algorithm);
         const previous = r.previous_fingerprint
           ? `<small>原可信指纹：${esc(r.previous_fingerprint)}</small>`
           : "";
@@ -447,7 +454,7 @@ async function pageKeys() {
   const batchlist = batches
     .map(
       (x) =>
-        `<option value="${esc(x.id)}" ${state.batchId === x.id ? "selected" : ""}>${esc(x.created_at)} · ${esc(x.status)} · ${x.completed}/${x.total}</option>`,
+        `<option value="${esc(x.id)}" ${state.batchId === x.id ? "selected" : ""}>${date(x.created_at)} · ${esc(statuses[x.status] || x.status)} · ${x.completed}/${x.total}</option>`,
     )
     .join("");
   const scanButtons =
@@ -1864,7 +1871,8 @@ document.addEventListener("click", async (e) => {
       const enabled = action === "enable-selected";
       if (
         !(await askConfirmation(
-          `确认${enabled ? "启用" : "停用"}所选 ${state.selected.size} 台主机？停用会立即阻止新的诊断。`,
+          `确认${enabled ? "启用" : "停用"}所选 ${state.selected.size} 台主机？` +
+            (enabled ? "" : "停用会立即阻止新的诊断。"),
         ))
       )
         return;
@@ -2038,16 +2046,14 @@ document.addEventListener("click", async (e) => {
       return;
     }
     if (action === "copy-token") {
-      if (!navigator.clipboard)
-        throw Error("此访问方式不支持剪贴板，请选择文本后手动复制");
-      await navigator.clipboard.writeText(
-        $("#editor-fields [name=new_token]").value,
-      );
+      // copyText falls back to execCommand on plain-HTTP intranet access.
+      await copyText($("#editor-fields [name=new_token]").value);
       b.textContent = "已复制";
       return;
     }
     if (action === "revoke-client") {
-      const c = state.clients.find((x) => x.id === id);
+      const c = state.clients.find((x) => String(x.id) === id);
+      if (!c) throw Error("该客户端已不存在，请刷新页面后再操作。");
       if (
         !(await askConfirmation(
           `撤销「${c.name}」的令牌？该客户端将无法继续访问 MCP，其他客户端不受影响。`,
@@ -2199,16 +2205,14 @@ document.addEventListener("click", async (e) => {
     } else if (action === "confirm-batch-from-manifest") {
       await precheckManifest();
     } else if (action === "confirm-key") {
-      const h = await api("/hosts");
-      const asset = h.find((x) => String(x.id) === id);
       const current = await api(
         "/host-keys/batches/" + encodeURIComponent(state.batchId),
       );
       const entry = current.items.find((x) => String(x.host_id) === id);
       openModal(
         "人工核验主机公钥",
-        `<div class="wide"><p>主机：<strong>${esc(asset?.name)}</strong></p><p>候选指纹：<strong class="mono">${esc(entry?.fingerprint)}</strong></p>` +
-          '<p class="muted">请在目标服务器可信控制台执行 ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256（根据实际协商的公钥算法选择文件），确认指纹后手工填入。</p></div>' +
+        `<div class="wide"><p>主机：<strong>${esc(entry?.name)}</strong></p><p>候选指纹：<strong class="mono">${esc(entry?.fingerprint)}</strong>（${esc(entry?.algorithm || "算法未知")}）</p>` +
+          `<p class="muted">请在目标服务器可信控制台执行 <code>${esc(hostKeyCommand(entry?.algorithm))}</code>，确认指纹后手工填入。</p></div>` +
           field(
             "fingerprint",
             "通过可信渠道独立核验的 SHA256 指纹",

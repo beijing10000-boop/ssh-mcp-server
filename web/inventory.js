@@ -110,7 +110,7 @@ function zabbixConnectionPanel(config) {
       ) +
       field("verify_tls", "校验 HTTPS 证书", cfg.verify_tls, "checkbox") +
       '</div><div class="modal-actions"><button type="submit" class="btn">保存连接</button>' +
-      btn("zabbix-test", "验证连接与读取权限", "", "primary") +
+      btn("zabbix-test", "保存并验证连接与读取权限", "", "primary") +
       '</div></form><div id="zabbix-feedback" class="notice" role="status" hidden></div>',
   );
 }
