@@ -361,6 +361,92 @@ def test_client_actions_can_be_edited_and_are_extended_on_upgrade(client, key_pa
     assert mcp_call(client, created["token"], "ssh_list_groups")[0] == 200
 
 
+def _client_actions(client, ident):
+    return next(
+        c["actions"]
+        for c in client.get("/api/v1/mcp/clients").json()["items"]
+        if c["id"] == ident
+    )
+
+
+def _extension_audits():
+    with store.db() as c:
+        return c.execute(
+            "SELECT COUNT(*) FROM audit WHERE action='mcp_client_actions_extended'"
+        ).fetchone()[0]
+
+
+def test_removed_extension_actions_are_not_granted_again_on_restart(client):
+    ident = client.post(
+        "/api/v1/mcp/clients",
+        headers=auth(),
+        json={"name": "platform", "all_hosts": True, "actions": ["cpu", "logs"]},
+    ).json()["id"]
+    assert [i for i, _ in access.extend_client_actions()] == [ident]
+    assert "nginx" in _client_actions(client, ident)
+    # The administrator removes an implied action with 编辑权限 ...
+    kept = [a for a in _client_actions(client, ident) if a != "nginx"]
+    assert (
+        client.put(
+            f"/api/v1/mcp/clients/{ident}", headers=auth(), json={"actions": kept}
+        ).status_code
+        == 200
+    )
+    # ... and it stays removed across restarts, without new audit rows.
+    for _ in range(2):
+        assert access.extend_client_actions() == []
+    assert _client_actions(client, ident) == kept
+    assert _extension_audits() == 1
+    # Granting `logs` to a client that was already considered is the
+    # administrator's explicit choice too: nothing implied is added later.
+    other = client.post(
+        "/api/v1/mcp/clients",
+        headers=auth(),
+        json={"name": "cpu-only", "all_hosts": True, "actions": ["cpu"]},
+    ).json()["id"]
+    assert access.extend_client_actions() == []
+    assert (
+        client.put(
+            f"/api/v1/mcp/clients/{other}", headers=auth(), json={"actions": ["logs"]}
+        ).status_code
+        == 200
+    )
+    assert access.extend_client_actions() == []
+    assert _client_actions(client, other) == ["logs"]
+
+
+def test_clients_extended_before_the_marker_existed_are_not_extended_again(client):
+    """Upgrade from a release that extended on every start without a marker."""
+    old, fresh = (
+        client.post(
+            "/api/v1/mcp/clients",
+            headers=auth(),
+            json={"name": name, "all_hosts": True, "actions": ["cpu", "logs"]},
+        ).json()["id"]
+        for name in ("extended-by-v0.6.0", "never-extended")
+    )
+    # v0.6.0 extended `old` and wrote its audit row; the administrator then
+    # removed nginx. Neither client carries the new marker yet.
+    with store.db() as c:
+        c.execute(
+            "UPDATE mcp_clients SET actions=? WHERE id=?",
+            (json.dumps(["cpu", "java", "logs", "service_detail"]), old),
+        )
+    store.audit(
+        "platform",
+        "mcp_client_actions_extended",
+        old,
+        "success",
+        "v0.6.0:java,nginx,nginx_access,service_detail,syslog",
+    )
+    changed = access.extend_client_actions()
+    assert [i for i, _ in changed] == [fresh]
+    assert "nginx" in _client_actions(client, fresh)
+    assert _client_actions(client, old) == ["cpu", "java", "logs", "service_detail"]
+    assert access.extend_client_actions() == []
+    assert _extension_audits() == 2
+
+
 def test_redaction_covers_startup_commands_and_connection_strings():
     cases = {
         "java -Dspring.datasource.password=Hunter2 -jar app.jar": "Hunter2",

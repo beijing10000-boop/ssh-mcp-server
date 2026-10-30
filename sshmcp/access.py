@@ -108,15 +108,30 @@ EXTENDS = {
     "service_detail": ("logs",),
     "service_map": ("sockets", "service"),
 }
+# Stored in mcp_clients.actions_extended once a client has been considered.
+EXTENDS_RELEASE = "v0.6.0"
 
 
 def extend_client_actions():
-    """Grant implied extension actions to existing clients once, with an audit row."""
+    """Grant implied extension actions to each client once, with an audit row.
+
+    Every enabled client considered here is marked, whether or not anything
+    was added, so actions an administrator later removes or leaves out stay
+    that way across restarts. Clients extended before the marker existed are
+    recognised by the audit row written at the time.
+    """
     changed = []
     with store.db() as c:
         c.execute("BEGIN IMMEDIATE")
+        c.execute(
+            "UPDATE mcp_clients SET actions_extended=? WHERE actions_extended!=? "
+            "AND id IN (SELECT target FROM audit WHERE actor='platform' "
+            "AND action='mcp_client_actions_extended' AND detail LIKE ?)",
+            (EXTENDS_RELEASE, EXTENDS_RELEASE, EXTENDS_RELEASE + ":%"),
+        )
         for row in c.execute(
-            "SELECT id,name,actions FROM mcp_clients WHERE enabled=1"
+            "SELECT id,actions FROM mcp_clients WHERE enabled=1 AND actions_extended!=?",
+            (EXTENDS_RELEASE,),
         ).fetchall():
             actions = json.loads(row["actions"])
             added = sorted(
@@ -126,11 +141,15 @@ def extend_client_actions():
                 and action not in actions
                 and any(parent in actions for parent in parents)
             )
+            c.execute(
+                "UPDATE mcp_clients SET actions=?,actions_extended=? WHERE id=?",
+                (
+                    json.dumps(sorted(set(actions) | set(added))),
+                    EXTENDS_RELEASE,
+                    row["id"],
+                ),
+            )
             if added:
-                c.execute(
-                    "UPDATE mcp_clients SET actions=? WHERE id=?",
-                    (json.dumps(sorted(set(actions) | set(added))), row["id"]),
-                )
                 changed.append((row["id"], added))
     for ident, added in changed:
         store.audit(
@@ -138,7 +157,7 @@ def extend_client_actions():
             "mcp_client_actions_extended",
             ident,
             "success",
-            "v0.6.0:" + ",".join(added),
+            EXTENDS_RELEASE + ":" + ",".join(added),
         )
     return changed
 

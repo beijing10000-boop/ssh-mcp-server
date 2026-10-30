@@ -222,6 +222,8 @@ def init_db():
         _add_columns(
             c, "scan_results", {"algorithm": "TEXT", "previous_fingerprint": "TEXT"}
         )
+        # Release whose implied actions were applied (access.extend_client_actions).
+        _add_columns(c, "mcp_clients", {"actions_extended": "TEXT NOT NULL DEFAULT ''"})
         c.execute("UPDATE scan_batches SET status='interrupted' WHERE status='running'")
         c.execute(
             "UPDATE scan_results SET status='interrupted',error='任务执行中断，可仅重试失败主机' "
