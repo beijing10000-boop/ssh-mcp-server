@@ -85,9 +85,62 @@ class ClientIn(BaseModel):
     valid_days: StrictInt = Field(default=90, ge=1, le=365)
 
 
+class ClientUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    actions: list[str] = Field(min_length=1, max_length=100)
+    all_hosts: StrictBool | None = None
+    group_ids: list[StrictInt] | None = Field(default=None, max_length=100)
+
+
 class LegacyIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: StrictBool
+
+
+# v0.6.0 extension actions and the already-granted actions that imply them.
+# A client allowed to read service logs may read system/Nginx logs and Java
+# command lines too; `jvm` attaches to a JVM and is granted explicitly only.
+EXTENDS = {
+    "nginx": ("logs",),
+    "nginx_access": ("logs",),
+    "syslog": ("logs", "log_errors"),
+    "java": ("logs",),
+    "service_detail": ("logs",),
+    "service_map": ("sockets", "service"),
+}
+
+
+def extend_client_actions():
+    """Grant implied extension actions to existing clients once, with an audit row."""
+    changed = []
+    with store.db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        for row in c.execute(
+            "SELECT id,name,actions FROM mcp_clients WHERE enabled=1"
+        ).fetchall():
+            actions = json.loads(row["actions"])
+            added = sorted(
+                action
+                for action, parents in EXTENDS.items()
+                if action in TITLES
+                and action not in actions
+                and any(parent in actions for parent in parents)
+            )
+            if added:
+                c.execute(
+                    "UPDATE mcp_clients SET actions=? WHERE id=?",
+                    (json.dumps(sorted(set(actions) | set(added))), row["id"]),
+                )
+                changed.append((row["id"], added))
+    for ident, added in changed:
+        store.audit(
+            "platform",
+            "mcp_client_actions_extended",
+            ident,
+            "success",
+            "v0.6.0:" + ",".join(added),
+        )
+    return changed
 
 
 @router.get("/tools")
@@ -151,6 +204,47 @@ def create(body: ClientIn, actor=Depends(admin)):
         "token": raw,
         "note": "令牌仅显示一次，请保存到 AI 平台的加密配置中",
     }
+
+
+@router.put("/mcp/clients/{client_id}")
+def update(client_id: str, body: ClientUpdate, actor=Depends(admin)):
+    """Change a client's actions or host scope; the token itself never changes."""
+    if set(body.actions) - TITLES.keys():
+        raise HTTPException(422, "工具范围无效")
+    with store.db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute(
+            "SELECT all_hosts,group_ids FROM mcp_clients WHERE id=? AND enabled=1",
+            (client_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "MCP 客户端不存在或已撤销")
+        all_hosts = row["all_hosts"] if body.all_hosts is None else int(body.all_hosts)
+        group_ids = (
+            json.loads(row["group_ids"]) if body.group_ids is None else body.group_ids
+        )
+        if not all_hosts and not group_ids:
+            raise HTTPException(422, "请选择授权主机组，或明确勾选全部主机")
+        known = {r[0] for r in c.execute("SELECT id FROM groups")}
+        if set(group_ids) - known:
+            raise HTTPException(422, "授权主机组不存在")
+        c.execute(
+            "UPDATE mcp_clients SET actions=?,all_hosts=?,group_ids=? WHERE id=?",
+            (
+                json.dumps(sorted(set(body.actions))),
+                all_hosts,
+                json.dumps(sorted(set(group_ids))),
+                client_id,
+            ),
+        )
+    store.audit(
+        actor,
+        "mcp_client_update",
+        client_id,
+        "success",
+        "actions=" + str(len(set(body.actions))),
+    )
+    return {"ok": True}
 
 
 @router.post("/mcp/clients/{client_id}/revoke")

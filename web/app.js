@@ -733,6 +733,7 @@ async function pageDiagnostics() {
           true,
           "支持 /root、/root/.cache、/data、/var 等目录，每次最多扫描 8 秒；仅统计单层，不修改或清理文件。",
         ) +
+        '<div id="diagnostic-options" class="wide" hidden></div>' +
         '</div><div class="notice diagnostic-help">快照反映采集时刻的状态。日志、目录与流量数据需有相应读取权限；缺失能力会显示为部分完成。</div>' +
         (!state.targets.size
           ? '<p class="inline-error">请选择上方搜索结果中的主机，明确目标后提交。</p>'
@@ -755,16 +756,22 @@ async function pageDiagnostics() {
           icon(t.sensitive ? "keys" : "diagnostics") +
           "</span><div><strong>" +
           esc(t.name) +
-          "</strong><p>" +
+          "</strong> " +
+          riskBadge(t.risk) +
+          "<p>" +
           esc(t.question) +
           "</p><small>参数：" +
-          esc(t.parameters?.join("、") || "无需额外参数") +
+          esc(paramNames(t)) +
           "</small><small>" +
           esc(t.duration_hint) +
           "</small><small>" +
           (t.standard_only ? "标准 SSH 模式 · " : "") +
           (t.sensitive ? "按授权范围采集" : "固定只读采集") +
-          "</small></div></button>",
+          "</small>" +
+          (Array.isArray(t.notes) ? t.notes : [])
+            .map((note) => "<small>" + esc(note) + "</small>")
+            .join("") +
+          "</div></button>",
       )
       .join("") +
     "</div>"
@@ -873,6 +880,13 @@ async function pageJob() {
     badge(job.status) +
     "</div></div>";
   const result = job.result;
+  // v0.6: non-fatal stderr (e.g. df gvfs noise) is kept as result.warnings
+  // and no longer makes a result partial; do not show it as an error box.
+  const benign =
+    job.status === "success" &&
+    Array.isArray(result?.warnings) &&
+    result.warnings.length > 0 &&
+    !result.error;
   return (
     '<div class="page-intro"><span class="muted mono">任务 ' +
     esc(job.id) +
@@ -886,7 +900,7 @@ async function pageJob() {
         ? '<div class="pending-result"><span class="spinner"></span><strong>' +
             (job.status === "queued" ? "等待执行" : "正在采集") +
             "</strong><p>可以离开此页面，结果将在诊断历史中保留。</p></div>"
-        : (job.error
+        : (job.error && !benign
             ? '<p class="inline-error">' + esc(job.error) + "</p>"
             : "") +
             (result
@@ -926,19 +940,26 @@ async function pageClients() {
         ) +
         "<small>" +
         c.actions.length +
-        " 项诊断权限</small></td><td>" +
+        " 项诊断权限" +
+        esc(costlyActions(c.actions)) +
+        "</small></td><td>" +
         date(new Date(c.expires_at * 1000).toISOString()) +
         "<small>最近使用 " +
         date(c.last_used_at) +
         "</small></td><td>" +
         badge(!c.enabled ? "已撤销" : c.expired ? "已过期" : "有效") +
         "</td><td>" +
-        (c.enabled ? btn("revoke-client", "撤销", c.id, "danger") : "—") +
+        (c.enabled
+          ? '<div class="actions">' +
+            (c.expired ? "" : btn("edit-client", "编辑权限", c.id)) +
+            btn("revoke-client", "撤销", c.id, "danger") +
+            "</div>"
+          : "—") +
         "</td></tr>",
     )
     .join("");
   return (
-    '<div class="page-intro"><p>为每个 AI 平台或集成系统签发独立令牌，限定主机组、工具与有效期。</p></div>' +
+    '<div class="page-intro"><p>为每个 AI 平台或集成系统签发独立令牌，限定主机组、工具与有效期。编辑权限不更换令牌，从下一次 MCP 请求起生效。</p></div>' +
     panel(
       "MCP 客户端",
       table(["客户端", "授权范围", "有效期 / 最近使用", "状态", "操作"], rows),
@@ -958,7 +979,8 @@ async function pageClients() {
             2,
           ),
         ) +
-        '</pre><p class="help">Zabbix Host ID 通过 ssh_resolve_host 精确映射，不按 IP 或主机名猜测。</p>',
+        '</pre><p class="help">Zabbix Host ID 通过 ssh_resolve_host 精确映射，不按 IP 或主机名猜测。</p>' +
+        '<p class="help">v0.6.0 起服务启动时，已获 logs 授权的客户端自动获得 nginx、nginx_access、syslog、java、service_detail（syslog 也随 log_errors 扩展），已获 sockets 或 service 的获得 service_map，并写入审计 mcp_client_actions_extended；jvm 只能手动授权。ssh_collect 按步骤授权，无需单独勾选。</p>',
     ) +
     panel(
       "原始兼容令牌",
@@ -974,6 +996,106 @@ async function pageClients() {
     ) +
     "</div>"
   );
+}
+
+// Recommended scope for the AI Ops Platform pre-collection: no JVM attach,
+// no triage, directory scan or per-peer sampling.
+const recommendedClientActions = [
+  "connection",
+  "health",
+  "capabilities",
+  "cpu",
+  "memory",
+  "disk",
+  "network",
+  "system",
+  "processes",
+  "memory_processes",
+  "pressure",
+  "io",
+  "sockets",
+  "tcp_states",
+  "service",
+  "logs",
+  "log_errors",
+  "oom",
+  "kernel",
+  "failed_services",
+  "service_inventory",
+  "syslog",
+  "nginx",
+  "nginx_access",
+  "java",
+  "service_detail",
+  "service_map",
+];
+function costlyActions(actions) {
+  const names = state.tools
+    .filter((t) => actions.includes(t.id) && ["medium", "high"].includes(t.risk))
+    .map((t) => t.name);
+  return names.length ? " · 含中/高开销：" + names.join("、") : "";
+}
+function clientActionLabel(t) {
+  return (
+    t.name +
+    (t.sensitive ? " · 扩展采集" : "") +
+    (t.risk === "high" ? " · 高开销" : t.risk === "medium" ? " · 中开销" : "") +
+    (t.id === "collect" ? " · 按步骤授权" : "")
+  );
+}
+function clientScopeFields(actions = [], client = null) {
+  const groups = client?.group_ids || [];
+  return (
+    '<div class="wide"><label class="check"><input type="checkbox" name="all_hosts" ' +
+    (client?.all_hosts ? "checked" : "") +
+    ">授权全部已登记主机（包含未来新增主机）</label></div>" +
+    '<fieldset class="wide option-grid"><legend>或选择授权主机组</legend>' +
+    state.groups
+      .map(
+        (g) =>
+          '<label class="check"><input type="checkbox" name="client_group" value="' +
+          g.id +
+          '" ' +
+          (groups.includes(g.id) ? "checked" : "") +
+          ">" +
+          esc(g.name) +
+          "</label>",
+      )
+      .join("") +
+    "</fieldset>" +
+    '<div class="wide actions">' +
+    btn("recommend-client-actions", "按 AI Ops Platform 推荐勾选") +
+    '<span id="client-action-hint" class="help">推荐范围覆盖预采集所需的只读动作，不含 jvm、triage、directory、peer_*；ssh_collect 按步骤授权。</span></div>' +
+    '<fieldset class="wide option-grid"><legend>允许的诊断动作</legend>' +
+    state.tools
+      .map(
+        (t) =>
+          '<label class="check"><input type="checkbox" name="client_action" value="' +
+          esc(t.id) +
+          '" ' +
+          (actions.includes(t.id) ? "checked" : "") +
+          ">" +
+          esc(clientActionLabel(t)) +
+          "</label>",
+      )
+      .join("") +
+    "</fieldset>"
+  );
+}
+function clientScopeBody(form) {
+  const body = {
+    all_hosts: checkbox(form, "all_hosts"),
+    group_ids: [...form.querySelectorAll("[name=client_group]:checked")].map(
+      (x) => Number(x.value),
+    ),
+    actions: [...form.querySelectorAll("[name=client_action]:checked")].map(
+      (x) => x.value,
+    ),
+  };
+  if (!body.actions.length) throw Error("请至少选择一个诊断动作");
+  if (!body.all_hosts && !body.group_ids.length)
+    throw Error("请选择授权主机组，或明确勾选全部主机");
+  return body;
 }
 
 function formatSize(n) {
@@ -1079,27 +1201,277 @@ function summarizeDiagnostic(result) {
     caveats
   );
 }
+// v0.6 catalog entries carry `risk` and structured `params`; extension actions
+// take every parameter through the validated `options` object.
+const riskNames = { low: "低开销", medium: "中开销", high: "高开销" };
+function riskBadge(risk) {
+  if (!Object.hasOwn(riskNames, risk)) return "";
+  return (
+    '<span class="status ' +
+    ({ low: "", medium: "partial", high: "failed" })[risk] +
+    '">' +
+    riskNames[risk] +
+    "</span>"
+  );
+}
+function toolById(id) {
+  return state.tools.find((t) => t.id === id);
+}
+function paramNames(tool) {
+  if (!Array.isArray(tool.params))
+    return tool.parameters?.join("、") || "无需额外参数";
+  return (
+    tool.params
+      .map((p) => p.name + (p.required ? "（必填）" : ""))
+      .join("、") || "无需额外参数"
+  );
+}
+// Browsers compile the `pattern` attribute with the `v` flag where supported;
+// a server pattern that is not valid there is only shown as help text.
+const patternFlag = (() => {
+  try {
+    new RegExp("", "v");
+    return "v";
+  } catch {
+    return "u";
+  }
+})();
+function compilePattern(source, flag = "u") {
+  if (typeof source !== "string" || !source) return null;
+  try {
+    return new RegExp("^(?:" + source + ")$", flag);
+  } catch {
+    return null;
+  }
+}
+function choiceLabel(value) {
+  const name = actionName(value);
+  return name === value ? String(value) : name + "（" + value + "）";
+}
+function optionHelp(p) {
+  const parts = [p.description];
+  if (Number.isFinite(p.minimum) || Number.isFinite(p.maximum))
+    parts.push(
+      "范围 " +
+        (Number.isFinite(p.minimum) ? p.minimum : "…") +
+        "–" +
+        (Number.isFinite(p.maximum) ? p.maximum : "…"),
+    );
+  if (p.default !== undefined && p.default !== null)
+    parts.push(
+      "默认 " + (Array.isArray(p.default) ? p.default.join("、") : p.default),
+    );
+  if (p.pattern) parts.push("格式 " + p.pattern);
+  if (p.type === "integer" && /Unix/.test(p.description || ""))
+    parts.push("当前 Unix 秒约 " + Math.floor(Date.now() / 1000));
+  return parts.filter(Boolean).join(" · ");
+}
+function optionField(p) {
+  const ident = "field-" + ++fieldId,
+    title = p.name + (p.required ? "（必填）" : "（可选）"),
+    choices = Array.isArray(p.choices) ? p.choices.map(String) : [],
+    help = optionHelp(p),
+    hasDefault = p.default !== undefined && p.default !== null,
+    attrs =
+      ' id="' +
+      ident +
+      '" name="opt-' +
+      esc(p.name) +
+      '" data-option="' +
+      esc(p.name) +
+      '"' +
+      (p.required ? " required" : "");
+  if (p.type === "array" && choices.length) {
+    const defaults = Array.isArray(p.default) ? p.default.map(String) : [];
+    // ssh_collect lists diagnostic action ids: show their console names too.
+    const actions = choices.every((c) => toolById(c));
+    return (
+      '<fieldset class="wide option-grid" data-option="' +
+      esc(p.name) +
+      '"><legend>' +
+      esc(title) +
+      "</legend>" +
+      choices
+        .map(
+          (c) =>
+            '<label class="check"><input type="checkbox" value="' +
+            esc(c) +
+            '" ' +
+            (defaults.includes(c) ? "checked" : "") +
+            "/>" +
+            esc(actions ? choiceLabel(c) : c) +
+            "</label>",
+        )
+        .join("") +
+      '<p class="help wide">' +
+      esc(help + (p.required ? "" : " · 不勾选则使用服务端默认值")) +
+      "</p></fieldset>"
+    );
+  }
+  let input;
+  if (p.type === "integer")
+    input =
+      '<input type="number" step="1"' +
+      attrs +
+      (Number.isFinite(p.minimum) ? ' min="' + p.minimum + '"' : "") +
+      (Number.isFinite(p.maximum) ? ' max="' + p.maximum + '"' : "") +
+      ' value="' +
+      esc(hasDefault ? p.default : "") +
+      '" autocomplete="off"/>';
+  else if (choices.length)
+    input =
+      "<select" +
+      attrs +
+      ">" +
+      (hasDefault && choices.includes(String(p.default))
+        ? ""
+        : '<option value="">' +
+          (p.required ? "请选择" : "不限（使用服务端默认值）") +
+          "</option>") +
+      choices
+        .map(
+          (c) =>
+            '<option value="' +
+            esc(c) +
+            '" ' +
+            (hasDefault && String(p.default) === c ? "selected" : "") +
+            ">" +
+            esc(c) +
+            "</option>",
+        )
+        .join("") +
+      "</select>";
+  else {
+    const pattern =
+      p.type !== "array" && compilePattern(p.pattern, patternFlag)
+        ? p.pattern
+        : "";
+    input =
+      '<input type="text"' +
+      attrs +
+      (pattern ? ' pattern="' + esc(pattern) + '"' : "") +
+      ' value="' +
+      esc(
+        hasDefault
+          ? Array.isArray(p.default)
+            ? p.default.join(",")
+            : p.default
+          : "",
+      ) +
+      '" placeholder="' +
+      (p.type === "array" ? "多个值用英文逗号分隔" : p.required ? "" : "留空不传") +
+      '" autocomplete="off"/>';
+  }
+  return (
+    '<div><label for="' +
+    ident +
+    '">' +
+    esc(title) +
+    "</label>" +
+    input +
+    (help ? '<div class="help">' + esc(help) + "</div>" : "") +
+    "</div>"
+  );
+}
+function optionFields(tool) {
+  const params = Array.isArray(tool.params) ? tool.params : [];
+  return (
+    '<div class="fields">' +
+    (params.length
+      ? params.map(optionField).join("")
+      : '<p class="help wide">此动作无需额外参数。</p>') +
+    '<p class="help wide">' +
+    riskBadge(tool.risk) +
+    " 扩展诊断参数随任务以 options 提交，由服务端注册表校验；可选参数留空即不传，使用服务端默认值。</p>" +
+    (Array.isArray(tool.notes) ? tool.notes : [])
+      .map((note) => '<p class="help wide">' + esc(note) + "</p>")
+      .join("") +
+    "</div>"
+  );
+}
+// Read the dynamic inputs back into a typed options object: empty values are
+// omitted, integers become numbers, arrays collect the checked choices.
+function collectOptions(form, tool) {
+  const options = {};
+  for (const p of Array.isArray(tool.params) ? tool.params : []) {
+    if (p.type === "array") {
+      const group = [...form.querySelectorAll("fieldset[data-option]")].find(
+        (x) => x.dataset.option === p.name,
+      );
+      const values = group
+        ? [...group.querySelectorAll("input[type=checkbox]:checked")].map(
+            (x) => x.value,
+          )
+        : String(getForm(form, "opt-" + p.name))
+            .split(",")
+            .map((x) => x.trim())
+            .filter(Boolean);
+      if (values.length) options[p.name] = values;
+      else if (p.required) throw Error("请至少选择一项：" + p.name);
+      continue;
+    }
+    const raw = String(getForm(form, "opt-" + p.name)).trim();
+    if (!raw) {
+      if (p.required) throw Error("请填写必需参数：" + p.name);
+      continue;
+    }
+    if (p.type === "integer") {
+      const value = Number(raw);
+      if (!Number.isInteger(value))
+        throw Error("参数 " + p.name + " 必须是整数");
+      if (Number.isFinite(p.minimum) && value < p.minimum)
+        throw Error("参数 " + p.name + " 不能小于 " + p.minimum);
+      if (Number.isFinite(p.maximum) && value > p.maximum)
+        throw Error("参数 " + p.name + " 不能大于 " + p.maximum);
+      options[p.name] = value;
+      continue;
+    }
+    if (Array.isArray(p.choices) && p.choices.length) {
+      if (!p.choices.map(String).includes(raw))
+        throw Error("参数 " + p.name + " 只能是 " + p.choices.join("、"));
+    } else {
+      const pattern = compilePattern(p.pattern);
+      if (pattern && !pattern.test(raw))
+        throw Error("参数 " + p.name + " 格式不符合要求：" + p.pattern);
+    }
+    options[p.name] = raw;
+  }
+  return options;
+}
 function updateDiagnosticInputs() {
   const form = $("#diagnostic-form");
   if (!form) return;
   const action = getForm(form, "action");
+  const tool = toolById(action);
+  const extension = !!tool?.extension;
   for (const [name, visible] of [
     ["symptom", action === "triage"],
     [
       "service",
-      !!state.tools.find((t) => t.id === action)?.service_required ||
-        (action === "triage" && getForm(form, "symptom") === "service_down"),
+      !extension &&
+        (!!tool?.service_required ||
+          (action === "triage" && getForm(form, "symptom") === "service_down")),
     ],
-    [
-      "minutes",
-      !!state.tools.find((t) => t.id === action)?.window_required ||
-        action === "triage",
-    ],
+    ["minutes", !extension && (!!tool?.window_required || action === "triage")],
     ["directory_root", action === "directory"],
   ]) {
     const item = form.elements.namedItem(name);
     if (item) item.closest("div").hidden = !visible;
   }
+  const box = $("#diagnostic-options");
+  if (!box) return;
+  if (!extension) {
+    box.hidden = true;
+    box.replaceChildren();
+    delete box.dataset.action;
+    return;
+  }
+  // Rebuild only when the action changes so typed values survive re-checks.
+  if (box.dataset.action !== action) {
+    box.innerHTML = optionFields(tool);
+    box.dataset.action = action;
+  }
+  box.hidden = false;
 }
 async function pageAudit() {
   const query = new URLSearchParams({
@@ -1792,19 +2164,32 @@ $("#content").addEventListener("submit", async (e) => {
   try {
     const action = getForm(form, "action");
     const host_ids = [...state.targets.keys()];
-    const result = await api("/jobs", "POST", {
-      host_ids,
-      action,
-      service:
-        ["logs", "service"].includes(action) ||
-        (action === "triage" && getForm(form, "symptom") === "service_down")
-          ? getForm(form, "service")
-          : null,
-      minutes: Number(getForm(form, "minutes")),
-      ...(action === "triage" ? { symptom: getForm(form, "symptom") } : {}),
-      directory_root:
-        action === "directory" ? getForm(form, "directory_root").trim() : null,
-    });
+    const tool = toolById(action);
+    let body;
+    if (tool?.extension) {
+      // Extension actions take every parameter through `options`; the
+      // classic service/minutes/directory fields stay out of the request.
+      const options = collectOptions(form, tool);
+      body = {
+        host_ids,
+        action,
+        ...(Object.keys(options).length ? { options } : {}),
+      };
+    } else
+      body = {
+        host_ids,
+        action,
+        service:
+          ["logs", "service"].includes(action) ||
+          (action === "triage" && getForm(form, "symptom") === "service_down")
+            ? getForm(form, "service")
+            : null,
+        minutes: Number(getForm(form, "minutes")),
+        ...(action === "triage" ? { symptom: getForm(form, "symptom") } : {}),
+        directory_root:
+          action === "directory" ? getForm(form, "directory_root").trim() : null,
+      };
+    const result = await api("/jobs", "POST", body);
     notice(
       "已接受 " +
         result.total +
@@ -2049,46 +2434,64 @@ document.addEventListener("click", async (e) => {
         "创建 MCP 客户端",
         field("name", "客户端名称", "AI Ops Platform") +
           field("valid_days", "有效期（天）", 90, "number") +
-          '<div class="wide"><label class="check"><input type="checkbox" name="all_hosts">授权全部已登记主机（包含未来新增主机）</label></div><fieldset class="wide option-grid"><legend>或选择授权主机组</legend>' +
-          state.groups
-            .map(
-              (g) =>
-                '<label class="check"><input type="checkbox" name="client_group" value="' +
-                g.id +
-                '">' +
-                esc(g.name) +
-                "</label>",
-            )
-            .join("") +
-          "</fieldset>" +
-          '<fieldset class="wide option-grid"><legend>允许的诊断动作</legend>' +
-          state.tools
-            .map(
-              (t) =>
-                '<label class="check"><input type="checkbox" name="client_action" value="' +
-                t.id +
-                '" ' +
-                (basic.includes(t.id) ? "checked" : "") +
-                ">" +
-                esc(t.name) +
-                (t.sensitive ? " · 扩展采集" : "") +
-                "</label>",
-            )
-            .join("") +
-          "</fieldset>",
+          clientScopeFields(basic),
         (form) =>
           api("/mcp/clients", "POST", {
             name: getForm(form, "name"),
             valid_days: Number(getForm(form, "valid_days")),
-            all_hosts: checkbox(form, "all_hosts"),
-            group_ids: [
-              ...form.querySelectorAll("[name=client_group]:checked"),
-            ].map((x) => Number(x.value)),
-            actions: [
-              ...form.querySelectorAll("[name=client_action]:checked"),
-            ].map((x) => x.value),
+            ...clientScopeBody(form),
           }),
       );
+      return;
+    }
+    if (action === "edit-client") {
+      const c = state.clients?.find((x) => x.id === id);
+      if (!c) throw Error("客户端不存在，请刷新后重试");
+      const known = new Set(state.tools.map((t) => t.id));
+      const dropped = c.actions.filter((a) => !known.has(a));
+      openModal(
+        "编辑 MCP 客户端权限",
+        field(
+          "name",
+          "客户端名称",
+          c.name,
+          "text",
+          null,
+          true,
+          "令牌（" +
+            c.prefix +
+            "…）保持不变；保存后从下一次 MCP 请求起按新范围授权，执行中的 SSH 不受影响。",
+        ) +
+          (dropped.length
+            ? '<p class="notice wide">以下动作已不在当前诊断目录中，保存后将移除：' +
+              esc(dropped.join("、")) +
+              "</p>"
+            : "") +
+          clientScopeFields(c.actions, c),
+        async (form) => {
+          await api(
+            "/mcp/clients/" + encodeURIComponent(c.id),
+            "PUT",
+            clientScopeBody(form),
+          );
+          return { notice: "已更新「" + c.name + "」的授权范围，令牌不变。" };
+        },
+      );
+      $("#editor-fields [name=name]").readOnly = true;
+      return;
+    }
+    if (action === "recommend-client-actions") {
+      const boxes = [
+        ...document.querySelectorAll("#editor-fields [name=client_action]"),
+      ];
+      for (const box of boxes)
+        box.checked = recommendedClientActions.includes(box.value);
+      const hint = $("#client-action-hint");
+      if (hint)
+        hint.textContent =
+          "已按推荐勾选 " +
+          boxes.filter((box) => box.checked).length +
+          " 项（不含 jvm、triage、directory、peer_*），可继续手动调整。";
       return;
     }
     if (action === "copy-token") {

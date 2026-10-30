@@ -22,17 +22,29 @@ class RunIn(BaseModel):
     minutes: StrictInt = Field(default=30, ge=1, le=120)
     directory_root: str | None = Field(default=None, max_length=200)
     symptom: str | None = None
+    # Extension actions (nginx, syslog, java, service_detail ...) take their
+    # parameters here; the registry validates every key and value.
+    options: dict | None = None
     strict: bool = False
 
 
-def _request(action, service=None, minutes=30, directory_root=None, symptom=None):
-    diagnostics.command_for(action, service, minutes, directory_root, symptom=symptom)
+def _request(
+    action, service=None, minutes=30, directory_root=None, symptom=None, options=None
+):
+    if options is not None and (
+        not isinstance(options, dict) or len(json.dumps(options)) > 4000
+    ):
+        raise ValueError("诊断参数必须是不超过 4 KB 的对象")
+    diagnostics.command_for(
+        action, service, minutes, directory_root, symptom=symptom, options=options
+    )
     return {
         "action": action,
         "service": service,
         "minutes": minutes,
         "directory_root": directory_root,
         **({"symptom": symptom} if symptom is not None else {}),
+        **({"options": options} if options is not None else {}),
     }
 
 
@@ -65,9 +77,8 @@ def create(
                 reason = "主机未启用、未核验公钥或未绑定凭据"
             elif row["asset_type"] != "linux":
                 reason = "资产不是 Linux，不能执行 SSH 诊断"
-            elif (
-                row["mode"] == "gateway"
-                and request["action"] in diagnostics.STANDARD_ONLY
+            elif row["mode"] == "gateway" and diagnostics.standard_only(
+                request["action"]
             ):
                 reason = "此动作需要标准 SSH 模式；受限网关尚不支持"
             elif expected_revisions is not None and row[
@@ -125,7 +136,7 @@ def create(
         "diagnostic_submit",
         batch_id,
         "success",
-        f"count={len(jobs)};action={request['action']}",
+        f"count={len(jobs)};action={request['action']};" + audit_detail(request),
     )
     return {
         "batch_id": batch_id,
@@ -136,6 +147,39 @@ def create(
     }
 
 
+def audit_detail(request):
+    """Bounded, validated parameters for the audit trail (never raw model input).
+
+    Values here have already passed command_for / registry validation, so
+    writing them is safe; the detail column caps the whole string at 240.
+    """
+    if not isinstance(request, dict):
+        return ""
+    values = {}
+    for key in ("service", "minutes", "directory_root", "symptom"):
+        if request.get(key) not in (None, "", 30 if key == "minutes" else None):
+            values[key] = request[key]
+    options = request.get("options")
+    if isinstance(options, dict):
+        for key, value in options.items():
+            if value is None:
+                continue
+            values[key] = (
+                ",".join(str(item) for item in value)
+                if isinstance(value, list)
+                else value
+            )
+    return ";".join(f"{key}={str(value)[:60]}" for key, value in values.items())[:200]
+
+
+def required_actions(action, request):
+    """Actions a client must hold for this job (every step of a collection)."""
+    if action == "collect":
+        steps = ((request or {}).get("options") or {}).get("actions") or []
+        return [str(step) for step in steps] or [action]
+    return [action]
+
+
 def cancelled(ident):
     with store.db() as c:
         row = c.execute(
@@ -144,7 +188,7 @@ def cancelled(ident):
     return row is None or bool(row[0])
 
 
-def authorize(job):
+def authorize(job, request=None):
     if job["source"] == "web":
         from .auth import admins
 
@@ -166,7 +210,12 @@ def authorize(job):
                     "SELECT * FROM mcp_clients WHERE id=? AND enabled=1 AND expires_at>?",
                     (client_id, int(time.time())),
                 ).fetchone()
-                if not current or job["action"] not in json.loads(current["actions"]):
+                if request is None:
+                    request = json.loads(store.unseal(job["request"]))
+                needed = required_actions(job["action"], request)
+                if not current or any(
+                    step not in json.loads(current["actions"]) for step in needed
+                ):
                     raise PermissionError("MCP 客户端已撤销、到期或动作不再授权")
                 if not current["all_hosts"] and not set(
                     store.groups_for(job["host_id"])
@@ -197,7 +246,7 @@ def work(ident, background=False):
             background=background,
             preflight=lambda: authorize(job),
         )
-        if "summary" not in result and job["action"] in observations.PARSERS:
+        if "summary" not in result and observations.parseable(job["action"]):
             result.update(
                 observations.analyze(
                     job["action"],
@@ -205,13 +254,22 @@ def work(ident, background=False):
                     data=result.get("data"),
                     status=result["status"],
                     truncated=result.get("truncated", False),
+                    options=request.get("options"),
                 )
             )
         status = result["status"]
+        # A successful run's stderr is benign noise (gvfs, /run/user …); it
+        # stays in the result's warnings, not in the job's error column.
         error = diagnostics.redact_output(
-            str(result.get("error") or result.get("stderr") or "")
+            str(
+                result.get("error")
+                or (result.get("stderr") if status != "success" else "")
+                or ""
+            )
         )[:240]
     except Exception as exc:
+        from .mcp_tools import error_code
+
         error = (
             diagnostics.redact_output(str(exc))[:240]
             if isinstance(
@@ -220,11 +278,14 @@ def work(ident, background=False):
             else type(exc).__name__
         )
         status = "failed"
+        # Execution-stage failures carry the same stable code as pre-checks, so
+        # a client can tell a busy host from a stale revision or a dead SSH.
         result = {
             "host_id": job["host_id"],
             "action": job["action"],
             "status": status,
             "error": error,
+            "error_code": error_code(exc, error),
         }
     with store.db() as c:
         c.execute("BEGIN IMMEDIATE")
@@ -246,7 +307,13 @@ def work(ident, background=False):
             )
         c.execute(
             "INSERT INTO audit(actor,action,target,outcome,detail) VALUES (?,?,?,?,?)",
-            (job["actor"], job["action"], str(job["host_id"]), status, "job=" + ident),
+            (
+                job["actor"],
+                job["action"],
+                str(job["host_id"]),
+                status,
+                ("job=" + ident + ";" + audit_detail(request)).rstrip(";")[:240],
+            ),
         )
 
 
@@ -260,10 +327,11 @@ def run_inline(
     source="mcp",
     expected_revision=None,
     symptom=None,
+    options=None,
 ):
     batch = create(
         [host_id],
-        _request(action, service, minutes, directory_root, symptom),
+        _request(action, service, minutes, directory_root, symptom, options),
         actor,
         source,
         background=False,

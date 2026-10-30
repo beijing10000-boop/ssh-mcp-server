@@ -1,5 +1,7 @@
 """Shared, explicit tool catalogue for Web, scoped clients and MCP adapters."""
 
+from .extensions import REGISTRY, param_views
+
 TITLES = {
     "triage": "组合场景诊断",
     "connection": "SSH 连接测试",
@@ -35,6 +37,7 @@ TITLES = {
     "container_stats": "容器资源使用",
     "security_status": "安全组件状态",
 }
+TITLES.update({spec.id: spec.title for spec in REGISTRY.values()})
 SENSITIVE = {
     "triage",
     "logs",
@@ -44,6 +47,7 @@ SENSITIVE = {
     "log_errors",
     "oom",
 }
+SENSITIVE |= {spec.id for spec in REGISTRY.values() if spec.sensitive}
 CATEGORIES = {
     "连接与概览": {"connection", "health", "capabilities", "system", "triage"},
     "性能与进程": {
@@ -68,6 +72,8 @@ CATEGORIES = {
     },
     "系统与容器": {"containers", "container_stats", "time_sync", "security_status"},
 }
+for _spec in REGISTRY.values():
+    CATEGORIES.setdefault(_spec.category, set()).add(_spec.id)
 
 
 QUESTIONS = {
@@ -105,6 +111,7 @@ QUESTIONS = {
     "container_stats": "容器当前 CPU、内存和 I/O 用量如何？",
     "security_status": "SELinux、AppArmor 与各防火墙服务状态如何？",
 }
+QUESTIONS.update({spec.id: spec.question for spec in REGISTRY.values()})
 
 
 # MCP tool per action; all others are named ssh_diagnose_<action>. Clients filter
@@ -116,42 +123,128 @@ TOOLS = {
     "mount_health": "ssh_diagnose_mounts",
     "log_errors": "ssh_diagnose_system_errors",
 }
+TOOLS.update(
+    {
+        spec.id: spec.tool
+        for spec in REGISTRY.values()
+        if spec.tool != "ssh_diagnose_" + spec.id
+    }
+)
+# Classic actions take their few parameters by name; extension actions declare
+# theirs in the registry. Both are published in the same structured shape.
+CLASSIC_PARAMS = {
+    "service": {
+        "name": "service",
+        "type": "string",
+        "required": True,
+        "description": "systemd 服务名，如 nginx.service",
+        "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$",
+    },
+    "minutes": {
+        "name": "minutes",
+        "type": "integer",
+        "required": False,
+        "default": 30,
+        "minimum": 1,
+        "maximum": 120,
+        "description": "回溯窗口（分钟）",
+    },
+    "root": {
+        "name": "root",
+        "type": "string",
+        "required": True,
+        "default": "/data",
+        "description": "白名单目录（/、/data、/var、/var/log、/var/lib、/opt、/home、/root、/tmp、/usr 及其子目录）",
+    },
+    "symptom": {
+        "name": "symptom",
+        "type": "string",
+        "required": True,
+        "choices": [
+            "cpu_high",
+            "mem_high",
+            "disk_full",
+            "io_slow",
+            "service_down",
+            "network",
+        ],
+        "description": "组合诊断场景",
+    },
+}
 
 
 def tool_name(action):
     return TOOLS.get(action, "ssh_diagnose_" + action)
 
 
-def entries():
-    from .diagnostics import STANDARD_ONLY
+def classic_params(action):
+    if action == "triage":
+        return [
+            CLASSIC_PARAMS["symptom"],
+            {**CLASSIC_PARAMS["service"], "required": False},
+            CLASSIC_PARAMS["minutes"],
+        ]
+    rows = []
+    if action in {"service", "logs"}:
+        rows.append(CLASSIC_PARAMS["service"])
+    if action in {"logs", "kernel", "log_errors", "oom"}:
+        rows.append(CLASSIC_PARAMS["minutes"])
+    if action == "directory":
+        rows.append(CLASSIC_PARAMS["root"])
+    return rows
 
-    return [
-        {
-            "id": action,
-            "tool": tool_name(action),
-            "name": name,
-            "question": QUESTIONS[action],
-            "estimated_seconds": 60 if action == "triage" else 20,
-            "duration_hint": "组合最多 60 秒"
-            if action == "triage"
-            else "通常 1–8 秒，最多 20 秒",
-            "parameters": (
-                ["故障场景", "服务异常场景需服务名", "时间窗口"]
-                if action == "triage"
-                else (["服务名"] if action in {"service", "logs"} else [])
-                + (
-                    ["时间窗口 1–120 分钟"]
-                    if action in {"logs", "kernel", "log_errors", "oom"}
-                    else []
-                )
-                + (["白名单目录"] if action == "directory" else [])
-            ),
-            "sensitive": action in SENSITIVE,
-            "service_required": action in {"service", "logs"},
-            "directory_required": action == "directory",
-            "window_required": action in {"logs", "kernel", "log_errors", "oom"},
-            "category": next(k for k, v in CATEGORIES.items() if action in v),
-            "standard_only": action in STANDARD_ONLY,
-        }
-        for action, name in TITLES.items()
-    ]
+
+def entries():
+    from .diagnostics import standard_only
+
+    rows = []
+    # Registered actions describe themselves, including any registered after
+    # import (the tables above are filled once, at import).
+    actions = list(TITLES) + [action for action in REGISTRY if action not in TITLES]
+    for action in actions:
+        spec = REGISTRY.get(action)
+        if spec is not None:
+            params = param_views(spec)
+            estimated = spec.estimated_seconds
+            hint = f"通常数秒，最多 {spec.timeout} 秒"
+            risk = spec.risk
+            name, question, tool = spec.title, spec.question, spec.tool
+            category, sensitive = spec.category, spec.sensitive
+        else:
+            params = classic_params(action)
+            estimated = 60 if action == "triage" else 20
+            hint = "组合最多 60 秒" if action == "triage" else "通常 1–8 秒，最多 20 秒"
+            risk = "medium" if action in {"triage", "directory"} else "low"
+            name, question, tool = TITLES[action], QUESTIONS[action], tool_name(action)
+            category = next(k for k, v in CATEGORIES.items() if action in v)
+            sensitive = action in SENSITIVE
+        rows.append(
+            {
+                "id": action,
+                "tool": tool,
+                "name": name,
+                "question": question,
+                "estimated_seconds": estimated,
+                "duration_hint": hint,
+                "risk": risk,
+                "parameters": [
+                    param["description"]
+                    if param.get("required")
+                    else param["description"] + "（可选）"
+                    for param in params
+                ],
+                "params": params,
+                "sensitive": sensitive,
+                "service_required": any(
+                    param["name"] == "service" and param.get("required")
+                    for param in params
+                ),
+                "directory_required": action == "directory",
+                "window_required": any(param["name"] == "minutes" for param in params),
+                "category": category,
+                "standard_only": standard_only(action),
+                "extension": spec is not None,
+                "notes": list(spec.notes) if spec is not None else [],
+            }
+        )
+    return rows

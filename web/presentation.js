@@ -67,16 +67,18 @@ const numberText = (n) =>
 function findingValue(f, threshold = false) {
   const value = threshold ? f.threshold : f.value;
   if (typeof value !== "number") return valueText(value);
-  if (f.metric.endsWith("_KiB")) return formatSize(value * 1024);
+  const metric = String(f.metric ?? "");
+  if (metric.endsWith("_KiB")) return formatSize(value * 1024);
   const percent =
-    f.metric.endsWith("_percent") ||
-    f.metric.startsWith("disk:") ||
-    f.metric.startsWith("inode:") ||
-    f.metric.startsWith("psi_") ||
-    f.metric.startsWith("io_util:");
+    metric.endsWith("_percent") ||
+    metric.startsWith("disk:") ||
+    metric.startsWith("inode:") ||
+    metric.startsWith("psi_") ||
+    metric.startsWith("io_util:");
   return numberText(value) + (percent ? "%" : "");
 }
 function metricLabel(key) {
+  key = String(key ?? "");
   const names = {
     load_1m: "1 分钟负载",
     cpu_cores: "CPU 核数",
@@ -97,8 +99,16 @@ function metricLabel(key) {
     service_active_state: "服务运行状态",
     container_state: "容器状态",
     file_handles_used_percent: "系统句柄使用率",
+    journal_access: "journal 读取权限",
+    unit_not_found: "systemd 单元不存在",
+    service_restarts: "服务自动重启次数",
+    service_result: "上次运行结果",
+    log_io_error: "磁盘 / 文件系统 I/O 错误日志",
+    log_service: "服务启动失败 / 异常退出日志",
+    log_kernel: "内核异常日志",
+    listening_ports: "监听端口数",
   };
-  if (names[key]) return names[key];
+  if (Object.hasOwn(names, key)) return names[key];
   if (key.startsWith("disk:")) return "磁盘 " + key.slice(5);
   if (key.startsWith("inode:")) return "inode " + key.slice(6);
   if (key.startsWith("psi_"))
@@ -205,7 +215,11 @@ function metricsView(result) {
               "<tr><td>" +
               esc(metricLabel(m.metric)) +
               "</td><td>" +
-              esc(numberText(m.value)) +
+              esc(
+                typeof m.value === "number"
+                  ? numberText(m.value)
+                  : valueText(m.value),
+              ) +
               "</td><td>" +
               esc(m.unit || "—") +
               "</td></tr>",
@@ -215,13 +229,372 @@ function metricsView(result) {
       "</details>";
   return html;
 }
+// Generic, bounded rendering of structured summaries (v0.6 log entries,
+// matched categories, timelines, nested objects, collection steps). Every
+// value is escaped; objects become definition lists, arrays of objects become
+// tables, string arrays one line per item, at most STRUCTURED_LIMIT items each.
+const STRUCTURED_LIMIT = 50;
+const SUMMARY_HIDDEN = [
+  "action",
+  "title",
+  "metrics",
+  "assessment",
+  "coverage",
+  "steps",
+  "request",
+];
+const summaryNames = {
+  entries: "代表性日志行",
+  entries_total: "窗口内日志行数",
+  matched: "分类命中",
+  first_at: "最早日志时间",
+  last_at: "最晚日志时间",
+  journal_access: "journal 读取权限",
+  timeline: "时间线",
+  completed: "完成步骤",
+  total: "步骤总数",
+  symptom: "故障场景",
+  properties: "服务属性",
+  failed_services: "失败服务",
+  units: "服务单元",
+  active_counts: "按运行状态计数",
+  filesystems: "文件系统",
+  interfaces: "网络接口",
+  listening: "监听端口",
+  socket_stats: "套接字统计",
+  top_processes: "高 CPU 进程",
+  processes: "进程",
+  state_counts: "进程状态计数",
+  uninterruptible: "D 状态进程",
+  cpu_interval: "最近 1 秒 CPU 增量",
+  shell_limits: "当前 SSH shell 限制",
+  mounts: "挂载",
+  readonly_mounts: "只读挂载",
+  devices: "块设备",
+  containers: "容器",
+  capabilities: "诊断命令可用性",
+  identity: "登录身份",
+  states: "TCP 状态计数",
+  firewall_services: "防火墙服务",
+  selinux: "SELinux",
+  kernel: "内核版本",
+  rows: "返回行",
+  analysis: "分析数据",
+  matched_counts: "分类命中计数",
+  window: "时间窗口",
+  selection: "筛选条件",
+  files: "日志文件",
+  log_files: "日志文件",
+  totals: "总计",
+  codes: "状态码分布",
+  top: "TOP 排行",
+  bucket_minutes: "趋势粒度（分钟）",
+  timing: "耗时统计",
+  samples: "样本",
+  source: "来源",
+  counts: "计数",
+  top_units: "单元排行",
+  boot: "启动信息",
+  binary: "二进制路径",
+  version: "版本",
+  config: "配置摘要",
+  systemd: "systemd 状态",
+  errors: "错误日志统计",
+  worker_count: "worker 进程数",
+  unit: "单元",
+  unit_file: "单元文件",
+  journal: "单元日志",
+  history: "异常退出 / 重启记录",
+  listeners: "端口与进程映射",
+  by_unit: "按单元归类的端口",
+  ports_without_process: "无进程归属的端口",
+  java_processes: "Java 进程数",
+  heap: "堆",
+  flags: "生效参数",
+  gc: "GC 统计",
+  gc_log: "GC 日志",
+};
+const matchedNames = {
+  oom: "OOM / 内存不足",
+  io_error: "磁盘 / 文件系统 I/O 错误",
+  network: "网络链路",
+  service: "服务启动失败 / 异常退出",
+  kernel: "内核异常",
+  auth: "登录失败",
+};
+// Log classifications share observations.LOG_PATTERNS keys wherever they nest.
+const childNames = (key) =>
+  ["matched", "matched_counts"].includes(key) ? matchedNames : {};
+const isRecord = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const isScalar = (v) =>
+  v === null ||
+  v === undefined ||
+  ["string", "number", "boolean"].includes(typeof v);
+function scalarText(v) {
+  if (v === null || v === undefined || v === "") return "—";
+  if (typeof v === "boolean") return v ? "是" : "否";
+  if (typeof v === "number")
+    return Number.isInteger(v)
+      ? String(v)
+      : String(Math.round(v * 1000) / 1000);
+  return typeof v === "string" ? v : JSON.stringify(v) ?? String(v);
+}
+// Plain text (caller escapes) for table cells and short values.
+function compactText(v, depth = 0) {
+  if (isScalar(v)) return scalarText(v);
+  if (!Object.keys(v).length) return "—";
+  if (depth > 2) {
+    const text = JSON.stringify(v) ?? "";
+    return text.length > 300 ? text.slice(0, 300) + "…" : text;
+  }
+  const more = (total) =>
+    total > STRUCTURED_LIMIT
+      ? "…（另有 " + (total - STRUCTURED_LIMIT) + " 项）"
+      : "";
+  if (Array.isArray(v))
+    return (
+      v
+        .slice(0, STRUCTURED_LIMIT)
+        .map((x) => compactText(x, depth + 1))
+        .join("、") + more(v.length)
+    );
+  const entries = Object.entries(v);
+  return (
+    entries
+      .slice(0, STRUCTURED_LIMIT)
+      .map(([k, x]) => k + "=" + compactText(x, depth + 1))
+      .join(" · ") + more(entries.length)
+  );
+}
+// Short token lists (ports, step ids, probe names) stay inline in the grid;
+// anything that reads like a log line gets its own block, one per line.
+const inlineArray = (v) =>
+  Array.isArray(v) &&
+  v.length <= 8 &&
+  v.every(
+    (x) =>
+      isScalar(x) && scalarText(x).length <= 40 && !/\s/.test(scalarText(x)),
+  );
+const looksLikeStep = (v) =>
+  isRecord(v) &&
+  typeof v.action === "string" &&
+  "status" in v &&
+  ("summary" in v || "findings" in v);
+const countText = (v) =>
+  Array.isArray(v)
+    ? "（" + v.length + " 项）"
+    : isRecord(v)
+      ? "（" + Object.keys(v).length + " 项）"
+      : "";
+function omittedNote(total) {
+  return total > STRUCTURED_LIMIT
+    ? '<p class="help">仅展示前 ' +
+        STRUCTURED_LIMIT +
+        " 项，省略 " +
+        (total - STRUCTURED_LIMIT) +
+        " 项；完整内容见“完整结构化结果”。</p>"
+    : "";
+}
+function structuredView(value, depth = 0, names = {}) {
+  if (isScalar(value)) return "<p>" + esc(scalarText(value)) + "</p>";
+  if (depth > 4)
+    return (
+      '<pre class="code-result">' +
+      esc((JSON.stringify(value, null, 2) ?? "").slice(0, 4000)) +
+      "</pre>"
+    );
+  return Array.isArray(value)
+    ? structuredList(value, depth)
+    : structuredRecord(value, depth, names);
+}
+function structuredList(items, depth) {
+  if (!items.length) return '<p class="muted">（空）</p>';
+  const shown = items.slice(0, STRUCTURED_LIMIT);
+  let html;
+  if (shown.every(isScalar))
+    html =
+      '<pre class="code-result">' +
+      esc(shown.map(scalarText).join("\n")) +
+      "</pre>";
+  else if (shown.every((x) => Array.isArray(x) && x.every(isScalar)))
+    html =
+      '<pre class="code-result">' +
+      esc(shown.map((row) => row.map(scalarText).join("  ")).join("\n")) +
+      "</pre>";
+  else if (shown.every(looksLikeStep)) html = shown.map(stepView).join("");
+  else if (shown.every(isRecord))
+    html =
+      new Set(shown.flatMap((row) => Object.keys(row))).size > 10
+        ? wideRecords(shown, depth)
+        : recordTable(shown);
+  else
+    html =
+      '<ul class="reason-list">' +
+      shown
+        .map((x) => "<li><div>" + structuredView(x, depth + 1) + "</div></li>")
+        .join("") +
+      "</ul>";
+  return html + omittedNote(items.length);
+}
+// Records with many fields (Java processes, unit files) read better one by
+// one than as a table with a dozen truncated columns.
+function wideRecords(rows, depth) {
+  const identity = (row) =>
+    ["name", "app", "application", "unit", "service", "pid", "port", "id"]
+      .filter((key) => isScalar(row[key]) && row[key] !== null && row[key] !== "")
+      .slice(0, 2)
+      .map((key) => key + " " + scalarText(row[key]))
+      .join(" · ");
+  return rows
+    .map(
+      (row, i) =>
+        '<details class="result-details"' +
+        (rows.length <= 3 ? " open" : "") +
+        "><summary>" +
+        esc("第 " + (i + 1) + " 项" + (identity(row) ? " · " + identity(row) : "")) +
+        "</summary>" +
+        structuredRecord(row, depth + 1) +
+        "</details>",
+    )
+    .join("");
+}
+function recordTable(rows) {
+  const columns = [];
+  for (const row of rows)
+    for (const key of Object.keys(row))
+      if (!columns.includes(key)) columns.push(key);
+  const shown = columns.slice(0, 12);
+  return (
+    table(
+      shown.map((key) => esc(key)),
+      rows
+        .map(
+          (row) =>
+            "<tr>" +
+            shown
+              .map(
+                (key) =>
+                  "<td>" +
+                  esc(Object.hasOwn(row, key) ? compactText(row[key]) : "—") +
+                  "</td>",
+              )
+              .join("") +
+            "</tr>",
+        )
+        .join(""),
+    ) +
+    (columns.length > shown.length
+      ? '<p class="help">另有 ' +
+        (columns.length - shown.length) +
+        " 列未显示：" +
+        esc(columns.slice(shown.length).join("、")) +
+        "</p>"
+      : "")
+  );
+}
+function structuredRecord(record, depth, names = {}) {
+  const entries = Object.entries(record).filter(([, v]) => v !== undefined);
+  if (!entries.length) return '<p class="muted">（空）</p>';
+  const shown = entries.slice(0, STRUCTURED_LIMIT);
+  const label = (key) => (Object.hasOwn(names, key) ? names[key] : key);
+  // Scalars, short token lists and empty containers share one compact grid.
+  const inline = (v) =>
+    isScalar(v) || inlineArray(v) || (isRecord(v) && !Object.keys(v).length);
+  const flat = shown.filter(([, v]) => inline(v));
+  let html = flat.length
+    ? '<dl class="execution-meta">' +
+      flat
+        .map(
+          ([key, v]) =>
+            "<div><dt>" +
+            esc(label(key)) +
+            "</dt><dd>" +
+            esc(compactText(v)) +
+            "</dd></div>",
+        )
+        .join("") +
+      "</dl>"
+    : "";
+  for (const [key, v] of shown) {
+    if (inline(v)) continue;
+    const title = esc(label(key) + countText(v));
+    const body = structuredView(v, depth + 1, childNames(key));
+    html +=
+      depth === 0
+        ? '<details class="result-details" open><summary>' +
+          title +
+          "</summary>" +
+          body +
+          "</details>"
+        : '<div><p class="help"><strong>' + title + "</strong></p>" + body + "</div>";
+  }
+  return html + omittedNote(entries.length);
+}
+// Summary keys not already shown by findings, metrics or the classic tables.
+function summaryFields(summary, hidden = []) {
+  if (!isRecord(summary)) return "";
+  const rest = Object.fromEntries(
+    Object.entries(summary).filter(
+      ([key, v]) =>
+        v !== undefined && !SUMMARY_HIDDEN.includes(key) && !hidden.includes(key),
+    ),
+  );
+  return Object.keys(rest).length
+    ? structuredRecord(rest, 0, summaryNames)
+    : "";
+}
+function stepView(step) {
+  const facts = [
+    step.exit_code !== undefined && step.exit_code !== null
+      ? "退出码 " + step.exit_code
+      : "退出码未完整返回",
+    step.truncated ? "输出截断" : "",
+    step.error || "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    '<details class="result-details"><summary>' +
+    esc(actionName(step.action)) +
+    " · " +
+    esc(statuses[step.status] || step.status) +
+    "</summary>" +
+    '<p class="help">' +
+    esc(facts) +
+    "</p>" +
+    metricsView(step) +
+    findingsView(step.findings) +
+    summaryFields(step.summary) +
+    "</details>"
+  );
+}
+const incompleteReasons = {
+  timeout: "执行超时",
+  output_limit: "输出超过上限被截断",
+  exit_code: "命令非零退出",
+  stderr: "stderr 含致命错误",
+};
+const riskLabels = { low: "低开销", medium: "中开销", high: "高开销" };
+function optionsText(options) {
+  if (!isRecord(options)) return "";
+  return Object.entries(options)
+    .filter(([, v]) => v !== null && v !== undefined && v !== "")
+    .map(([key, v]) => key + "=" + compactText(v))
+    .join(" · ");
+}
 function diagnosticReport(result, job) {
   const notes =
     '<p class="help">' +
     esc(result.summary?.assessment || "当前采集结果") +
     " · " +
     esc(result.summary?.coverage || result.evidence || "有界只读快照") +
-    "</p>";
+    "</p>" +
+    (Array.isArray(result.warnings) && result.warnings.length
+      ? '<p class="help">非致命 stderr 提示（不影响结果完整性）：' +
+        esc(result.warnings.join(" / ")) +
+        "</p>"
+      : "");
+  const options = optionsText(result.request_options || job.request?.options);
   const meta =
     '<dl class="execution-meta">' +
     [
@@ -234,29 +607,57 @@ function diagnosticReport(result, job) {
       ["执行者", job.actor],
       ["输出截断", result.truncated ? "是，结果不完整" : "否"],
       ["采集时间", date(result.captured_at || job.completed_at)],
+      ...(result.timed_out !== undefined
+        ? [["执行超时", result.timed_out ? "是，已保留超时前的输出" : "否"]]
+        : []),
+      ...(result.incomplete_reason
+        ? [
+            [
+              "不完整原因",
+              Object.hasOwn(incompleteReasons, result.incomplete_reason)
+                ? incompleteReasons[result.incomplete_reason]
+                : result.incomplete_reason,
+            ],
+          ]
+        : []),
+      ...(result.error_code ? [["错误代码", result.error_code]] : []),
+      ...(result.risk
+        ? [
+            [
+              "开销等级",
+              Object.hasOwn(riskLabels, result.risk)
+                ? riskLabels[result.risk]
+                : result.risk,
+            ],
+          ]
+        : []),
+      ...(options ? [["诊断参数", options]] : []),
     ]
       .map(([k, v]) => "<div><dt>" + k + "</dt><dd>" + esc(v) + "</dd></div>")
       .join("") +
     "</dl>";
-  const steps = (result.steps || [])
-    .map(
-      (step) =>
-        '<details class="result-details"><summary>' +
-        esc(actionName(step.action)) +
-        " · " +
-        esc(statuses[step.status] || step.status) +
-        "</summary>" +
-        metricsView(step) +
-        findingsView(step.findings) +
-        "</details>",
-    )
+  // Triage keeps its steps at the top level; ssh_collect returns them in summary.
+  const steps = (
+    Array.isArray(result.steps)
+      ? result.steps
+      : Array.isArray(result.summary?.steps)
+        ? result.summary.steps
+        : []
+  )
+    .map(stepView)
     .join("");
+  const extra = summaryFields(result.summary, result.data ? ["analysis"] : []);
   return (
     '<section class="diagnostic-report"><h3>诊断线索</h3>' +
     findingsView(result.findings) +
     notes +
     metricsView(result) +
     (result.data ? summarizeDiagnostic(result) : "") +
+    (extra
+      ? '<details class="result-details" open><summary>结构化摘要</summary>' +
+        extra +
+        "</details>"
+      : "") +
     steps +
     meta +
     '<details id="raw-evidence" class="result-details"><summary>原始输出（已脱敏，点击展开）</summary><div class="actions">' +
