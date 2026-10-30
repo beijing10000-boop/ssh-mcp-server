@@ -5,15 +5,7 @@ function zabbixGroupChoices() {
   return state.zabbixGroups
     .map(
       (g) =>
-        '<label class="check"><input class="zabbix-group-check" type="checkbox" value="' +
-        esc(g.groupid) +
-        '" ' +
-        (state.zabbixGroupIds.has(String(g.groupid)) ? "checked" : "") +
-        "><span>" +
-        esc(g.name) +
-        "<small>Group ID " +
-        esc(g.groupid) +
-        "</small></span></label>",
+        `<label class="check"><input class="zabbix-group-check" type="checkbox" value="${esc(g.groupid)}" ${state.zabbixGroupIds.has(String(g.groupid)) ? "checked" : ""}><span>${esc(g.name)}<small>Group ID ${esc(g.groupid)}</small></span></label>`,
     )
     .join("");
 }
@@ -33,6 +25,10 @@ function zabbixAcceptGroups(groups) {
       .forEach((g) => state.zabbixGroupIds.add(String(g.groupid)));
   const region = $("#zabbix-groups");
   if (region) region.innerHTML = zabbixGroupChoices();
+}
+function zabbixSelectedCount() {
+  const node = $("#zabbix-selected-count");
+  if (node) node.textContent = `已选 ${state.zabbixSelected.size} 台`;
 }
 async function saveZabbixConnection() {
   const form = $("#zabbix-connection-form");
@@ -143,130 +139,79 @@ async function pageZabbix() {
       ? "下一步：核验与测试 SSH"
       : "核验与测试 SSH",
   ];
+  const complete = [
+    settings.config,
+    state.zabbixGroups.length,
+    detail?.run.status === "registered",
+  ];
   const progress =
     '<ol class="sync-steps">' +
     steps
       .map(
         (s, i) =>
-          '<li class="' +
-          ((i === 0 && settings.config) ||
-          (i === 1 && state.zabbixGroups.length) ||
-          (i === 2 && detail?.run.status === "registered")
-            ? "complete"
-            : "") +
-          '"><span>' +
-          (i + 1) +
-          "</span>" +
-          s +
-          "</li>",
+          `<li class="${complete[i] ? "complete" : ""}"><span>${i + 1}</span>${s}</li>`,
       )
       .join("") +
     "</ol>";
   const connection = panel(
     "资产来源",
-    '<div class="settings-source"><div><strong>' +
-      (settings.config ? "已配置 Zabbix MCP" : "尚未配置 Zabbix MCP") +
-      '</strong><p class="muted">' +
-      (settings.config
-        ? esc(settings.config.url)
-        : "先到系统配置保存 MCP 地址和令牌，再返回此处选择分组和登记资产。") +
-      '</p></div><div class="actions">' +
-      btn(
-        "open-settings/zabbix",
-        "系统配置",
-        "",
-        settings.config ? "" : "primary",
-      ) +
-      "</div></div>",
+    `<div class="settings-source"><div><strong>${settings.config ? "已配置 Zabbix MCP" : "尚未配置 Zabbix MCP"}</strong>` +
+      `<p class="muted">${settings.config ? esc(settings.config.url) : "先到系统配置保存 MCP 地址和令牌，再返回此处选择分组和登记资产。"}</p></div>` +
+      `<div class="actions">${btn("open-settings/zabbix", "系统配置", "", settings.config ? "" : "primary")}</div></div>`,
   );
   const types = state.zabbixTypes || ["linux"];
+  const typeChoices = [
+    ["linux", "Linux 服务器", "当前支持 SSH 排查"],
+    ["network", "网络设备", "预留后续诊断接入"],
+    ["windows", "Windows 服务器", "先登记资产"],
+    ["other", "其他 / 未识别", "先登记并人工核对"],
+  ]
+    .map(
+      ([v, n, h]) =>
+        `<label class="check"><input type="checkbox" name="asset_type" value="${v}" ${types.includes(v) ? "checked" : ""}><span>${n}<small>${h}</small></span></label>`,
+    )
+    .join("");
   const discover = panel(
     "选择同步范围",
-    '<form id="zabbix-discover-form"><div class="sync-scope"><div><div class="section-head"><h3>来自 Zabbix 的主机组</h3><div class="actions">' +
-      btn("zabbix-groups", "获取主机组") +
-      btn("zabbix-all-groups", "选择全部") +
-      '</div></div><div id="zabbix-groups" class="group-picker">' +
-      zabbixGroupChoices() +
-      '</div></div><div><h3>资产类型</h3><div class="type-picker">' +
-      [
-        ["linux", "Linux 服务器", "当前支持 SSH 排查"],
-        ["network", "网络设备", "预留后续诊断接入"],
-        ["windows", "Windows 服务器", "先登记资产"],
-        ["other", "其他 / 未识别", "先登记并人工核对"],
-      ]
-        .map(
-          ([v, n, h]) =>
-            '<label class="check"><input type="checkbox" name="asset_type" value="' +
-            v +
-            '" ' +
-            (types.includes(v) ? "checked" : "") +
-            "><span>" +
-            n +
-            "<small>" +
-            h +
-            "</small></span></label>",
-        )
-        .join("") +
-      '</div><label class="check"><input type="checkbox" name="monitored_only" ' +
-      (state.zabbixMonitored === false ? "" : "checked") +
-      '>只拉取启用监控的主机</label></div></div><p class="micro">Linux 根据主机组、模板、操作系统标签或资产清单识别；主动 Agent 没有接口 IP 时会提示补充。每个组先核对精简 ID 索引，再分批读取详情。</p><div class="modal-actions"><span class="muted">仅生成预览，登记前可以核对目标与分组。</span><button class="btn primary" type="submit" ' +
-      (state.zabbixPolling ? "disabled" : "") +
-      ">" +
-      (state.zabbixPolling ? "正在发现资产…" : "拉取资产预览") +
-      "</button></div></form>",
+    `<form id="zabbix-discover-form"><div class="sync-scope"><div><div class="section-head"><h3>来自 Zabbix 的主机组</h3><div class="actions">${btn("zabbix-groups", "获取主机组")}${btn("zabbix-all-groups", "选择全部")}</div></div>` +
+      `<div id="zabbix-groups" class="group-picker">${zabbixGroupChoices()}</div></div>` +
+      `<div><h3>资产类型</h3><div class="type-picker">${typeChoices}</div><label class="check"><input type="checkbox" name="monitored_only" ${state.zabbixMonitored === false ? "" : "checked"}>只拉取启用监控的主机</label></div></div>` +
+      '<p class="micro">Linux 根据主机组、模板、操作系统标签或资产清单识别；主动 Agent 没有接口 IP 时会提示补充。每个组先核对精简 ID 索引，再分批读取详情。</p>' +
+      `<div class="modal-actions"><span class="muted">仅生成预览，登记前可以核对目标与分组。</span><button class="btn primary" type="submit" ${state.zabbixPolling ? "disabled" : ""}>${state.zabbixPolling ? "正在发现资产…" : "拉取资产预览"}</button></div></form>`,
   );
   let preview = "";
   if (detail) {
     const r = detail.run;
     const active = ["queued", "running"].includes(r.status);
+    const typeNames = {
+      linux: "Linux",
+      network: "网络设备",
+      windows: "Windows",
+      other: "其他",
+    };
+    const planNames = {
+      create: "新增资产",
+      update: "更新资产资料",
+      adopt: "需确认关联同 IP 资产",
+      skip: "跳过",
+      conflict: "存在冲突",
+    };
     const rows = detail.items
-      .map(
-        (h) =>
-          '<tr><td><input class="zabbix-host-check" type="checkbox" value="' +
-          esc(h.hostid) +
-          '" ' +
-          (state.zabbixSelected.has(h.hostid) ? "checked" : "") +
-          " " +
-          (h.issue || h.conflict || h.outcome === "registered"
-            ? "disabled"
-            : "") +
-          ' aria-label="选择 ' +
-          esc(h.name) +
-          '"></td><td><strong>' +
-          esc(h.name) +
-          "</strong><small>Host ID " +
-          esc(h.hostid) +
-          '</small></td><td class="mono">' +
-          esc(h.address || "需补充 IP") +
-          "</td><td>" +
-          esc(
-            {
-              linux: "Linux",
-              network: "网络设备",
-              windows: "Windows",
-              other: "其他",
-            }[h.asset_type],
-          ) +
-          "</td><td>" +
-          h.groups
-            .map((g) => '<span class="group-tag">' + esc(g.name) + "</span>")
-            .join("") +
-          "</td><td>" +
-          esc(
-            h.outcome === "registered"
-              ? "已登记"
-              : h.issue ||
-                  h.conflict ||
-                  {
-                    create: "新增资产",
-                    update: "更新资产资料",
-                    adopt: "需确认关联同 IP 资产",
-                    skip: "跳过",
-                    conflict: "存在冲突",
-                  }[h.plan],
-          ) +
-          "</td></tr>",
-      )
+      .map((h) => {
+        const locked = h.issue || h.conflict || h.outcome === "registered";
+        const plan =
+          h.outcome === "registered"
+            ? "已登记"
+            : h.issue || h.conflict || planNames[h.plan];
+        const groups = h.groups
+          .map((g) => `<span class="group-tag">${esc(g.name)}</span>`)
+          .join("");
+        return (
+          `<tr><td><input class="zabbix-host-check" type="checkbox" value="${esc(h.hostid)}" ${state.zabbixSelected.has(h.hostid) ? "checked" : ""} ${locked ? "disabled" : ""} aria-label="选择 ${esc(h.name)}"></td>` +
+          `<td><strong>${esc(h.name)}</strong><small>Host ID ${esc(h.hostid)}</small></td>` +
+          `<td class="mono">${esc(h.address || "需补充 IP")}</td><td>${esc(typeNames[h.asset_type])}</td><td>${groups}</td><td>${esc(plan)}</td></tr>`
+        );
+      })
       .join("");
     const options =
       field("username", "新资产 SSH 用户名", "root") +
@@ -281,20 +226,9 @@ async function pageZabbix() {
       ]);
     preview = panel(
       "资产预览与登记",
-      '<div class="sync-progress"><div>' +
-        badge(r.status) +
-        "<strong>" +
-        r.completed +
-        " / " +
-        r.total +
-        ' 台已读取</strong></div><progress max="' +
-        Math.max(1, r.total) +
-        '" value="' +
-        r.completed +
-        '" aria-label="资产发现进度"></progress><small>发现时间 ' +
-        date(r.created_at) +
-        "</small></div>" +
-        (r.error ? '<p class="inline-error">' + esc(r.error) + "</p>" : "") +
+      `<div class="sync-progress"><div>${badge(r.status)}<strong>${r.completed} / ${r.total} 台已读取</strong></div>` +
+        `<progress max="${Math.max(1, r.total)}" value="${r.completed}" aria-label="资产发现进度"></progress><small>发现时间 ${date(r.created_at)}</small></div>` +
+        (r.error ? `<p class="inline-error">${esc(r.error)}</p>` : "") +
         (active
           ? '<p class="muted">后台正在分批读取，可以离开页面。完成后自动显示登记预览。</p>'
           : table(
@@ -309,21 +243,15 @@ async function pageZabbix() {
               rows,
             ) + pagination("zabbix", detail)) +
         (["preview", "registered"].includes(r.status)
-          ? '<form id="zabbix-register-form"><div class="fields">' +
-            options +
-            '<div class="wide"><label class="check"><input type="checkbox" name="adopt_existing">允许关联同 IP、尚未绑定 Host ID 的手工资产</label></div></div><p class="micro">重新拉取会保留已有 SSH 账号、凭据、跳板和公钥；IP 变化需要重新核验。主机组按 Zabbix Group ID 关联，手工分组保留。</p><div class="selection-bar"><span id="zabbix-selected-count">已选 ' +
-            state.zabbixSelected.size +
-            " 台</span>" +
-            btn("zabbix-select-page", "选择本页可登记资产") +
-            btn("zabbix-clear-selection", "清空选择") +
-            '</div><div class="modal-actions"><button class="btn" type="submit" name="register_selected" value="1">登记所选资产</button><button class="btn primary" type="submit" name="register_all" value="1">登记全部符合条件资产</button></div></form>'
+          ? `<form id="zabbix-register-form"><div class="fields">${options}<div class="wide"><label class="check"><input type="checkbox" name="adopt_existing">允许关联同 IP、尚未绑定 Host ID 的手工资产</label></div></div>` +
+            '<p class="micro">重新拉取会保留已有 SSH 账号、凭据、跳板和公钥；IP 变化需要重新核验。主机组按 Zabbix Group ID 关联，手工分组保留。</p>' +
+            `<div class="selection-bar"><span id="zabbix-selected-count">已选 ${state.zabbixSelected.size} 台</span>${btn("zabbix-select-page", "选择本页可登记资产")}${btn("zabbix-clear-selection", "清空选择")}</div>` +
+            '<div class="modal-actions"><button class="btn" type="submit" name="register_selected" value="1">登记所选资产</button><button class="btn primary" type="submit" name="register_all" value="1">登记全部符合条件资产</button></div></form>'
           : "") +
         '<div id="zabbix-register-result" class="notice" role="status" hidden></div>' +
         (r.status === "registered"
-          ? '<div class="sync-next"><div><strong>登记后，完成 SSH 验证</strong><p class="muted">先绑定凭据，再核验主机公钥，最后执行 SSH 测试。</p></div><div class="actions">' +
-            btn("open-hosts", "查看资产") +
-            btn("open-keys", "核验公钥") +
-            "</div></div>"
+          ? '<div class="sync-next"><div><strong>登记后，完成 SSH 验证</strong><p class="muted">先绑定凭据，再核验主机公钥，最后执行 SSH 测试。</p></div>' +
+            `<div class="actions">${btn("open-hosts", "查看资产")}${btn("open-keys", "核验公钥")}</div></div>`
           : ""),
     );
   }
@@ -335,17 +263,7 @@ async function pageZabbix() {
           runs.items
             .map(
               (r) =>
-                "<tr><td>" +
-                date(r.created_at) +
-                "</td><td>" +
-                badge(r.status) +
-                "</td><td>" +
-                r.completed +
-                " / " +
-                r.total +
-                "</td><td>" +
-                btn("zabbix-view", "查看预览", r.id) +
-                "</td></tr>",
+                `<tr><td>${date(r.created_at)}</td><td>${badge(r.status)}</td><td>${r.completed} / ${r.total}</td><td>${btn("zabbix-view", "查看预览", r.id)}</td></tr>`,
             )
             .join(""),
         ),
@@ -412,20 +330,12 @@ async function submitZabbixForm(form) {
       const node = $("#zabbix-register-result");
       node.hidden = false;
       node.textContent =
-        "本次登记 " +
-        result.registered +
-        " 台，已登记跳过 " +
-        result.skipped +
-        " 台，剩余待处理 " +
-        result.remaining +
-        " 台。" +
+        `本次登记 ${result.registered} 台，已登记跳过 ${result.skipped} 台，剩余待处理 ${result.remaining} 台。` +
         (result.issues.length
-          ? "需处理 " +
-            result.issues.length +
-            " 台：" +
+          ? `需处理 ${result.issues.length} 台：` +
             result.issues
               .slice(0, 10)
-              .map((x) => "Host ID " + x.hostid + " " + x.reason)
+              .map((x) => `Host ID ${x.hostid} ${x.reason}`)
               .join("；")
           : "可前往资产页获取公钥并测试 SSH。");
     }
@@ -443,17 +353,12 @@ async function zabbixAction(action, id) {
     const r = await api("/zabbix/test", "POST");
     zabbixAcceptGroups(r.groups);
     zabbixFeedback(
-      r.note +
-        "。可见主机 " +
-        r.host_count +
-        " 台，主机组 " +
-        r.groups.length +
-        " 个。",
+      `${r.note}。可见主机 ${r.host_count} 台，主机组 ${r.groups.length} 个。`,
     );
   } else if (action === "zabbix-groups") {
     const r = await api("/zabbix/groups", "POST");
     zabbixAcceptGroups(r.items);
-    zabbixFeedback("已获取 " + r.items.length + " 个 Zabbix 主机组。");
+    zabbixFeedback(`已获取 ${r.items.length} 个 Zabbix 主机组。`);
   } else if (action === "zabbix-all-groups") {
     state.zabbixGroups.forEach((g) =>
       state.zabbixGroupIds.add(String(g.groupid)),
@@ -471,13 +376,12 @@ async function zabbixAction(action, id) {
     document
       .querySelectorAll(".zabbix-host-check:not(:disabled)")
       .forEach((n) => (n.checked = true));
-    $("#zabbix-selected-count").textContent =
-      "已选 " + state.zabbixSelected.size + " 台";
+    zabbixSelectedCount();
   } else if (action === "zabbix-clear-selection") {
     state.zabbixSelected.clear();
     document
       .querySelectorAll(".zabbix-host-check")
       .forEach((n) => (n.checked = false));
-    $("#zabbix-selected-count").textContent = "已选 0 台";
+    zabbixSelectedCount();
   }
 }

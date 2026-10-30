@@ -127,37 +127,27 @@ function findingsView(findings = []) {
   );
   if (!items.length)
     return '<p class="empty-state">未触发已实现的规则。请结合采集完整性、历史监控与业务表现判断。</p>';
+  const severity = { critical: "严重", warning: "关注", info: "说明" };
   return (
     '<div class="findings-list">' +
     items
-      .map(
-        (f) =>
-          '<article class="finding ' +
-          (Object.hasOwn(order, f.level) ? f.level : "info") +
-          '"><div class="finding-title"><span class="severity">' +
-          esc(
-            { critical: "严重", warning: "关注", info: "说明" }[f.level] ||
-              "说明",
-          ) +
-          "</span><strong>" +
-          esc(metricLabel(f.metric)) +
-          '</strong><span class="finding-value">' +
-          esc(findingValue(f)) +
-          "</span></div><p>" +
-          esc(f.hint) +
-          "</p><small>规则阈值：" +
-          esc(
-            (typeof f.threshold === "number"
-              ? f.metric === "memory_available_percent"
-                ? "≤ "
-                : "≥ "
-              : "") + findingValue(f, true),
-          ) +
-          (f.source_action
-            ? " · 证据：" + esc(actionName(f.source_action))
-            : "") +
-          "</small></article>",
-      )
+      .map((f) => {
+        const threshold =
+          (typeof f.threshold === "number"
+            ? f.metric === "memory_available_percent"
+              ? "≤ "
+              : "≥ "
+            : "") + findingValue(f, true);
+        const source = f.source_action
+          ? " · 证据：" + esc(actionName(f.source_action))
+          : "";
+        return (
+          `<article class="finding ${Object.hasOwn(order, f.level) ? f.level : "info"}"><div class="finding-title">` +
+          `<span class="severity">${esc(severity[f.level] || "说明")}</span><strong>${esc(metricLabel(f.metric))}</strong>` +
+          `<span class="finding-value">${esc(findingValue(f))}</span></div>` +
+          `<p>${esc(f.hint)}</p><small>规则阈值：${esc(threshold)}${source}</small></article>`
+        );
+      })
       .join("") +
     "</div>"
   );
@@ -175,28 +165,18 @@ function metricsView(result) {
           const level = ["critical", "warning", "info"].includes(m.level)
             ? m.level
             : "info";
-          return (
-            '<div class="metric-card ' +
-            level +
-            '"><div><strong>' +
-            esc(metricLabel(m.metric)) +
-            "</strong><b>" +
-            esc(numberText(m.value)) +
-            (m.unit === "%" ? "%" : "") +
-            '</b></div><progress value="' +
-            Math.max(0, Math.min(max, Number(m.value) || 0)) +
-            '" max="' +
-            max +
-            '" aria-label="' +
-            esc(metricLabel(m.metric)) +
-            '"></progress><small>' +
-            (m.threshold !== null && m.threshold !== undefined
+          const label = esc(metricLabel(m.metric));
+          const threshold =
+            m.threshold !== null && m.threshold !== undefined
               ? "规则阈值 " +
                 (m.metric === "memory_available_percent" ? "≤ " : "≥ ") +
                 esc(m.threshold) +
                 (m.unit || "")
-              : "当前采样") +
-            "</small></div>"
+              : "当前采样";
+          return (
+            `<div class="metric-card ${level}"><div><strong>${label}</strong><b>${esc(numberText(m.value))}${m.unit === "%" ? "%" : ""}</b></div>` +
+            `<progress value="${Math.max(0, Math.min(max, Number(m.value) || 0))}" max="${max}" aria-label="${label}"></progress>` +
+            `<small>${threshold}</small></div>`
           );
         })
         .join("") +
@@ -204,25 +184,13 @@ function metricsView(result) {
     : "";
   if (metrics.length)
     html +=
-      '<details class="result-details"><summary>全部结构化指标（' +
-      metrics.length +
-      "）</summary>" +
+      `<details class="result-details"><summary>全部结构化指标（${metrics.length}）</summary>` +
       table(
         ["指标", "值", "单位"],
         metrics
           .map(
             (m) =>
-              "<tr><td>" +
-              esc(metricLabel(m.metric)) +
-              "</td><td>" +
-              esc(
-                typeof m.value === "number"
-                  ? numberText(m.value)
-                  : valueText(m.value),
-              ) +
-              "</td><td>" +
-              esc(m.unit || "—") +
-              "</td></tr>",
+              `<tr><td>${esc(metricLabel(m.metric))}</td><td>${esc(typeof m.value === "number" ? numberText(m.value) : valueText(m.value))}</td><td>${esc(m.unit || "—")}</td></tr>`,
           )
           .join(""),
       ) +
@@ -348,9 +316,7 @@ function compactText(v, depth = 0) {
     return text.length > 300 ? text.slice(0, 300) + "…" : text;
   }
   const more = (total) =>
-    total > STRUCTURED_LIMIT
-      ? "…（另有 " + (total - STRUCTURED_LIMIT) + " 项）"
-      : "";
+    total > STRUCTURED_LIMIT ? `…（另有 ${total - STRUCTURED_LIMIT} 项）` : "";
   if (Array.isArray(v))
     return (
       v
@@ -382,27 +348,20 @@ const looksLikeStep = (v) =>
   ("summary" in v || "findings" in v);
 const countText = (v) =>
   Array.isArray(v)
-    ? "（" + v.length + " 项）"
+    ? `（${v.length} 项）`
     : isRecord(v)
-      ? "（" + Object.keys(v).length + " 项）"
+      ? `（${Object.keys(v).length} 项）`
       : "";
 function omittedNote(total) {
   return total > STRUCTURED_LIMIT
-    ? '<p class="help">仅展示前 ' +
-        STRUCTURED_LIMIT +
-        " 项，省略 " +
-        (total - STRUCTURED_LIMIT) +
-        " 项；完整内容见“完整结构化结果”。</p>"
+    ? `<p class="help">仅展示前 ${STRUCTURED_LIMIT} 项，省略 ${total - STRUCTURED_LIMIT} 项；完整内容见“完整结构化结果”。</p>`
     : "";
 }
+const codeBlock = (text) => `<pre class="code-result">${esc(text)}</pre>`;
 function structuredView(value, depth = 0, names = {}) {
-  if (isScalar(value)) return "<p>" + esc(scalarText(value)) + "</p>";
+  if (isScalar(value)) return `<p>${esc(scalarText(value))}</p>`;
   if (depth > 4)
-    return (
-      '<pre class="code-result">' +
-      esc((JSON.stringify(value, null, 2) ?? "").slice(0, 4000)) +
-      "</pre>"
-    );
+    return codeBlock((JSON.stringify(value, null, 2) ?? "").slice(0, 4000));
   return Array.isArray(value)
     ? structuredList(value, depth)
     : structuredRecord(value, depth, names);
@@ -411,16 +370,11 @@ function structuredList(items, depth) {
   if (!items.length) return '<p class="muted">（空）</p>';
   const shown = items.slice(0, STRUCTURED_LIMIT);
   let html;
-  if (shown.every(isScalar))
-    html =
-      '<pre class="code-result">' +
-      esc(shown.map(scalarText).join("\n")) +
-      "</pre>";
+  if (shown.every(isScalar)) html = codeBlock(shown.map(scalarText).join("\n"));
   else if (shown.every((x) => Array.isArray(x) && x.every(isScalar)))
-    html =
-      '<pre class="code-result">' +
-      esc(shown.map((row) => row.map(scalarText).join("  ")).join("\n")) +
-      "</pre>";
+    html = codeBlock(
+      shown.map((row) => row.map(scalarText).join("  ")).join("\n"),
+    );
   else if (shown.every(looksLikeStep)) html = shown.map(stepView).join("");
   else if (shown.every(isRecord))
     html =
@@ -431,7 +385,7 @@ function structuredList(items, depth) {
     html =
       '<ul class="reason-list">' +
       shown
-        .map((x) => "<li><div>" + structuredView(x, depth + 1) + "</div></li>")
+        .map((x) => `<li><div>${structuredView(x, depth + 1)}</div></li>`)
         .join("") +
       "</ul>";
   return html + omittedNote(items.length);
@@ -446,16 +400,10 @@ function wideRecords(rows, depth) {
       .map((key) => key + " " + scalarText(row[key]))
       .join(" · ");
   return rows
-    .map(
-      (row, i) =>
-        '<details class="result-details"' +
-        (rows.length <= 3 ? " open" : "") +
-        "><summary>" +
-        esc("第 " + (i + 1) + " 项" + (identity(row) ? " · " + identity(row) : "")) +
-        "</summary>" +
-        structuredRecord(row, depth + 1) +
-        "</details>",
-    )
+    .map((row, i) => {
+      const title = `第 ${i + 1} 项${identity(row) ? " · " + identity(row) : ""}`;
+      return `<details class="result-details"${rows.length <= 3 ? " open" : ""}><summary>${esc(title)}</summary>${structuredRecord(row, depth + 1)}</details>`;
+    })
     .join("");
 }
 function recordTable(rows) {
@@ -464,31 +412,17 @@ function recordTable(rows) {
     for (const key of Object.keys(row))
       if (!columns.includes(key)) columns.push(key);
   const shown = columns.slice(0, 12);
+  const cell = (row, key) =>
+    `<td>${esc(Object.hasOwn(row, key) ? compactText(row[key]) : "—")}</td>`;
   return (
     table(
       shown.map((key) => esc(key)),
       rows
-        .map(
-          (row) =>
-            "<tr>" +
-            shown
-              .map(
-                (key) =>
-                  "<td>" +
-                  esc(Object.hasOwn(row, key) ? compactText(row[key]) : "—") +
-                  "</td>",
-              )
-              .join("") +
-            "</tr>",
-        )
+        .map((row) => `<tr>${shown.map((key) => cell(row, key)).join("")}</tr>`)
         .join(""),
     ) +
     (columns.length > shown.length
-      ? '<p class="help">另有 ' +
-        (columns.length - shown.length) +
-        " 列未显示：" +
-        esc(columns.slice(shown.length).join("、")) +
-        "</p>"
+      ? `<p class="help">另有 ${columns.length - shown.length} 列未显示：${esc(columns.slice(shown.length).join("、"))}</p>`
       : "")
   );
 }
@@ -506,11 +440,7 @@ function structuredRecord(record, depth, names = {}) {
       flat
         .map(
           ([key, v]) =>
-            "<div><dt>" +
-            esc(label(key)) +
-            "</dt><dd>" +
-            esc(compactText(v)) +
-            "</dd></div>",
+            `<div><dt>${esc(label(key))}</dt><dd>${esc(compactText(v))}</dd></div>`,
         )
         .join("") +
       "</dl>"
@@ -521,12 +451,8 @@ function structuredRecord(record, depth, names = {}) {
     const body = structuredView(v, depth + 1, childNames(key));
     html +=
       depth === 0
-        ? '<details class="result-details" open><summary>' +
-          title +
-          "</summary>" +
-          body +
-          "</details>"
-        : '<div><p class="help"><strong>' + title + "</strong></p>" + body + "</div>";
+        ? `<details class="result-details" open><summary>${title}</summary>${body}</details>`
+        : `<div><p class="help"><strong>${title}</strong></p>${body}</div>`;
   }
   return html + omittedNote(entries.length);
 }
@@ -554,14 +480,8 @@ function stepView(step) {
     .filter(Boolean)
     .join(" · ");
   return (
-    '<details class="result-details"><summary>' +
-    esc(actionName(step.action)) +
-    " · " +
-    esc(statuses[step.status] || step.status) +
-    "</summary>" +
-    '<p class="help">' +
-    esc(facts) +
-    "</p>" +
+    `<details class="result-details"><summary>${esc(actionName(step.action))} · ${esc(statuses[step.status] || step.status)}</summary>` +
+    `<p class="help">${esc(facts)}</p>` +
     metricsView(step) +
     findingsView(step.findings) +
     summaryFields(step.summary) +
@@ -574,7 +494,6 @@ const incompleteReasons = {
   exit_code: "命令非零退出",
   stderr: "stderr 含致命错误",
 };
-const riskLabels = { low: "低开销", medium: "中开销", high: "高开销" };
 function optionsText(options) {
   if (!isRecord(options)) return "";
   return Object.entries(options)
@@ -584,15 +503,9 @@ function optionsText(options) {
 }
 function diagnosticReport(result, job) {
   const notes =
-    '<p class="help">' +
-    esc(result.summary?.assessment || "当前采集结果") +
-    " · " +
-    esc(result.summary?.coverage || result.evidence || "有界只读快照") +
-    "</p>" +
+    `<p class="help">${esc(result.summary?.assessment || "当前采集结果")} · ${esc(result.summary?.coverage || result.evidence || "有界只读快照")}</p>` +
     (Array.isArray(result.warnings) && result.warnings.length
-      ? '<p class="help">非致命 stderr 提示（不影响结果完整性）：' +
-        esc(result.warnings.join(" / ")) +
-        "</p>"
+      ? `<p class="help">非致命 stderr 提示（不影响结果完整性）：${esc(result.warnings.join(" / "))}</p>`
       : "");
   const options = optionsText(result.request_options || job.request?.options);
   const meta =
@@ -603,7 +516,7 @@ function diagnosticReport(result, job) {
         result.duration_ms !== undefined ? result.duration_ms + " ms" : "—",
       ],
       ["退出码", result.exit_code ?? "未完整返回"],
-      ["来源", job.source === "mcp" ? "MCP 客户端" : "Web 控制台"],
+      ["来源", sourceName(job.source)],
       ["执行者", job.actor],
       ["输出截断", result.truncated ? "是，结果不完整" : "否"],
       ["采集时间", date(result.captured_at || job.completed_at)],
@@ -625,15 +538,15 @@ function diagnosticReport(result, job) {
         ? [
             [
               "开销等级",
-              Object.hasOwn(riskLabels, result.risk)
-                ? riskLabels[result.risk]
+              Object.hasOwn(riskNames, result.risk)
+                ? riskNames[result.risk]
                 : result.risk,
             ],
           ]
         : []),
       ...(options ? [["诊断参数", options]] : []),
     ]
-      .map(([k, v]) => "<div><dt>" + k + "</dt><dd>" + esc(v) + "</dd></div>")
+      .map(([k, v]) => `<div><dt>${k}</dt><dd>${esc(v)}</dd></div>`)
       .join("") +
     "</dl>";
   // Triage keeps its steps at the top level; ssh_collect returns them in summary.
@@ -647,54 +560,38 @@ function diagnosticReport(result, job) {
     .map(stepView)
     .join("");
   const extra = summaryFields(result.summary, result.data ? ["analysis"] : []);
+  const raw =
+    [result.output, result.stderr].filter(Boolean).join("\n") ||
+    "没有可用原文，可能未采集完成或已按工具隐私规则裁剪。";
   return (
-    '<section class="diagnostic-report"><h3>诊断线索</h3>' +
-    findingsView(result.findings) +
-    notes +
-    metricsView(result) +
+    `<section class="diagnostic-report"><h3>诊断线索</h3>${findingsView(result.findings)}${notes}${metricsView(result)}` +
     (result.data ? summarizeDiagnostic(result) : "") +
     (extra
-      ? '<details class="result-details" open><summary>结构化摘要</summary>' +
-        extra +
-        "</details>"
+      ? `<details class="result-details" open><summary>结构化摘要</summary>${extra}</details>`
       : "") +
     steps +
     meta +
-    '<details id="raw-evidence" class="result-details"><summary>原始输出（已脱敏，点击展开）</summary><div class="actions">' +
-    btn("copy-raw", "复制原始输出") +
-    btn("download-result", "下载诊断记录") +
-    '</div><pre id="raw-output" class="code-result">' +
-    esc(
-      [result.output, result.stderr].filter(Boolean).join("\n") ||
-        "没有可用原文，可能未采集完成或已按工具隐私规则裁剪。",
-    ) +
-    '</pre></details><details class="result-details"><summary>完整结构化结果</summary><pre class="code-result">' +
-    esc(JSON.stringify(result, null, 2)) +
-    "</pre></details></section>"
+    `<details id="raw-evidence" class="result-details"><summary>原始输出（已脱敏，点击展开）</summary><div class="actions">${btn("copy-raw", "复制原始输出")}${btn("download-result", "下载诊断记录")}</div>` +
+    `<pre id="raw-output" class="code-result">${esc(raw)}</pre></details>` +
+    `<details class="result-details"><summary>完整结构化结果</summary>${codeBlock(JSON.stringify(result, null, 2))}</details></section>`
   );
 }
+// Fault scenarios: the template cards here and the triage `symptom` choices.
+const faultScenarios = [
+  ["cpu_high", "CPU 高", "CPU、进程与 PSI"],
+  ["mem_high", "内存高", "内存、RSS、PSI 与 OOM"],
+  ["disk_full", "磁盘满", "容量、inode 与挂载"],
+  ["io_slow", "I/O 慢", "I/O、PSI 与设备"],
+  ["service_down", "服务异常", "服务状态与日志"],
+  ["network", "网络异常", "接口、端口与 TCP"],
+];
 function scenarioTemplates() {
   return (
     '<section class="scenario-section"><div class="section-head"><div><h2>从故障场景开始</h2><p class="muted">先选场景，再确认目标清单。每个场景只运行固定诊断。</p></div></div><div class="scenario-grid">' +
-    [
-      ["cpu_high", "CPU 高", "CPU、进程与 PSI"],
-      ["mem_high", "内存高", "内存、RSS、PSI 与 OOM"],
-      ["disk_full", "磁盘满", "容量、inode 与挂载"],
-      ["io_slow", "I/O 慢", "I/O、PSI 与设备"],
-      ["service_down", "服务异常", "服务状态与日志"],
-      ["network", "网络异常", "接口、端口与 TCP"],
-    ]
+    faultScenarios
       .map(
         ([id, name, description]) =>
-          '<button type="button" class="scenario-card" data-action="scenario-template" data-id="' +
-          id +
-          '">' +
-          icon(id === "disk_full" ? "hosts" : "diagnostics") +
-          "<strong>" +
-          name +
-          "</strong><small>" +
-          description +
-          "</small></button>",
+          `<button type="button" class="scenario-card" data-action="scenario-template" data-id="${id}">${icon(id === "disk_full" ? "hosts" : "diagnostics")}<strong>${name}</strong><small>${description}</small></button>`,
       )
       .join("") +
     "</div></section>"
@@ -705,16 +602,13 @@ async function dashboard() {
     api("/overview"),
     api("/jobs?page_size=5"),
   ]);
-  state.dashboard = data;
   const f = data.funnel,
     q = data.queue,
     d = data.diagnostics_24h,
     m = data.mcp;
   const empty = !data.hosts
-    ? '<section class="welcome"><div><h2>接入第一台 Linux 主机</h2><p>从资产来源开始，绑定凭据、独立核验指纹，再测试 SSH。</p><div class="actions">' +
-      btn("open-zabbix", "从 Zabbix 同步", "", "primary") +
-      btn("open-hosts", "登记主机") +
-      "</div></div></section>"
+    ? '<section class="welcome"><div><h2>接入第一台 Linux 主机</h2><p>从资产来源开始，绑定凭据、独立核验指纹，再测试 SSH。</p>' +
+      `<div class="actions">${btn("open-zabbix", "从 Zabbix 同步", "", "primary")}${btn("open-hosts", "登记主机")}</div></div></section>`
     : "";
   const funnel =
     '<div class="funnel-grid">' +
@@ -726,48 +620,20 @@ async function dashboard() {
     ]
       .map(
         ([id, label, count, note], i) =>
-          '<button type="button" class="funnel-step" data-action="funnel-filter" data-id="' +
-          id +
-          '"><span class="step-label">' +
-          (i + 1) +
-          " / " +
-          label +
-          "</span><strong>" +
-          count +
-          "</strong><small>" +
-          note +
-          "</small></button>",
+          `<button type="button" class="funnel-step" data-action="funnel-filter" data-id="${id}"><span class="step-label">${i + 1} / ${label}</span><strong>${count}</strong><small>${note}</small></button>`,
       )
       .join("") +
-    '</div><p class="help">SSH 配置完成：' +
-    f.key_verified +
-    " 台；SSH 验证通过：" +
-    f.tested +
-    " / " +
-    f.eligible +
-    " 台已启用 Linux。配置齐全与连接测试通过分别统计。</p>";
+    `</div><p class="help">SSH 配置完成：${f.key_verified} 台；SSH 验证通过：${f.tested} / ${f.eligible} 台已启用 Linux。配置齐全与连接测试通过分别统计。</p>`;
   const queue =
-    '<div class="queue-numbers"><div><strong>' +
-    q.active +
-    "<small>/4</small></strong><span>SSH 名额占用</span></div><div><strong>" +
-    q.pending +
-    '<small>/200</small></strong><span>待执行与运行任务</span></div></div><progress aria-label="任务容量" value="' +
-    q.pending +
-    '" max="200"></progress><p class="help">运行 ' +
-    q.running +
-    " · 排队 " +
-    q.queued +
-    " · 后台最多占用 3 个 SSH 名额</p>";
+    `<div class="queue-numbers"><div><strong>${q.active}<small>/4</small></strong><span>SSH 名额占用</span></div>` +
+    `<div><strong>${q.pending}<small>/200</small></strong><span>待执行与运行任务</span></div></div>` +
+    `<progress aria-label="任务容量" value="${q.pending}" max="200"></progress>` +
+    `<p class="help">运行 ${q.running} · 排队 ${q.queued} · 后台最多占用 3 个 SSH 名额</p>`;
   const reasons = d.failure_reasons.length
     ? '<ul class="reason-list">' +
       d.failure_reasons
         .map(
-          (r) =>
-            "<li><span>" +
-            esc(r.reason) +
-            "</span><strong>" +
-            r.count +
-            "</strong></li>",
+          (r) => `<li><span>${esc(r.reason)}</span><strong>${r.count}</strong></li>`,
         )
         .join("") +
       "</ul>"
@@ -776,13 +642,7 @@ async function dashboard() {
     .filter((c) => c.enabled && c.expires_at <= Date.now() / 1000 + 7 * 86400)
     .slice(0, 5);
   const clients =
-    '<div class="client-summary"><span>近 24 小时活跃 <b>' +
-    m.active_24h +
-    "</b></span><span>7 天内到期 <b>" +
-    m.expiring_7d +
-    "</b></span><span>已过期 <b>" +
-    m.expired +
-    "</b></span></div>" +
+    `<div class="client-summary"><span>近 24 小时活跃 <b>${m.active_24h}</b></span><span>7 天内到期 <b>${m.expiring_7d}</b></span><span>已过期 <b>${m.expired}</b></span></div>` +
     table(
       ["客户端", "最近接入", "有效期"],
       (clientAlerts.length
@@ -791,13 +651,7 @@ async function dashboard() {
       )
         .map(
           (c) =>
-            "<tr><td>" +
-            esc(c.name) +
-            "</td><td>" +
-            date(c.last_used_at) +
-            "</td><td>" +
-            date(new Date(c.expires_at * 1000).toISOString()) +
-            "</td></tr>",
+            `<tr><td>${esc(c.name)}</td><td>${date(c.last_used_at)}</td><td>${epochDate(c.expires_at)}</td></tr>`,
         )
         .join(""),
     );
@@ -805,13 +659,7 @@ async function dashboard() {
     ? data.recent_findings
         .map(
           (item) =>
-            '<div class="recent-finding"><div><strong>' +
-            esc(item.host_name) +
-            "</strong><small>" +
-            esc(actionName(item.action)) +
-            " · " +
-            date(item.captured_at) +
-            "</small></div>" +
+            `<div class="recent-finding"><div><strong>${esc(item.host_name)}</strong><small>${esc(actionName(item.action))} · ${date(item.captured_at)}</small></div>` +
             findingsView([item]) +
             btn("job-detail", "查看证据", item.job_id) +
             "</div>",
@@ -826,17 +674,9 @@ async function dashboard() {
     panel("诊断队列", queue, btn("open-history", "查看任务")) +
     panel(
       "24 小时诊断成功率",
-      '<div class="success-rate">' +
-        (d.success_rate === null ? "—" : d.success_rate + "%") +
-        '</div><p class="muted">完整 ' +
-        (d.counts.success || 0) +
-        " · 部分 " +
-        (d.counts.partial || 0) +
-        " · 失败 " +
-        (d.counts.failed || 0) +
-        '</p><p class="help">' +
-        esc(d.definition) +
-        "</p>" +
+      `<div class="success-rate">${d.success_rate === null ? "—" : d.success_rate + "%"}</div>` +
+        `<p class="muted">完整 ${d.counts.success || 0} · 部分 ${d.counts.partial || 0} · 失败 ${d.counts.failed || 0}</p>` +
+        `<p class="help">${esc(d.definition)}</p>` +
         reasons,
     ) +
     panel(
@@ -847,7 +687,7 @@ async function dashboard() {
     ) +
     panel(
       "最近 findings",
-      '<p class="help">' + esc(data.findings_scope) + "</p>" + findings,
+      `<p class="help">${esc(data.findings_scope)}</p>` + findings,
     ) +
     "</div>" +
     panel("最近诊断", jobTable(recent.items), btn("open-history", "全部历史")) +
