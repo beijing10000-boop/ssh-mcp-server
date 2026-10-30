@@ -174,6 +174,34 @@ def test_credentials_encrypted_and_never_echoed(client):
     assert original not in str(listing)
 
 
+def test_credential_rename_to_existing_name_is_409_like_create(client, key_pair):
+    def add(name):
+        return client.post(
+            "/api/v1/credentials",
+            headers=auth(),
+            json={"name": name, "private_key": key_pair[0]},
+        )
+
+    def rotate(ident, name):
+        return client.put(
+            f"/api/v1/credentials/{ident}",
+            headers=auth(),
+            json={"name": name, "private_key": key_pair[0]},
+        )
+
+    first, second = add("诊断密钥 A"), add("诊断密钥 B")
+    assert first.status_code == second.status_code == 201
+    duplicate = add("诊断密钥 A")
+    assert duplicate.status_code == 409
+    renamed = rotate(second.json()["id"], "诊断密钥 A")
+    assert renamed.status_code == 409, renamed.text
+    assert renamed.json()["detail"] == duplicate.json()["detail"]
+    names = {c["name"] for c in client.get("/api/v1/credentials").json()}
+    assert names == {"诊断密钥 A", "诊断密钥 B"}
+    assert rotate(999999, "诊断密钥 C").status_code == 404
+    assert rotate(second.json()["id"], "诊断密钥 C").status_code == 200
+
+
 def test_diagnostics_gates_unverified_hosts(client):
     host_id = make_host(client)
     response = client.post("/api/v1/hosts/" + str(host_id) + "/test", headers=auth())
