@@ -116,6 +116,27 @@ def test_retention_keeps_active_and_cascades(client, key_pair, monkeypatch):
     )
 
 
+def test_retention_cleanup_while_busy_is_not_audited_as_success(client):
+    def last_audit():
+        with store.db() as c:
+            return c.execute(
+                "SELECT outcome,detail FROM audit WHERE action='retention_cleanup' "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+
+    # Another cleanup (the hourly task) holds the lock.
+    assert maintenance.LOCK.acquire(timeout=5)
+    try:
+        busy = client.post("/api/v1/settings/retention/cleanup", headers=auth())
+    finally:
+        maintenance.LOCK.release()
+    assert busy.status_code == 200 and busy.json() == {"busy": True}
+    assert tuple(last_audit()) == ("failed", "busy")
+    done = client.post("/api/v1/settings/retention/cleanup", headers=auth())
+    assert done.status_code == 200 and "audit" in done.json()
+    assert last_audit()["outcome"] == "success"
+
+
 def test_host_lists_do_not_open_per_host_connections(client, key_pair, monkeypatch):
     ready_host(client, key_pair)
     monkeypatch.setattr(store, "groups_for", lambda *_: pytest.fail("N+1 query"))
