@@ -352,6 +352,28 @@ def test_new_endpoints_require_csrf_and_session(client):
         assert client.get("/api/v1" + path).status_code == 401
 
 
+def test_audit_page_keyword_search(client):
+    store.audit("ou_123456789", "group_create", "424242", "success")
+    store.audit("mcp:audit-fixture", "cpu", "989898", "failed", "busy")
+
+    def search(**params):
+        response = client.get("/api/v1/audit/page", params=params)
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    for q, action in (
+        ("group_create", "group_create"),
+        ("audit-fixture", "cpu"),
+        ("989898", "cpu"),
+    ):
+        found = search(q=q)
+        assert found["total"] == 1 and [r["action"] for r in found["items"]] == [action]
+    assert search(q="group_create", outcome="failed")["total"] == 0
+    assert search(q="cpu", outcome="failed")["items"][0]["target"] == "989898"
+    missing = search(q="no-such-audit-keyword")
+    assert missing["total"] == 0 and missing["items"] == []
+
+
 def test_malformed_origins_are_rejected_and_non_ascii_fingerprint_is_422(client):
     response = client.get(
         "/mcp",
