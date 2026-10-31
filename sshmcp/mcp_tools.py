@@ -466,6 +466,7 @@ def _run(
                     "service": service,
                     "minutes": minutes,
                     "directory_root": directory_root,
+                    "symptom": symptom,
                     "options": options,
                 }
             )

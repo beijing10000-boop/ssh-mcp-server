@@ -276,6 +276,41 @@ def test_triage_rejects_shell_and_requires_separate_grant(
     assert result["status"] == "failed" and "无权" in result["error"]
 
 
+def test_failed_triage_audit_has_the_same_parameters_as_success(
+    client, key_pair, monkeypatch
+):
+    hid = ready_host(client, key_pair)
+    token = store.token("mcp.token")
+    monkeypatch.setattr(
+        diagnostics,
+        "execute",
+        lambda *a, **kw: {"status": "success", "summary": {}, "findings": []},
+    )
+    args = {"host_id": hid, "symptom": "disk_full", "minutes": 45}
+    assert mcp_call(client, token, "ssh_triage", args)[1]["status"] == "success"
+    stale = mcp_call(
+        client,
+        token,
+        "ssh_triage",
+        {**args, "expected_revision": store.get_host(hid)["revision"] + 1},
+    )[1]
+    assert stale["error_code"] == "revision_changed"
+    invalid = mcp_call(
+        client, token, "ssh_triage", {**args, "symptom": "not-a-symptom"}
+    )[1]
+    assert invalid["error_code"] == "invalid_argument"
+    with store.db() as c:
+        rows = c.execute(
+            "SELECT outcome,detail FROM audit WHERE action='triage' ORDER BY id"
+        ).fetchall()
+    assert [r["outcome"] for r in rows] == ["success", "failed", "failed"]
+    succeeded = rows[0]["detail"].split(";", 1)[1]  # after job=<id>
+    failed = rows[1]["detail"].split(";", 2)[2]  # after <exception>;<code>
+    assert failed == succeeded == "minutes=45;symptom=disk_full"
+    # Values that failed validation are still not written to the audit trail.
+    assert "not-a-symptom" not in rows[2]["detail"]
+
+
 def test_batch_owner_pagination_group_filter_and_resolve(client, key_pair, monkeypatch):
     group = client.post(
         "/api/v1/groups", headers=auth(), json={"name": "Production"}
