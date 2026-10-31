@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 from typing import Annotated, Literal
 from functools import wraps
 
+from fastapi import HTTPException
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import Field
 from . import store, diagnostics, access, jobs, observations
-from .extensions import collect as collect_spec
+from .catalog import entries
+from .extensions import SERVICE_RE, collect as collect_spec
 
 mcp = FastMCP(
     "Linux SSH 智能诊断",
@@ -212,8 +215,6 @@ def ssh_resolve_host(zabbix_hostid: str) -> dict:
 
 
 def _resolve_host(zabbix_hostid):
-    import re
-
     if not re.fullmatch(r"[0-9]{1,32}", zabbix_hostid):
         raise ValueError("Zabbix Host ID 格式无效")
     with store.db() as c:
@@ -278,7 +279,7 @@ def ssh_diagnose_disk(host_id: int, expected_revision: int | None = None) -> dic
 @mcp.tool(annotations=READ_ONLY)
 @offload
 def ssh_diagnose_processes(host_id: int, expected_revision: int | None = None) -> dict:
-    """只读查询占 CPU 较高的 25 个进程信息。"""
+    """只读查询占 CPU 较高的前 24 个进程信息。"""
     return _run(host_id, "processes", expected_revision=expected_revision)
 
 
@@ -341,7 +342,7 @@ def ssh_diagnose_logs(
 def ssh_diagnose_directory_usage(
     host_id: int, root: str = "/data", expected_revision: int | None = None
 ) -> dict:
-    """只读扫描指定白名单根目录下一层子目录的磁盘占用排行，支持 /、/data、/var、/var/log、/var/lib、/opt、/home、/tmp、/usr；8 秒超时，结果可能不完整。"""
+    """只读扫描指定白名单根目录下一层子目录的磁盘占用排行，支持 /、/data、/var、/var/log、/var/lib、/opt、/home、/root、/tmp、/usr 及其子目录；8 秒超时，结果可能不完整。"""
     return _run(
         host_id, "directory", directory_root=root, expected_revision=expected_revision
     )
@@ -436,7 +437,7 @@ def _run(
         # A multi-step collection is authorized per step, never as a whole.
         for step in enforce or (action,):
             actor = access.enforce(host_id, step)
-        result = jobs.run_inline(
+        return jobs.run_inline(
             host_id,
             action,
             actor,
@@ -447,7 +448,6 @@ def _run(
             symptom=symptom,
             options=options,
         )
-        return result
     except Exception as exc:
         # Return bounded, typed error to the model, not a Python traceback or private key.
         error = (
@@ -467,6 +467,7 @@ def _run(
                     "service": service,
                     "minutes": minutes,
                     "directory_root": directory_root,
+                    "symptom": symptom,
                     "options": options,
                 }
             )
@@ -711,7 +712,7 @@ def ssh_diagnose_syslog(
     unit: Annotated[
         str | None,
         Field(
-            pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$",
+            pattern=SERVICE_RE.pattern,
             description="只看该 systemd 单元（如 nginx.service）",
         ),
     ] = None,
@@ -782,7 +783,7 @@ def ssh_diagnose_service_detail(
     service: Annotated[
         str,
         Field(
-            pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$",
+            pattern=SERVICE_RE.pattern,
             description="systemd 单元名，如 nginx.service、app@1.service",
         ),
     ],
@@ -816,7 +817,7 @@ def ssh_collect(
     service: Annotated[
         str | None,
         Field(
-            pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$",
+            pattern=SERVICE_RE.pattern,
             description="service / logs 步骤的 systemd 单元名",
         ),
     ] = None,
@@ -840,8 +841,6 @@ def ssh_collect(
 @offload
 def ssh_list_tool_catalog() -> list[dict]:
     """按分类列出当前客户端获准使用的诊断动作、参数结构（params）与风险等级。"""
-    from .catalog import entries
-
     who = access.identity()
     granted = set(who["actions"])
     return [
@@ -921,8 +920,6 @@ def ssh_submit_diagnostics(
 
 
 def _owned_job(job_id):
-    import re
-
     if not re.fullmatch(r"[a-f0-9]{32}", job_id):
         raise ValueError("任务 ID 格式无效")
     job = jobs.detail(job_id)
@@ -933,11 +930,37 @@ def _owned_job(job_id):
     return job
 
 
+def _job_error(exc):
+    """Typed failure of the job tools, in the shape of the other tools' failures.
+
+    jobs.detail and jobs.cancel are shared with the REST API and raise
+    HTTPException; an MCP client gets the stable code, not "404: …".
+    """
+    if isinstance(exc, HTTPException):
+        error = str(exc.detail)
+        code = "unavailable" if exc.status_code == 404 else "failed"
+    else:
+        error = (
+            str(exc)
+            if isinstance(exc, (ValueError, PermissionError))
+            else type(exc).__name__
+        )
+        code = error_code(exc, error)
+    return {
+        "status": "failed",
+        "error": diagnostics.redact_output(error)[:250],
+        "error_code": code,
+    }
+
+
 @mcp.tool(annotations=READ_ONLY)
 @offload
 def ssh_get_diagnostic_job(job_id: str) -> dict:
     """查询当前客户端提交且仍在授权范围内的任务状态和采集结果。"""
-    job = _owned_job(job_id)
+    try:
+        job = _owned_job(job_id)
+    except Exception as exc:
+        return _job_error(exc)
     return {
         k: job[k]
         for k in (
@@ -957,8 +980,11 @@ def ssh_get_diagnostic_job(job_id: str) -> dict:
 @offload
 def ssh_cancel_diagnostic_job(job_id: str) -> dict:
     """取消当前客户端自己的排队/运行诊断；已采集数据保留，不修改目标主机。"""
-    job = _owned_job(job_id)
-    return jobs.cancel(job_id, actor=job["actor"])
+    try:
+        job = _owned_job(job_id)
+        return jobs.cancel(job_id, actor=job["actor"])
+    except Exception as exc:
+        return {"ok": False, **_job_error(exc)}
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -990,10 +1016,22 @@ def ssh_resolve_hosts(zabbix_hostids: list[str]) -> dict:
     access.identity()
     return {
         "items": [
-            {"zabbix_hostid": ident, **_resolve_host(ident)}
+            {"zabbix_hostid": ident, **_resolve_item(ident)}
             for ident in dict.fromkeys(zabbix_hostids)
         ]
     }
+
+
+def _resolve_item(zabbix_hostid):
+    """One batch entry: a malformed ID fails on its own, not the whole batch."""
+    try:
+        return _resolve_host(zabbix_hostid)
+    except ValueError as exc:
+        return {
+            "status": "failed",
+            "error": str(exc),
+            "error_code": error_code(exc, str(exc)),
+        }
 
 
 @mcp.tool(annotations=READ_ONLY)

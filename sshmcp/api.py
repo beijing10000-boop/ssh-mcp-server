@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import io
 import json
 import re
 import secrets
 import sqlite3
 
 from fastapi import APIRouter, Depends, HTTPException
+import paramiko
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 
 from . import store, diagnostics, jobs, dashboard
-from .auth import admin
+from .auth import admin, admins
 
 router = APIRouter(prefix="/api/v1")
 SCAN_WORKERS = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ssh-key-batches")
@@ -117,8 +119,37 @@ def safe_host_input(item: HostIn) -> dict:
     return x
 
 
-def _host_view(row, group_ids=None) -> dict:
+def safe_proxy_input(item: ProxyIn) -> dict:
+    x = item.model_dump()
+    x["address"] = store.private_ip(x["address"])
+    x["username"] = store.username(x["username"])
+    x["host_key"] = store.validate_hostkey(x["host_key"])
+    return x
+
+
+def _private_key_valid(body: CredentialIn) -> bool:
+    for cls in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
+        try:
+            cls.from_private_key(
+                io.StringIO(body.private_key), password=body.passphrase or None
+            )
+            return True
+        except (paramiko.SSHException, ValueError, TypeError):
+            continue
+    return False
+
+
+HOST_SELECT = """SELECT h.*,
+(SELECT GROUP_CONCAT(group_id) FROM host_groups WHERE host_id=h.id) AS joined_groups,
+(SELECT MAX(completed_at) FROM diagnostic_jobs WHERE host_id=h.id AND action='connection') AS last_test_at,
+(SELECT MAX(completed_at) FROM diagnostic_jobs WHERE host_id=h.id AND action!='connection') AS last_diagnostic_at
+FROM hosts h"""
+
+
+def host_with_groups(row) -> dict:
+    """Admin view of a HOST_SELECT row: no raw host key, plus readiness."""
     v = dict(row)
+    ids = v.pop("joined_groups")
     key = v.pop("host_key")
     v["has_host_key"] = bool(key)
     if v["has_host_key"]:
@@ -130,7 +161,7 @@ def _host_view(row, group_ids=None) -> dict:
             v["key_error"] = "旧公钥无效，请重新核验"
     else:
         v["host_fingerprint"] = None
-    v["group_ids"] = store.groups_for(v["id"]) if group_ids is None else group_ids
+    v["group_ids"] = [int(x) for x in ids.split(",")] if ids else []
     v["readiness"] = (
         "unsupported"
         if v["asset_type"] != "linux"
@@ -147,19 +178,6 @@ def _host_view(row, group_ids=None) -> dict:
         else "untested"
     )
     return v
-
-
-HOST_SELECT = """SELECT h.*,
-(SELECT GROUP_CONCAT(group_id) FROM host_groups WHERE host_id=h.id) AS joined_groups,
-(SELECT MAX(completed_at) FROM diagnostic_jobs WHERE host_id=h.id AND action='connection') AS last_test_at,
-(SELECT MAX(completed_at) FROM diagnostic_jobs WHERE host_id=h.id AND action!='connection') AS last_diagnostic_at
-FROM hosts h"""
-
-
-def host_with_groups(row):
-    item = dict(row)
-    ids = item.pop("joined_groups")
-    return _host_view(item, [int(x) for x in ids.split(",")] if ids else [])
 
 
 @router.get("/auth/check")
@@ -322,19 +340,7 @@ def credential_add(body: CredentialIn, actor=Depends(admin)):
             {"private_key": body.private_key, "passphrase": body.passphrase}
         )
         # Validate the key before persistence; never return the submitted private material.
-        parsed = None
-        import io
-        import paramiko
-
-        for cls in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
-            try:
-                parsed = cls.from_private_key(
-                    io.StringIO(body.private_key), password=body.passphrase or None
-                )
-                break
-            except (paramiko.SSHException, ValueError, TypeError):
-                continue
-        if parsed is None:
+        if not _private_key_valid(body):
             raise ValueError("私钥无法解析或口令错误")
         with store.db() as c:
             id = c.execute(
@@ -350,36 +356,26 @@ def credential_add(body: CredentialIn, actor=Depends(admin)):
 @router.put("/credentials/{credential_id}")
 def credential_rotate(credential_id: int, body: CredentialIn, actor=Depends(admin)):
     # The new key must be valid before any old credential is replaced.
-    import io
-    import paramiko
-
-    ok = False
-    for cls in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
-        try:
-            cls.from_private_key(
-                io.StringIO(body.private_key), password=body.passphrase or None
-            )
-            ok = True
-            break
-        except (paramiko.SSHException, ValueError, TypeError):
-            pass
-    if not ok:
+    if not _private_key_valid(body):
         raise HTTPException(422, "SSH 私钥无效")
-    with store.db() as c:
-        changed = c.execute(
-            "UPDATE credentials SET name=?,secret=? WHERE id=?",
-            (
-                body.name.strip(),
-                store.seal(json.dumps(body.model_dump())),
-                credential_id,
-            ),
-        )
-        if not changed.rowcount:
-            raise HTTPException(404, "未找到凭据")
-        c.execute(
-            "UPDATE hosts SET last_status='untested',revision=revision+1 WHERE credential_id=? OR proxy_id IN (SELECT id FROM proxies WHERE credential_id=?)",
-            (credential_id, credential_id),
-        )
+    try:
+        with store.db() as c:
+            changed = c.execute(
+                "UPDATE credentials SET name=?,secret=? WHERE id=?",
+                (
+                    body.name.strip(),
+                    store.seal(json.dumps(body.model_dump())),
+                    credential_id,
+                ),
+            )
+            if not changed.rowcount:
+                raise HTTPException(404, "未找到凭据")
+            c.execute(
+                "UPDATE hosts SET last_status='untested',revision=revision+1 WHERE credential_id=? OR proxy_id IN (SELECT id FROM proxies WHERE credential_id=?)",
+                (credential_id, credential_id),
+            )
+    except Exception as exc:
+        fail(exc)
     store.audit(actor, "credential_rotate", str(credential_id), "success")
     return {"ok": True}
 
@@ -393,10 +389,7 @@ def proxies(actor=Depends(admin)):
 @router.post("/proxies", status_code=201)
 def proxy_add(body: ProxyIn, actor=Depends(admin)):
     try:
-        item = body.model_dump()
-        item["address"] = store.private_ip(item["address"])
-        item["username"] = store.username(item["username"])
-        item["host_key"] = store.validate_hostkey(item["host_key"])
+        item = safe_proxy_input(body)
         with store.db() as c:
             id = c.execute(
                 "INSERT INTO proxies(name,address,port,username,host_key,credential_id) "
@@ -457,8 +450,6 @@ def _execute(
 
 def _scan_batch(batch_id: str, ids: list[int], actor=None):
     def scan(hid):
-        from .auth import admins
-
         if actor and actor not in admins():
             return {"state": "failed", "error": "提交者已失去管理员权限"}
         return diagnostics.scan_host_key(hid)

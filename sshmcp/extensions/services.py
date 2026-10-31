@@ -18,10 +18,13 @@ from . import (
     Param,
     SERVICE_RE,
     guard,
+    has_section,
+    journal_permission_probe,
     quote,
     register,
     resolve_window,
     timed,
+    unit_name,
 )
 from ..observations import LOG_PATTERNS, metric, section
 
@@ -46,19 +49,6 @@ UNIT_KEYS = (
     r"|MemoryLimit|TimeoutStartSec|TimeoutStopSec|Type|KillMode|After|Requires|Wants"
     r"|WantedBy|StartLimit|OOMScoreAdjust|Nice)"
 )
-UNIT_SUFFIXES = (
-    ".service",
-    ".socket",
-    ".target",
-    ".timer",
-    ".path",
-    ".mount",
-    ".automount",
-    ".swap",
-    ".slice",
-    ".scope",
-    ".device",
-)
 UNSET = {"", "[not set]", "infinity", "18446744073709551615", "n/a"}
 EXIT_CODES = {"1": "exited", "2": "killed", "3": "dumped"}
 HISTORY_KINDS = {
@@ -80,7 +70,6 @@ SECRET_ARG = re.compile(
 STAMP = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:?\d{2}|Z)?"
 )
-CONTAINER_LEN = 12
 
 # Keep the first n lines within b bytes, each cut to w characters.
 HEAD_AWK = """{
@@ -257,23 +246,13 @@ END {
     }
 }"""
 
-# Not JOURNAL_GUARD: the unit state is still useful without journal access.
-PERMISSION_PROBE = (
-    "if [ \"$(id -u)\" != 0 ] && ! id -nG 2>/dev/null | tr ' ' '\\n' | "
-    "grep -qxE 'systemd-journal|adm|wheel|root'; then "
-    "printf 'CAPABILITY_MISSING:journal-permission\\n'; fi"
-)
 PS_COLUMNS = "pid=,ppid=,{user}=,etimes=,rss=,pcpu=,nlwp=,comm="
 
 
-def _mangle(unit: str) -> str:
-    return unit if unit.endswith(UNIT_SUFFIXES) else unit + ".service"
-
-
-def _ps(columns: str, seconds: int = 3) -> str:
+def _ps(columns: str) -> str:
     """ps for the PIDs in $pl; falls back from user:32 to the plain column."""
-    wide = timed(seconds, "ps -o " + columns.format(user="user:32") + ' -p "$pl"')
-    plain = timed(seconds, "ps -o " + columns.format(user="user") + ' -p "$pl"')
+    wide = timed(3, "ps -o " + columns.format(user="user:32") + ' -p "$pl"')
+    plain = timed(3, "ps -o " + columns.format(user="user") + ' -p "$pl"')
     return (
         "o=$("
         + wide
@@ -287,7 +266,7 @@ def detail_script(options: dict) -> str:
     since, until = resolve_window({"minutes": int(options.get("minutes") or 30)})
     s, u, day = str(int(since)), str(int(until)), str(int(until) - 86400)
     unit = quote(options["service"])
-    mangled = quote(_mangle(options["service"]))
+    mangled = quote(unit_name(options["service"]))
     show = timed(
         4,
         "systemctl show --no-pager -p "
@@ -349,7 +328,8 @@ def detail_script(options: dict) -> str:
         "fi",
         "printf '[AIOPS_JOURNAL]\\n'",
         "if command -v journalctl >/dev/null 2>&1; then",
-        PERMISSION_PROBE,
+        # Not JOURNAL_GUARD: the unit state is still useful without journal access.
+        journal_permission_probe(),
         timed(
             5,
             'journalctl --no-pager -q -u "$id" --since @'
@@ -511,12 +491,7 @@ def _journal_state(body: str, present: bool) -> str | None:
     return "available"
 
 
-def _has(text: str, name: str) -> bool:
-    return re.search(r"(?m)^\[AIOPS_" + name + r"\]$", text) is not None
-
-
 def parse_detail(text: str, summary: dict, findings: list, options: dict) -> None:
-    summary.setdefault("metrics", [])
     text = text if isinstance(text, str) else ""
     options = options if isinstance(options, dict) else {}
     props, execs = {}, {"ExecStart": [], "ExecStartPre": []}
@@ -608,12 +583,12 @@ def parse_detail(text: str, summary: dict, findings: list, options: dict) -> Non
         {key: row[key] for key in ("proto", "address", "port", "pid")}
         for row in _sockets(ports_text)
     ][:40]
-    ports_available = _has(text, "PORTS") and not re.search(
+    ports_available = has_section(text, "PORTS") and not re.search(
         r"(?m)^PORTS_UNAVAILABLE", ports_text
     )
 
     journal_text = section(text, "JOURNAL")
-    access = _journal_state(journal_text, _has(text, "JOURNAL"))
+    access = _journal_state(journal_text, has_section(text, "JOURNAL"))
     entries = [
         line[:240]
         for line in journal_text.splitlines()
@@ -657,7 +632,7 @@ def parse_detail(text: str, summary: dict, findings: list, options: dict) -> Non
             "unit_file": _unit_file(section(text, "CAT")),
             "processes": processes[:30],
             "listening": listening,
-            "ports_available": bool(ports_available),
+            "ports_available": ports_available,
             "journal": {
                 "entries": entries,
                 "matched": matched,
@@ -665,7 +640,7 @@ def parse_detail(text: str, summary: dict, findings: list, options: dict) -> Non
             },
             "history": history[-40:],
             "counts": counts,
-            "coverage": _detail_coverage(text, unit, access, options),
+            "coverage": _detail_coverage(text, access, options),
         }
     )
     _detail_findings(summary, findings, unit, counts, hcounts, matched, history, since)
@@ -681,8 +656,8 @@ def parse_detail(text: str, summary: dict, findings: list, options: dict) -> Non
         )
 
 
-def _detail_coverage(text, unit, access, options) -> str:
-    if "CAPABILITY_MISSING:systemctl" in text and not _has(text, "SHOW"):
+def _detail_coverage(text, access, options) -> str:
+    if "CAPABILITY_MISSING:systemctl" in text and not has_section(text, "SHOW"):
         return "目标没有 systemctl，无法读取 systemd 单元；不能据此判断服务状态"
     minutes = options.get("minutes") if isinstance(options.get("minutes"), int) else 30
     journal = {
@@ -834,7 +809,6 @@ def _detail_findings(summary, findings, unit, counts, hcounts, matched, history,
 
 
 def parse_map(text: str, summary: dict, findings: list, options: dict) -> None:
-    summary.setdefault("metrics", [])
     text = text if isinstance(text, str) else ""
     info = {}
     for match in re.finditer(
@@ -949,7 +923,6 @@ register(
         title="服务深度诊断",
         question="指定 systemd 服务的状态、退出原因、重启记录、进程、端口与日志如何？",
         category="服务与日志",
-        description="systemd 单元状态、单元文件、cgroup 进程、端口、日志与 24 小时重启记录",
         params=(
             Param(
                 "service",
@@ -988,7 +961,6 @@ register(
         title="端口与服务映射",
         question="哪个进程、systemd 单元或容器在监听哪些端口？",
         category="网络",
-        description="监听端口 → 进程 → systemd 单元 / 容器映射",
         params=(),
         script=map_script,
         parse=parse_map,

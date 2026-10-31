@@ -47,7 +47,6 @@ COLLECTABLE = (
     "logs",
 )
 SERVICE_ACTIONS = {"service", "logs"}
-WINDOW_ACTIONS = {"kernel", "log_errors", "oom", "logs"}
 MAX_ACTIONS = 6
 STEP_SECONDS = 20
 STEP_OUTPUT = 32768
@@ -78,7 +77,7 @@ def parse(text: str, summary: dict, findings: list, options: dict) -> None:
     from .. import triage
 
     actions = actions_of(options)
-    result = triage.parse_many(text, actions, truncated=False)
+    result = triage.parse_many(text, actions)
     summary.update(
         {
             "steps": result["steps"],
@@ -97,7 +96,6 @@ register(
         title="多项采集（单会话）",
         question="在一次 SSH 会话内按顺序执行所选的多个固定诊断，各步骤分别解析",
         category="连接与概览",
-        description="单会话多项采集",
         params=(
             Param(
                 "actions",

@@ -4,9 +4,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 
 from . import store
-from .api import HostIn, ProxyIn, GroupIn, host_with_groups, safe_host_input, fail
+from .api import (
+    HOST_SELECT,
+    GroupIn,
+    HostIn,
+    ProxyIn,
+    fail,
+    host_with_groups,
+    safe_host_input,
+    safe_proxy_input,
+)
 from .auth import admin
-from .api import HOST_SELECT
 
 router = APIRouter(prefix="/api/v1")
 
@@ -260,10 +268,7 @@ def delete_group(group_id: int, actor=Depends(admin)):
 @router.put("/proxies/{proxy_id}")
 def update_proxy(proxy_id: int, body: ProxyIn, actor=Depends(admin)):
     try:
-        value = body.model_dump()
-        value["address"] = store.private_ip(value["address"])
-        value["username"] = store.username(value["username"])
-        value["host_key"] = store.validate_hostkey(value["host_key"])
+        value = safe_proxy_input(body)
         with store.db() as c:
             c.execute("BEGIN IMMEDIATE")
             if not c.execute(
@@ -293,7 +298,7 @@ def audit_page(
     clauses, args = [], []
     if q:
         clauses.append("(instr(action,?)>0 OR instr(actor,?)>0 OR target=?)")
-        args.extend((q, q, q, q))
+        args.extend((q, q, q))
     if outcome != "all":
         clauses.append("outcome=?")
         args.append(outcome)

@@ -19,7 +19,7 @@ Rules for action modules:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import re
 import shlex
 import time
@@ -58,7 +58,6 @@ class ActionSpec:
     title: str
     question: str
     category: str
-    description: str
     params: tuple[Param, ...]
     script: Callable[[dict], str]
     parse: Callable[..., None]
@@ -68,7 +67,7 @@ class ActionSpec:
     timeout: int = 20
     output_limit: int = 32768
     estimated_seconds: int = 20
-    notes: tuple[str, ...] = field(default_factory=tuple)
+    notes: tuple[str, ...] = ()
 
     def __post_init__(self):
         if self.risk not in RISKS:
@@ -229,17 +228,52 @@ def timed(seconds: int, command: str) -> str:
     )
 
 
+def journal_permission_probe(limited: str = "") -> str:
+    """Shell fragment that flags an account outside the journal-reading groups.
+
+    Unlike ``operations.JOURNAL_GUARD`` it never exits: the caller still has
+    useful work without the journal. ``limited`` runs first when flagged.
+    """
+    return (
+        "if [ \"$(id -u)\" != 0 ] && ! id -nG 2>/dev/null | tr ' ' '\\n' | "
+        "grep -qxE 'systemd-journal|adm|wheel|root'; then "
+        + limited
+        + "printf 'CAPABILITY_MISSING:journal-permission\\n'; fi"
+    )
+
+
+UNIT_SUFFIXES = (
+    ".service",
+    ".socket",
+    ".target",
+    ".timer",
+    ".path",
+    ".mount",
+    ".automount",
+    ".swap",
+    ".slice",
+    ".scope",
+    ".device",
+)
+
+
+def unit_name(unit: str) -> str:
+    """Full unit name: a bare name means NAME.service, as systemctl assumes."""
+    return unit if unit.endswith(UNIT_SUFFIXES) else unit + ".service"
+
+
+def has_section(text: str, name: str) -> bool:
+    """True when the ``[AIOPS_<name>]`` marker stands on a line of its own."""
+    return re.search(r"(?m)^\[AIOPS_" + name + r"\]$", text) is not None
+
+
 def param_views(spec: ActionSpec) -> list[dict]:
     """Serialisable parameter descriptions for the Web console and clients."""
     rows = []
     for param in spec.params:
         row = {
             "name": param.name,
-            "type": "integer"
-            if param.kind == "int"
-            else "array"
-            if param.kind == "list"
-            else "string",
+            "type": {"int": "integer", "list": "array"}.get(param.kind, "string"),
             "required": param.required,
             "description": param.description,
         }

@@ -6,20 +6,6 @@ from collections import defaultdict
 import ipaddress
 import re
 
-# 固定扫描根路径，不能通过工具输入任意磁盘路径。
-DIRECTORY_ROOTS = (
-    "/",
-    "/data",
-    "/var",
-    "/var/log",
-    "/var/lib",
-    "/opt",
-    "/home",
-    "/root",
-    "/tmp",
-    "/usr",
-)
-
 
 def validate_directory_root(root: str | None) -> str:
     """Accept bounded absolute paths under whitelisted roots; reject path traversal."""
@@ -36,7 +22,6 @@ def validate_directory_root(root: str | None) -> str:
     return root
 
 
-_SS_COUNTER = re.compile(r"^(bytes_sent|bytes_received):([0-9]+)$")
 _SAMPLE_MARKER = re.compile(r"^__SAMPLE_([AB])__$")
 
 
@@ -102,8 +87,7 @@ def parse_peer_connections(text: str) -> dict:
 def _ip_from_endpoint(endpoint: str) -> str | None:
     if ":" not in endpoint:
         return None
-    address, port = endpoint.rsplit(":", 1)
-    address = address.strip("[]")
+    address = endpoint.rsplit(":", 1)[0].strip("[]")
     if "%" in address:
         address = address.rsplit("%", 1)[0]
     try:
@@ -124,7 +108,6 @@ def parse_tcp_samples(text: str, sample_seconds: int = 3) -> dict:
     snapshots: dict[str, dict[tuple[str, str], tuple[int, int]]] = {"A": {}, "B": {}}
     selected = None
     seen = {"A": False, "B": False}
-    total_records = 0
     for line in text.splitlines():
         match = _SAMPLE_MARKER.fullmatch(line.strip())
         if match:
@@ -141,7 +124,6 @@ def parse_tcp_samples(text: str, sample_seconds: int = 3) -> dict:
             continue
         if _ip_from_endpoint(peer) is None:
             continue
-        total_records += 1
         snapshots[selected][(local, peer)] = (int(sent), int(received))
     rows = defaultdict(
         lambda: {"sent_bytes": 0, "received_bytes": 0, "matched_tcp_connections": 0}

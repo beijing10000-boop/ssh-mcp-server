@@ -108,15 +108,30 @@ EXTENDS = {
     "service_detail": ("logs",),
     "service_map": ("sockets", "service"),
 }
+# Stored in mcp_clients.actions_extended once a client has been considered.
+EXTENDS_RELEASE = "v0.6.0"
 
 
 def extend_client_actions():
-    """Grant implied extension actions to existing clients once, with an audit row."""
+    """Grant implied extension actions to each client once, with an audit row.
+
+    Every enabled client considered here is marked, whether or not anything
+    was added, so actions an administrator later removes or leaves out stay
+    that way across restarts. Clients extended before the marker existed are
+    recognised by the audit row written at the time.
+    """
     changed = []
     with store.db() as c:
         c.execute("BEGIN IMMEDIATE")
+        c.execute(
+            "UPDATE mcp_clients SET actions_extended=? WHERE actions_extended!=? "
+            "AND id IN (SELECT target FROM audit WHERE actor='platform' "
+            "AND action='mcp_client_actions_extended' AND detail LIKE ?)",
+            (EXTENDS_RELEASE, EXTENDS_RELEASE, EXTENDS_RELEASE + ":%"),
+        )
         for row in c.execute(
-            "SELECT id,name,actions FROM mcp_clients WHERE enabled=1"
+            "SELECT id,actions FROM mcp_clients WHERE enabled=1 AND actions_extended!=?",
+            (EXTENDS_RELEASE,),
         ).fetchall():
             actions = json.loads(row["actions"])
             added = sorted(
@@ -126,11 +141,15 @@ def extend_client_actions():
                 and action not in actions
                 and any(parent in actions for parent in parents)
             )
+            c.execute(
+                "UPDATE mcp_clients SET actions=?,actions_extended=? WHERE id=?",
+                (
+                    json.dumps(sorted(set(actions) | set(added))),
+                    EXTENDS_RELEASE,
+                    row["id"],
+                ),
+            )
             if added:
-                c.execute(
-                    "UPDATE mcp_clients SET actions=? WHERE id=?",
-                    (json.dumps(sorted(set(actions) | set(added))), row["id"]),
-                )
                 changed.append((row["id"], added))
     for ident, added in changed:
         store.audit(
@@ -138,9 +157,15 @@ def extend_client_actions():
             "mcp_client_actions_extended",
             ident,
             "success",
-            "v0.6.0:" + ",".join(added),
+            EXTENDS_RELEASE + ":" + ",".join(added),
         )
     return changed
+
+
+def _require_groups(c, group_ids):
+    known = {r[0] for r in c.execute("SELECT id FROM groups")}
+    if set(group_ids) - known:
+        raise HTTPException(422, "授权主机组不存在")
 
 
 @router.get("/tools")
@@ -158,10 +183,8 @@ def clients(actor=Depends(admin)):
     result = []
     for row in rows:
         item = dict(row)
-        item["group_ids"], item["actions"] = (
-            json.loads(item["group_ids"]),
-            json.loads(item["actions"]),
-        )
+        item["group_ids"] = json.loads(item["group_ids"])
+        item["actions"] = json.loads(item["actions"])
         item["expired"] = item["expires_at"] <= int(time.time())
         result.append(item)
     return {"items": result, "legacy_enabled": legacy_enabled()}
@@ -177,16 +200,16 @@ def create(body: ClientIn, actor=Depends(admin)):
     ident = uuid.uuid4().hex
     with store.db() as c:
         c.execute("BEGIN IMMEDIATE")
-        known = {r[0] for r in c.execute("SELECT id FROM groups")}
-        if set(body.group_ids) - known:
-            raise HTTPException(422, "授权主机组不存在")
+        _require_groups(c, body.group_ids)
         if c.execute(
             "SELECT 1 FROM mcp_clients WHERE name=?", (body.name.strip(),)
         ).fetchone():
             raise HTTPException(409, "客户端名称已经存在")
+        # A new client's actions are what the administrator picked from the full
+        # current list, so the startup extension never applies to it.
         c.execute(
-            "INSERT INTO mcp_clients(id,name,token_hash,prefix,group_ids,actions,all_hosts,expires_at) "
-            "VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO mcp_clients(id,name,token_hash,prefix,group_ids,actions,all_hosts,expires_at,actions_extended) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
             (
                 ident,
                 body.name.strip(),
@@ -196,6 +219,7 @@ def create(body: ClientIn, actor=Depends(admin)):
                 json.dumps(sorted(set(body.actions))),
                 int(body.all_hosts),
                 int(time.time()) + body.valid_days * 86400,
+                EXTENDS_RELEASE,
             ),
         )
     store.audit(actor, "mcp_client_create", ident, "success")
@@ -220,14 +244,17 @@ def update(client_id: str, body: ClientUpdate, actor=Depends(admin)):
         if not row:
             raise HTTPException(404, "MCP 客户端不存在或已撤销")
         all_hosts = row["all_hosts"] if body.all_hosts is None else int(body.all_hosts)
-        group_ids = (
-            json.loads(row["group_ids"]) if body.group_ids is None else body.group_ids
-        )
+        if body.group_ids is None:
+            # Keep the saved scope minus groups deleted since: group ids are never
+            # reused (AUTOINCREMENT), so a deleted id matches no host and dropping
+            # it narrows nothing. Explicitly given ids are still checked below.
+            known = {r[0] for r in c.execute("SELECT id FROM groups")}
+            group_ids = [g for g in json.loads(row["group_ids"]) if g in known]
+        else:
+            group_ids = body.group_ids
         if not all_hosts and not group_ids:
             raise HTTPException(422, "请选择授权主机组，或明确勾选全部主机")
-        known = {r[0] for r in c.execute("SELECT id FROM groups")}
-        if set(group_ids) - known:
-            raise HTTPException(422, "授权主机组不存在")
+        _require_groups(c, group_ids)
         c.execute(
             "UPDATE mcp_clients SET actions=?,all_hosts=?,group_ids=? WHERE id=?",
             (

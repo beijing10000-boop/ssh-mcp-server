@@ -29,7 +29,7 @@ docker compose exec ssh-mcp cat /app/data/bootstrap.token
 docker compose exec ssh-mcp cat /app/data/mcp.token
 ```
 
-第一个仅用于首次在 /setup 填写飞书 App ID、App Secret、Web 地址和管理员 Open ID，之后 Web 使用飞书登录；第二个用于其他 MCP 客户端的 `Authorization: Bearer <token>`。**不要复制到公开聊天、环境变量、日志或仓库中**。
+第一个仅用于首次在 /setup 填写飞书 App ID、App Secret、Web 地址和管理员 Open ID，之后 Web 使用飞书登录；第二个是兼容旧客户端的全权限 MCP 令牌（`Authorization: Bearer <token>`），新接入的调用方应使用 Web「系统配置 → MCP 接入」签发的客户端令牌，迁移后可在该页停用原始令牌。**不要复制到公开聊天、环境变量、日志或仓库中**。
 
 ## 三、内网客户端访问
 
@@ -46,11 +46,11 @@ WEB_BIND_IP=你的服务器可信内网IP
 1. 首次访问 /setup，填写一次性 Token、飞书应用 App ID、App Secret、管理员 Open ID、Web 外部地址，并在飞书开放平台登记对应 /api/v1/auth/callback 回调地址；保存后使用飞书登录。
 2. 登录 Web，创建「SSH 凭据」，上传 OpenSSH/PEM 私钥文件或粘贴私钥；加密私钥填写口令，验证后加密保存。
 3. 创建主机组（可选；建议用组管理 MCP 授权）。
-3. 「主机资产 → 新增主机」，填内网 IP、端口、账号（可以是 root 或普通账号）、凭据和可选 Zabbix Host ID。
-4. 勾选主机，「批量获取选中主机公钥」，后台并行 SSH 握手。
-5. 根据目标服务器可信控制台 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256` 等命令核对相应算法的 SHA256 指纹。不要只凭扫描结果自动信任。
-6. 在「主机公钥核验」人工输入核验到的完整指纹并确认。
-7. 点击主机「测试」，检查 `AIOPS_SSH_OK`；然后在「只读诊断」尝试 CPU、内存、磁盘等固定剧本。
+4. 「主机资产 → 新增主机」，填内网 IP、端口、账号（可以是 root 或普通账号）、凭据和可选 Zabbix Host ID。
+5. 勾选主机，「批量获取选中主机公钥」，后台并行 SSH 握手。
+6. 根据目标服务器可信控制台 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256` 等命令核对相应算法的 SHA256 指纹。不要只凭扫描结果自动信任。
+7. 在「主机公钥核验」人工输入核验到的完整指纹并确认。
+8. 点击主机「测试」，检查 `AIOPS_SSH_OK`；然后在「只读诊断」尝试 CPU、内存、磁盘等固定剧本。
 
 日志：
 
@@ -125,4 +125,4 @@ Web「只读诊断」新增「目录空间排行」「远端 IP 连接数排行�
 
 在「系统配置 → MCP 接入」为每个 AI 调用方创建独立令牌，指定主机组、诊断动作及有效期。只在创建时复制一次令牌到调用方的加密配置。接通后再停用旧的全局令牌。
 
-本服务只支持单进程部署，不要设置多个 Uvicorn workers。当前任务与审计没有自动清理策略，应监控持久卷容量，并按团队留存策略定期备份归档；不要直接删除运行中的任务数据。
+本服务只支持单进程部署，不要设置多个 Uvicorn workers。已结束的诊断任务、审计、公钥扫描与 Zabbix 预览按「系统配置 → 数据保留」设置的天数每小时自动清理（默认审计 180 天、诊断与扫描 30 天、Zabbix 预览 7 天）；仍应监控持久卷容量，并按团队留存策略定期备份归档；不要直接删除运行中的任务数据。

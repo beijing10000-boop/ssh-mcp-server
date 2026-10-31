@@ -78,13 +78,12 @@ JOURNAL_GUARD = (
 
 
 def window_script(action, minutes):
-    guard = JOURNAL_GUARD
     if action == "log_errors":
         return (
-            guard
+            JOURNAL_GUARD
             + f"journalctl --no-pager -q --since '-{minutes} min' -p warning -n 100 -o short-iso"
         )
-    return guard + (
+    return JOURNAL_GUARD + (
         f"rows=$(journalctl --no-pager -q -k --since '-{minutes} min' -n 300 -o short-iso); code=$?; "
         '[ "$code" = 0 ] || exit "$code"; '
         "printf '%s\\n' \"$rows\" | awk 'tolower($0) ~ /out of memory|oom-kill|killed process|memory cgroup out of memory/ {print}'"
