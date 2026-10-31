@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 from typing import Annotated, Literal
 from functools import wraps
 
@@ -11,7 +12,8 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import Field
 from . import store, diagnostics, access, jobs, observations
-from .extensions import collect as collect_spec
+from .catalog import entries
+from .extensions import SERVICE_RE, collect as collect_spec
 
 mcp = FastMCP(
     "Linux SSH 智能诊断",
@@ -212,8 +214,6 @@ def ssh_resolve_host(zabbix_hostid: str) -> dict:
 
 
 def _resolve_host(zabbix_hostid):
-    import re
-
     if not re.fullmatch(r"[0-9]{1,32}", zabbix_hostid):
         raise ValueError("Zabbix Host ID 格式无效")
     with store.db() as c:
@@ -436,7 +436,7 @@ def _run(
         # A multi-step collection is authorized per step, never as a whole.
         for step in enforce or (action,):
             actor = access.enforce(host_id, step)
-        result = jobs.run_inline(
+        return jobs.run_inline(
             host_id,
             action,
             actor,
@@ -447,7 +447,6 @@ def _run(
             symptom=symptom,
             options=options,
         )
-        return result
     except Exception as exc:
         # Return bounded, typed error to the model, not a Python traceback or private key.
         error = (
@@ -711,7 +710,7 @@ def ssh_diagnose_syslog(
     unit: Annotated[
         str | None,
         Field(
-            pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$",
+            pattern=SERVICE_RE.pattern,
             description="只看该 systemd 单元（如 nginx.service）",
         ),
     ] = None,
@@ -782,7 +781,7 @@ def ssh_diagnose_service_detail(
     service: Annotated[
         str,
         Field(
-            pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$",
+            pattern=SERVICE_RE.pattern,
             description="systemd 单元名，如 nginx.service、app@1.service",
         ),
     ],
@@ -816,7 +815,7 @@ def ssh_collect(
     service: Annotated[
         str | None,
         Field(
-            pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$",
+            pattern=SERVICE_RE.pattern,
             description="service / logs 步骤的 systemd 单元名",
         ),
     ] = None,
@@ -840,8 +839,6 @@ def ssh_collect(
 @offload
 def ssh_list_tool_catalog() -> list[dict]:
     """按分类列出当前客户端获准使用的诊断动作、参数结构（params）与风险等级。"""
-    from .catalog import entries
-
     who = access.identity()
     granted = set(who["actions"])
     return [
@@ -921,8 +918,6 @@ def ssh_submit_diagnostics(
 
 
 def _owned_job(job_id):
-    import re
-
     if not re.fullmatch(r"[a-f0-9]{32}", job_id):
         raise ValueError("任务 ID 格式无效")
     job = jobs.detail(job_id)

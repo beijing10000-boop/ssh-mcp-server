@@ -1,7 +1,10 @@
 """Shared, explicit tool catalogue for Web, scoped clients and MCP adapters."""
 
-from .extensions import REGISTRY, param_views
+from .extensions import REGISTRY, SERVICE_RE, param_views
 
+# Every action id, registered extensions included: MCP client scopes are
+# validated against these keys. The other tables below describe the classic
+# actions only; registered actions describe themselves (see entries()).
 TITLES = {
     "triage": "组合场景诊断",
     "connection": "SSH 连接测试",
@@ -47,7 +50,6 @@ SENSITIVE = {
     "log_errors",
     "oom",
 }
-SENSITIVE |= {spec.id for spec in REGISTRY.values() if spec.sensitive}
 CATEGORIES = {
     "连接与概览": {"connection", "health", "capabilities", "system", "triage"},
     "性能与进程": {
@@ -72,8 +74,6 @@ CATEGORIES = {
     },
     "系统与容器": {"containers", "container_stats", "time_sync", "security_status"},
 }
-for _spec in REGISTRY.values():
-    CATEGORIES.setdefault(_spec.category, set()).add(_spec.id)
 
 
 QUESTIONS = {
@@ -111,7 +111,6 @@ QUESTIONS = {
     "container_stats": "容器当前 CPU、内存和 I/O 用量如何？",
     "security_status": "SELinux、AppArmor 与各防火墙服务状态如何？",
 }
-QUESTIONS.update({spec.id: spec.question for spec in REGISTRY.values()})
 
 
 # MCP tool per action; all others are named ssh_diagnose_<action>. Clients filter
@@ -123,13 +122,6 @@ TOOLS = {
     "mount_health": "ssh_diagnose_mounts",
     "log_errors": "ssh_diagnose_system_errors",
 }
-TOOLS.update(
-    {
-        spec.id: spec.tool
-        for spec in REGISTRY.values()
-        if spec.tool != "ssh_diagnose_" + spec.id
-    }
-)
 # Classic actions take their few parameters by name; extension actions declare
 # theirs in the registry. Both are published in the same structured shape.
 CLASSIC_PARAMS = {
@@ -138,7 +130,7 @@ CLASSIC_PARAMS = {
         "type": "string",
         "required": True,
         "description": "systemd 服务名，如 nginx.service",
-        "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$",
+        "pattern": SERVICE_RE.pattern,
     },
     "minutes": {
         "name": "minutes",
@@ -173,10 +165,6 @@ CLASSIC_PARAMS = {
 }
 
 
-def tool_name(action):
-    return TOOLS.get(action, "ssh_diagnose_" + action)
-
-
 def classic_params(action):
     if action == "triage":
         return [
@@ -199,7 +187,7 @@ def entries():
 
     rows = []
     # Registered actions describe themselves, including any registered after
-    # import (the tables above are filled once, at import).
+    # import (TITLES is filled once, at import).
     actions = list(TITLES) + [action for action in REGISTRY if action not in TITLES]
     for action in actions:
         spec = REGISTRY.get(action)
@@ -215,7 +203,8 @@ def entries():
             estimated = 60 if action == "triage" else 20
             hint = "组合最多 60 秒" if action == "triage" else "通常 1–8 秒，最多 20 秒"
             risk = "medium" if action in {"triage", "directory"} else "low"
-            name, question, tool = TITLES[action], QUESTIONS[action], tool_name(action)
+            name, question = TITLES[action], QUESTIONS[action]
+            tool = TOOLS.get(action, "ssh_diagnose_" + action)
             category = next(k for k, v in CATEGORIES.items() if action in v)
             sensitive = action in SENSITIVE
         rows.append(

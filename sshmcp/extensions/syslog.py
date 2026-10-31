@@ -25,10 +25,13 @@ from . import (
     WINDOW_PARAMS,
     ActionSpec,
     Param,
+    has_section,
+    journal_permission_probe,
     quote,
     register,
     resolve_window,
     timed,
+    unit_name,
 )
 from ..observations import LOG_PATTERNS, metric, section
 
@@ -45,19 +48,6 @@ LINE_CHARS = 240
 # Bytes of log lines per source so the whole output stays near 24 KiB.
 JOURNAL_BUDGET = 16000
 SHARED_BUDGETS = (6000, 9000)  # journal, file: both sources are read
-UNIT_SUFFIXES = (
-    ".service",
-    ".socket",
-    ".target",
-    ".timer",
-    ".path",
-    ".mount",
-    ".automount",
-    ".swap",
-    ".slice",
-    ".scope",
-    ".device",
-)
 # POSIX ERE equivalents of observations.LOG_PATTERNS (matched against the
 # lower-cased line on the host), so the classification spans the whole window.
 AWK_PATTERNS = {
@@ -353,18 +343,6 @@ COUNT_AWK = (
     "/^AIOPS_RC [0-9]+$/ { rc = $2; next } /^[0-9]/ { n++ } END { print n + 0, rc + 0 }"
 )
 
-# Not JOURNAL_GUARD: a missing journalctl or a limited account falls back to
-# the files instead of exiting.
-PERMISSION_PROBE = (
-    "if [ \"$(id -u)\" != 0 ] && ! id -nG 2>/dev/null | tr ' ' '\\n' | "
-    "grep -qxE 'systemd-journal|adm|wheel|root'; then jlim=1; "
-    "printf 'CAPABILITY_MISSING:journal-permission\\n'; fi"
-)
-
-
-def _mangle(unit: str) -> str:
-    return unit if unit.endswith(UNIT_SUFFIXES) else unit + ".service"
-
 
 def script(options: dict) -> str:
     since, until = resolve_window(options)
@@ -384,8 +362,8 @@ def script(options: dict) -> str:
     )
     journal = "journalctl --no-pager -q -o short-iso" + window
     if unit:
-        tag = unit[: -len(".service")] if unit.endswith(".service") else unit
-        file_filters = " -v tag=" + quote(tag) + " -v unit=" + quote(_mangle(unit))
+        tag = unit.removesuffix(".service")
+        file_filters = " -v tag=" + quote(tag) + " -v unit=" + quote(unit_name(unit))
     else:
         file_filters = " -v tag='' -v unit=''"
     file_filters += " -v pid=" + (str(int(pid)) if pid is not None else "''")
@@ -411,7 +389,9 @@ def script(options: dict) -> str:
         "jc=0; jlim=0; cover=no",
         "if command -v journalctl >/dev/null 2>&1; then",
         "jc=1; printf 'JOURNAL=available\\n'",
-        PERMISSION_PROBE,
+        # Not JOURNAL_GUARD: a missing journalctl or a limited account falls
+        # back to the files instead of exiting.
+        journal_permission_probe("jlim=1; "),
         # Is there an entry before the window start? -r + --until seeks there
         # on systemd 219 too (short-unix and --until with plain -n do not).
         "c=$("
@@ -499,10 +479,6 @@ def script(options: dict) -> str:
         "exit 0",
     ]
     return "\n".join(parts) + "\n"
-
-
-def _has(text: str, name: str) -> bool:
-    return re.search(r"(?m)^\[AIOPS_" + name + r"\]$", text) is not None
 
 
 def _source(body: str) -> dict:
@@ -675,15 +651,14 @@ def _coverage(name, state, covers, file_path, priority, total, shown, auth) -> s
 
 
 def parse(text: str, summary: dict, findings: list, options: dict) -> None:
-    summary.setdefault("metrics", [])
     text = text if isinstance(text, str) else ""
     options = options if isinstance(options, dict) else {}
     limit = min(max(_int(options.get("lines"), 120), 1), 300)
     priority = options.get("priority")
     priority = priority if priority in PRIORITIES else "warning"
     src = _source(section(text, "SOURCE"))
-    journal = _block(section(text, "JOURNAL")) if _has(text, "JOURNAL") else None
-    files = _block(section(text, "FILES")) if _has(text, "FILES") else None
+    journal = _block(section(text, "JOURNAL")) if has_section(text, "JOURNAL") else None
+    files = _block(section(text, "FILES")) if has_section(text, "FILES") else None
     state = src["journal"]
     if state == "available" and src["limited"]:
         state = "limited"
@@ -702,7 +677,7 @@ def parse(text: str, summary: dict, findings: list, options: dict) -> None:
 
     entries = primary["entries"][-limit:] if primary else []
     total = primary["total"] if primary else None
-    approx = bool(name == "files" and "PRIORITY_APPROX=keyword" in primary["flags"])
+    approx = name == "files" and "PRIORITY_APPROX=keyword" in primary["flags"]
     # Level counts need a readable system journal; a limited account only
     # sees its own entries, which would read as "no errors".
     levels = journal if journal is not None and state == "available" else None
@@ -736,7 +711,7 @@ def parse(text: str, summary: dict, findings: list, options: dict) -> None:
         for kind in KINDS:
             match_counts.setdefault(kind, 0)
 
-    auth = _auth(section(text, "AUTH"), _has(text, "AUTH"))
+    auth = _auth(section(text, "AUTH"), has_section(text, "AUTH"))
     since = src["since"] if src["since"] is not None else _int(options.get("since"))
     until = src["until"] if src["until"] is not None else _int(options.get("until"))
     boot = re.search(r"(?m)^BOOT_AT (\d{1,12})$", section(text, "BOOT"))
@@ -789,8 +764,22 @@ def parse(text: str, summary: dict, findings: list, options: dict) -> None:
     )
 
 
-def _findings(summary, findings, *, state, covers, primary, name, journal, files, **f):
-    counts, match_counts, auth = f["counts"], f["match_counts"], f["auth"]
+def _findings(
+    summary,
+    findings,
+    *,
+    state,
+    covers,
+    primary,
+    name,
+    journal,
+    files,
+    counts,
+    match_counts,
+    auth,
+    booted,
+    rebooted,
+):
     usable = primary is not None and not (
         name == "journal" and state == "limited" and not (files and files["file"])
     )
@@ -882,12 +871,12 @@ def _findings(summary, findings, *, state, covers, primary, name, journal, files
             hint="SSH 登录失败行数（Failed password + Invalid user，同一次尝试可能各记一行；经验阈值 ≥20 警告、≥200 严重）；"
             "核查 auth.top_sources 是否为暴力破解来源并评估封禁或限速",
         )
-    if f["rebooted"]:
+    if rebooted:
         findings.append(
             {
                 "level": "critical",
                 "metric": "reboot_in_window",
-                "value": f["booted"],
+                "value": booted,
                 "threshold": "窗口内无重启",
                 "hint": "主机启动时间落在该时间窗口内（发生过重启）；易失 journal 会丢失重启前的日志，"
                 "结合 /var/log 文件、监控与 last -x 核查重启原因",
@@ -968,7 +957,6 @@ register(
         title="系统日志检索",
         question="时间窗口内系统日志有哪些错误、OOM、I/O、服务失败或登录失败线索？",
         category="服务与日志",
-        description="journalctl 优先、/var/log 回退的系统日志检索与分类统计",
         params=WINDOW_PARAMS
         + (
             Param(

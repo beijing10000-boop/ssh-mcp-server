@@ -2,13 +2,15 @@
 
 from concurrent.futures import ThreadPoolExecutor
 import json
+import re
+import time
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
-from . import diagnostics, store, observations
-from .auth import admin
+from . import access, diagnostics, store, observations
+from .auth import admin, admins
 
 router = APIRouter(prefix="/api/v1/jobs")
 POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ssh-diagnostics")
@@ -190,16 +192,11 @@ def cancelled(ident):
 
 def authorize(job, request=None):
     if job["source"] == "web":
-        from .auth import admins
-
         if job["actor"] not in admins():
             raise PermissionError("提交者已失去管理权限")
     else:
         # Background MCP tasks must re-check live scope, expiry and revoke
         # state; a credential may change while its task waits in the queue.
-        from . import access
-        import time
-
         client_id = job["actor"].removeprefix("mcp:")
         if client_id == "legacy":
             if not access.legacy_enabled():
@@ -363,8 +360,6 @@ def detail(ident):
 
 
 def batch_detail(batch_id, page=1, page_size=25, *, actor=None):
-    import re
-
     if not re.fullmatch(r"[a-f0-9]{32}", batch_id):
         raise ValueError("批次 ID 格式无效")
     if (
@@ -409,24 +404,22 @@ def batch_detail(batch_id, page=1, page_size=25, *, actor=None):
     items = []
     for row in rows[(page - 1) * page_size : page * page_size]:
         job = detail(row["id"])
-        items.append(
-            {
-                k: job[k]
-                for k in (
-                    "id",
-                    "host_id",
-                    "host_name",
-                    "action",
-                    "status",
-                    "error",
-                    "created_at",
-                    "completed_at",
-                    "result",
-                )
-            }
-        )
-    for item in items:
+        item = {
+            k: job[k]
+            for k in (
+                "id",
+                "host_id",
+                "host_name",
+                "action",
+                "status",
+                "error",
+                "created_at",
+                "completed_at",
+                "result",
+            )
+        }
         item["findings"] = (item["result"] or {}).get("findings", [])
+        items.append(item)
     return {
         "batch_id": batch_id,
         "total": len(rows),

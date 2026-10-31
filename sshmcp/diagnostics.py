@@ -54,27 +54,25 @@ ACTIONS = {
     "network": "cat /proc/net/dev /proc/net/snmp; command -v ip >/dev/null 2>&1 && { ip -s link; ip route show; } || cat /proc/net/route",
     "sockets": "command -v ss >/dev/null 2>&1 && { ss -s; ss -lnt | head -n 60; } || head -n 60 /proc/net/tcp",
     "system": "uname -sr; cat /proc/uptime /proc/loadavg; date -u '+%Y-%m-%dT%H:%M:%SZ'",
-    "memory_processes": "".join(
-        (
-            "ps -eo pid,ppid,comm,pcpu,pmem,rss,etime,state --sort=-rss | head -n 25; "
-            # A bounded fixed read-only identity probe; only approved jar basenames and
-            # systemd service unit names are output, never the full argv or secrets.
-            "printf '[AIOPS_APP_IDENTITY]\\n'; "
-            "ps -eo pid= --sort=-rss | head -n 24 | while read -r pid; do "
-            "case \"$pid\" in ''|*[!0-9]*) continue;; esac; "
-            "app=''; kind=''; "
-            'if [ -r "/proc/$pid/cmdline" ]; then ',
-            "app=$(tr '\\000' '\\n' < \"/proc/$pid/cmdline\" | "
-            'awk \'$0=="-jar" {found=1; next} found {n=split($0,p,"/"); ',
-            "v=p[n]; if(v ~ /^[A-Za-z0-9_.-]+[.]jar$/) print v; exit}'); "
-            '[ -n "$app" ] && kind=jar; fi; ',
-            'if [ -z "$app" ] && [ -r "/proc/$pid/cgroup" ]; then ',
-            "app=$(awk 'match($0,/[A-Za-z0-9_.@-]+[.]service/)"
-            '{print substr($0,RSTART,RLENGTH); exit}\' "/proc/$pid/cgroup"); ',
-            '[ -n "$app" ] && kind=service; fi; ',
-            '[ -n "$app" ] && printf \'AIOPS_APP %s %s %s\n\' "$pid" "$kind" "$app"; ',
-            "done",
-        )
+    "memory_processes": (
+        "ps -eo pid,ppid,comm,pcpu,pmem,rss,etime,state --sort=-rss | head -n 25; "
+        # A bounded fixed read-only identity probe; only approved jar basenames and
+        # systemd service unit names are output, never the full argv or secrets.
+        "printf '[AIOPS_APP_IDENTITY]\\n'; "
+        "ps -eo pid= --sort=-rss | head -n 24 | while read -r pid; do "
+        "case \"$pid\" in ''|*[!0-9]*) continue;; esac; "
+        "app=''; kind=''; "
+        'if [ -r "/proc/$pid/cmdline" ]; then '
+        "app=$(tr '\\000' '\\n' < \"/proc/$pid/cmdline\" | "
+        'awk \'$0=="-jar" {found=1; next} found {n=split($0,p,"/"); '
+        "v=p[n]; if(v ~ /^[A-Za-z0-9_.-]+[.]jar$/) print v; exit}'); "
+        '[ -n "$app" ] && kind=jar; fi; '
+        'if [ -z "$app" ] && [ -r "/proc/$pid/cgroup" ]; then '
+        "app=$(awk 'match($0,/[A-Za-z0-9_.@-]+[.]service/)"
+        '{print substr($0,RSTART,RLENGTH); exit}\' "/proc/$pid/cgroup"); '
+        '[ -n "$app" ] && kind=service; fi; '
+        '[ -n "$app" ] && printf \'AIOPS_APP %s %s %s\n\' "$pid" "$kind" "$app"; '
+        "done"
     ),
     "health": (
         "printf 'CPU_COUNT='; getconf _NPROCESSORS_ONLN; printf '\\n[负载与运行时长]\\n'; cat /proc/loadavg /proc/uptime; "
@@ -166,7 +164,6 @@ def standard_only(action):
     return action in STANDARD_ONLY or extensions.spec_for(action) is not None
 
 
-SERVICE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$")
 # key=value and key: value pairs whose key names a secret, including dotted or
 # camel-cased Java/Spring properties (-Dspring.datasource.password=, keyStorePassword=).
 # key=value / key: value, never across a line break (an empty `-Dx.password=`
@@ -296,7 +293,7 @@ def command_for(
         )
     if action not in {"service", "logs"}:
         raise ValueError("不支持的诊断类型；不允许执行任意 Shell")
-    if not service or not SERVICE_RE.fullmatch(service):
+    if not service or not extensions.SERVICE_RE.fullmatch(service):
         raise ValueError("服务名无效，只允许严格格式的 systemd 服务名称")
     unit = shlex.quote(service)
     if action == "service":
@@ -524,16 +521,14 @@ def _execute_inner(
         chan.settimeout(6)
         chan.exec_command(command)
         stdout, stderr = bytearray(), bytearray()
-        output_limit = (
-            spec.output_limit
-            if spec is not None
-            else 262144
-            if action == "peer_traffic"
-            else 131072
-            if action == "triage"
-            else 32768
-        )
-        seconds = spec.timeout if spec is not None else 60 if action == "triage" else 20
+        if spec is not None:
+            output_limit, seconds = spec.output_limit, spec.timeout
+        elif action == "triage":
+            output_limit, seconds = 131072, 60
+        elif action == "peer_traffic":
+            output_limit, seconds = 262144, 20
+        else:
+            output_limit, seconds = 32768, 20
         deadline = time.monotonic() + seconds
         truncated = timed_out = False
         while True:
@@ -642,9 +637,8 @@ def _execute_inner(
                     "命令执行失败、超时或输出超限：当前排行不完整，不可据此判定全局 Top IP / Top 目录。"
                 )
             result["data"] = data
-            result["output"] = (
-                ""  # Avoid leaking raw socket/directory inventory to LLM.
-            )
+            # Avoid leaking raw socket/directory inventory to LLM.
+            result["output"] = ""
         if action == "triage":
             result.update(triage.parse(output, symptom, truncated or timed_out))
             if any(step["status"] != "success" for step in result["steps"]):

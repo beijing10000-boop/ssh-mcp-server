@@ -143,6 +143,12 @@ def extend_client_actions():
     return changed
 
 
+def _require_groups(c, group_ids):
+    known = {r[0] for r in c.execute("SELECT id FROM groups")}
+    if set(group_ids) - known:
+        raise HTTPException(422, "授权主机组不存在")
+
+
 @router.get("/tools")
 def tools(actor=Depends(admin)):
     return entries()
@@ -158,10 +164,8 @@ def clients(actor=Depends(admin)):
     result = []
     for row in rows:
         item = dict(row)
-        item["group_ids"], item["actions"] = (
-            json.loads(item["group_ids"]),
-            json.loads(item["actions"]),
-        )
+        item["group_ids"] = json.loads(item["group_ids"])
+        item["actions"] = json.loads(item["actions"])
         item["expired"] = item["expires_at"] <= int(time.time())
         result.append(item)
     return {"items": result, "legacy_enabled": legacy_enabled()}
@@ -177,9 +181,7 @@ def create(body: ClientIn, actor=Depends(admin)):
     ident = uuid.uuid4().hex
     with store.db() as c:
         c.execute("BEGIN IMMEDIATE")
-        known = {r[0] for r in c.execute("SELECT id FROM groups")}
-        if set(body.group_ids) - known:
-            raise HTTPException(422, "授权主机组不存在")
+        _require_groups(c, body.group_ids)
         if c.execute(
             "SELECT 1 FROM mcp_clients WHERE name=?", (body.name.strip(),)
         ).fetchone():
@@ -225,9 +227,7 @@ def update(client_id: str, body: ClientUpdate, actor=Depends(admin)):
         )
         if not all_hosts and not group_ids:
             raise HTTPException(422, "请选择授权主机组，或明确勾选全部主机")
-        known = {r[0] for r in c.execute("SELECT id FROM groups")}
-        if set(group_ids) - known:
-            raise HTTPException(422, "授权主机组不存在")
+        _require_groups(c, group_ids)
         c.execute(
             "UPDATE mcp_clients SET actions=?,all_hosts=?,group_ids=? WHERE id=?",
             (
