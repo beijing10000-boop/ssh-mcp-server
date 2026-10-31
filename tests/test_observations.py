@@ -348,6 +348,27 @@ def test_batch_owner_pagination_group_filter_and_resolve(client, key_pair, monke
     assert rows[0]["groups"][0]["name"] == "Production"
 
 
+def test_resolve_hosts_reports_a_malformed_id_per_item(client, key_pair):
+    hid = ready_host(client, key_pair)
+    token = store.token("mcp.token")
+    asked = ["101", "abc", "999", "10 1"]
+    status, result = mcp_call(
+        client, token, "ssh_resolve_hosts", {"zabbix_hostids": asked}
+    )
+    assert status == 200 and "isError" not in result, result
+    items = {item["zabbix_hostid"]: item for item in result["items"]}
+    assert list(items) == asked
+    assert items["101"]["status"] == "success" and items["101"]["host_id"] == hid
+    assert items["999"]["error_code"] == "mapping_unresolved"
+    for bad in ("abc", "10 1"):
+        assert items[bad]["status"] == "failed" and "host_id" not in items[bad]
+        assert items[bad]["error_code"] == "invalid_argument"
+        assert "格式无效" in items[bad]["error"]
+    # The single-ID tool still rejects a malformed ID as a whole call.
+    single = mcp_call(client, token, "ssh_resolve_host", {"zabbix_hostid": "abc"})
+    assert single[1]["isError"]
+
+
 def test_inventory_parsers_use_named_fields():
     process = observations.analyze(
         "processes",

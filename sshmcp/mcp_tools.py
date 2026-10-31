@@ -986,10 +986,22 @@ def ssh_resolve_hosts(zabbix_hostids: list[str]) -> dict:
     access.identity()
     return {
         "items": [
-            {"zabbix_hostid": ident, **_resolve_host(ident)}
+            {"zabbix_hostid": ident, **_resolve_item(ident)}
             for ident in dict.fromkeys(zabbix_hostids)
         ]
     }
+
+
+def _resolve_item(zabbix_hostid):
+    """One batch entry: a malformed ID fails on its own, not the whole batch."""
+    try:
+        return _resolve_host(zabbix_hostid)
+    except ValueError as exc:
+        return {
+            "status": "failed",
+            "error": str(exc),
+            "error_code": error_code(exc, str(exc)),
+        }
 
 
 @mcp.tool(annotations=READ_ONLY)
