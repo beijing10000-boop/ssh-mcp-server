@@ -278,7 +278,7 @@ def ssh_diagnose_disk(host_id: int, expected_revision: int | None = None) -> dic
 @mcp.tool(annotations=READ_ONLY)
 @offload
 def ssh_diagnose_processes(host_id: int, expected_revision: int | None = None) -> dict:
-    """只读查询占 CPU 较高的 25 个进程信息。"""
+    """只读查询占 CPU 较高的前 24 个进程信息。"""
     return _run(host_id, "processes", expected_revision=expected_revision)
 
 
@@ -341,7 +341,7 @@ def ssh_diagnose_logs(
 def ssh_diagnose_directory_usage(
     host_id: int, root: str = "/data", expected_revision: int | None = None
 ) -> dict:
-    """只读扫描指定白名单根目录下一层子目录的磁盘占用排行，支持 /、/data、/var、/var/log、/var/lib、/opt、/home、/tmp、/usr；8 秒超时，结果可能不完整。"""
+    """只读扫描指定白名单根目录下一层子目录的磁盘占用排行，支持 /、/data、/var、/var/log、/var/lib、/opt、/home、/root、/tmp、/usr 及其子目录；8 秒超时，结果可能不完整。"""
     return _run(
         host_id, "directory", directory_root=root, expected_revision=expected_revision
     )

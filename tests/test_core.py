@@ -573,6 +573,33 @@ def test_safe_directory_roots_and_bounded_commands():
         diagnostics.command_for("directory", service=";id", directory_root="/data")
 
 
+def test_tool_descriptions_match_accepted_roots_and_process_count():
+    import asyncio
+    import re
+
+    from sshmcp.catalog import CLASSIC_PARAMS
+    from sshmcp.mcp_tools import mcp
+
+    def roots(text):
+        return [r.removesuffix(" 及其子目录") for r in text.split("、")]
+
+    tools = {t.name: t.description for t in asyncio.run(mcp.list_tools())}
+    listed = roots(
+        re.search(r"支持 ([^；]+)；", tools["ssh_diagnose_directory_usage"])[1]
+    )
+    catalog = roots(re.search(r"（(.+)）", CLASSIC_PARAMS["root"]["description"])[1])
+    assert listed == catalog and "/root" in listed
+    for root in listed:
+        assert insights.validate_directory_root(root) == root
+    # `ps` prints a header line, so `head -n N` keeps N-1 processes.
+    for action, tool in (
+        ("processes", "ssh_diagnose_processes"),
+        ("memory_processes", "ssh_diagnose_memory_processes"),
+    ):
+        shown = int(re.search(r"head -n (\d+)", diagnostics.ACTIONS[action])[1]) - 1
+        assert f"前 {shown} 个进程" in tools[tool]
+
+
 def test_parse_biggest_directories_with_bytes():
     parsed = insights.parse_directory(
         "2048\t/data/logs\n4096\t/data/mysql\n8192\t/data\n",
