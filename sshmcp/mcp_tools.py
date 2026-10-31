@@ -752,7 +752,7 @@ def ssh_diagnose_syslog(
 @mcp.tool(annotations=READ_ONLY)
 @offload
 def ssh_diagnose_java(host_id: int, expected_revision: Revision = None) -> dict:
-    """盘点 Java 进程（最多 20 个）：PID、用户、运行时长、RSS、CPU/内存占比、线程数、打开文件数、对应 systemd 单元、JAR 或主类、应用名（spring.application.name / -Dapp 等）、-Xms/-Xmx/-Xss 与 GC/元空间参数、GC 日志与应用日志位置、JDK 路径与版本；启动命令中的密码、Token、密钥等敏感参数自动脱敏，完整启动命令仅在 detail=full 时附带。只读 /proc、cgroup 内存上限与 JDK release 文件，不附加到 JVM。"""
+    """盘点 Java 进程（最多 20 个）：PID、用户、运行时长、RSS、CPU/内存占比、线程数、打开文件数、对应 systemd 单元、主类或 JAR 文件名（完整路径在 jar_path）、应用名（spring.application.name / -Dapp 等）、-Xms/-Xmx/-Xss 与 GC/元空间参数、GC 日志与应用日志位置、JDK 路径与版本；启动命令中的密码、Token、密钥等敏感参数自动脱敏，完整启动命令仅在 detail=full 时附带。只读 /proc、cgroup 内存上限与 JDK release 文件，不附加到 JVM。"""
     return _run(host_id, "java", expected_revision=expected_revision)
 
 
