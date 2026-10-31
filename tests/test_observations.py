@@ -276,6 +276,41 @@ def test_triage_rejects_shell_and_requires_separate_grant(
     assert result["status"] == "failed" and "无权" in result["error"]
 
 
+def test_failed_triage_audit_has_the_same_parameters_as_success(
+    client, key_pair, monkeypatch
+):
+    hid = ready_host(client, key_pair)
+    token = store.token("mcp.token")
+    monkeypatch.setattr(
+        diagnostics,
+        "execute",
+        lambda *a, **kw: {"status": "success", "summary": {}, "findings": []},
+    )
+    args = {"host_id": hid, "symptom": "disk_full", "minutes": 45}
+    assert mcp_call(client, token, "ssh_triage", args)[1]["status"] == "success"
+    stale = mcp_call(
+        client,
+        token,
+        "ssh_triage",
+        {**args, "expected_revision": store.get_host(hid)["revision"] + 1},
+    )[1]
+    assert stale["error_code"] == "revision_changed"
+    invalid = mcp_call(
+        client, token, "ssh_triage", {**args, "symptom": "not-a-symptom"}
+    )[1]
+    assert invalid["error_code"] == "invalid_argument"
+    with store.db() as c:
+        rows = c.execute(
+            "SELECT outcome,detail FROM audit WHERE action='triage' ORDER BY id"
+        ).fetchall()
+    assert [r["outcome"] for r in rows] == ["success", "failed", "failed"]
+    succeeded = rows[0]["detail"].split(";", 1)[1]  # after job=<id>
+    failed = rows[1]["detail"].split(";", 2)[2]  # after <exception>;<code>
+    assert failed == succeeded == "minutes=45;symptom=disk_full"
+    # Values that failed validation are still not written to the audit trail.
+    assert "not-a-symptom" not in rows[2]["detail"]
+
+
 def test_batch_owner_pagination_group_filter_and_resolve(client, key_pair, monkeypatch):
     group = client.post(
         "/api/v1/groups", headers=auth(), json={"name": "Production"}
@@ -311,6 +346,65 @@ def test_batch_owner_pagination_group_filter_and_resolve(client, key_pair, monke
     listed = mcp_call(client, tokens[0], "ssh_list_hosts", {"group_id": group})[1]
     rows = listed if isinstance(listed, list) else listed["result"]
     assert rows[0]["groups"][0]["name"] == "Production"
+
+
+def test_resolve_hosts_reports_a_malformed_id_per_item(client, key_pair):
+    hid = ready_host(client, key_pair)
+    token = store.token("mcp.token")
+    asked = ["101", "abc", "999", "10 1"]
+    status, result = mcp_call(
+        client, token, "ssh_resolve_hosts", {"zabbix_hostids": asked}
+    )
+    assert status == 200 and "isError" not in result, result
+    items = {item["zabbix_hostid"]: item for item in result["items"]}
+    assert list(items) == asked
+    assert items["101"]["status"] == "success" and items["101"]["host_id"] == hid
+    assert items["999"]["error_code"] == "mapping_unresolved"
+    for bad in ("abc", "10 1"):
+        assert items[bad]["status"] == "failed" and "host_id" not in items[bad]
+        assert items[bad]["error_code"] == "invalid_argument"
+        assert "格式无效" in items[bad]["error"]
+    # The single-ID tool still rejects a malformed ID as a whole call.
+    single = mcp_call(client, token, "ssh_resolve_host", {"zabbix_hostid": "abc"})
+    assert single[1]["isError"]
+
+
+def test_job_tools_return_structured_errors(client, key_pair, monkeypatch):
+    hid = ready_host(client, key_pair)
+    owner, other = (
+        client.post(
+            "/api/v1/mcp/clients",
+            headers=auth(),
+            json={"name": name, "all_hosts": True, "actions": ["health"]},
+        ).json()["token"]
+        for name in ("job-owner", "job-other")
+    )
+    monkeypatch.setattr(jobs.POOL, "submit", lambda *_: None)
+    submitted = mcp_call(client, owner, "ssh_submit_diagnostics", {"host_ids": [hid]})
+    job = submitted[1]["job_ids"][0]
+    for tool in ("ssh_get_diagnostic_job", "ssh_cancel_diagnostic_job"):
+        for token, job_id, code in (
+            (owner, "not-a-job", "invalid_argument"),
+            (owner, "0" * 32, "unavailable"),
+            (other, job, "forbidden"),
+        ):
+            status, result = mcp_call(client, token, tool, {"job_id": job_id})
+            assert status == 200 and "isError" not in result, result
+            assert result["status"] == "failed" and result["error_code"] == code
+            assert not result["error"][:3].isdigit()  # no "404: …" / "409: …"
+            cancelling = tool == "ssh_cancel_diagnostic_job"
+            assert result.get("ok") is (False if cancelling else None)
+    cancel = {"job_id": job}
+    assert mcp_call(client, owner, "ssh_cancel_diagnostic_job", cancel)[1] == {
+        "ok": True
+    }
+    again = mcp_call(client, owner, "ssh_cancel_diagnostic_job", cancel)[1]
+    assert again["ok"] is False and again["error_code"] == "failed"
+    assert again["error"] == "任务不存在或已经结束"
+    # The job record itself is unchanged: a cancelled job, not an error.
+    found = mcp_call(client, owner, "ssh_get_diagnostic_job", cancel)[1]
+    assert found["id"] == job and found["status"] == "cancelled"
+    assert "error_code" not in found
 
 
 def test_inventory_parsers_use_named_fields():

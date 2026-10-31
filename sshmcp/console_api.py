@@ -298,7 +298,7 @@ def audit_page(
     clauses, args = [], []
     if q:
         clauses.append("(instr(action,?)>0 OR instr(actor,?)>0 OR target=?)")
-        args.extend((q, q, q, q))
+        args.extend((q, q, q))
     if outcome != "all":
         clauses.append("outcome=?")
         args.append(outcome)

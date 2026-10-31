@@ -358,21 +358,24 @@ def credential_rotate(credential_id: int, body: CredentialIn, actor=Depends(admi
     # The new key must be valid before any old credential is replaced.
     if not _private_key_valid(body):
         raise HTTPException(422, "SSH 私钥无效")
-    with store.db() as c:
-        changed = c.execute(
-            "UPDATE credentials SET name=?,secret=? WHERE id=?",
-            (
-                body.name.strip(),
-                store.seal(json.dumps(body.model_dump())),
-                credential_id,
-            ),
-        )
-        if not changed.rowcount:
-            raise HTTPException(404, "未找到凭据")
-        c.execute(
-            "UPDATE hosts SET last_status='untested',revision=revision+1 WHERE credential_id=? OR proxy_id IN (SELECT id FROM proxies WHERE credential_id=?)",
-            (credential_id, credential_id),
-        )
+    try:
+        with store.db() as c:
+            changed = c.execute(
+                "UPDATE credentials SET name=?,secret=? WHERE id=?",
+                (
+                    body.name.strip(),
+                    store.seal(json.dumps(body.model_dump())),
+                    credential_id,
+                ),
+            )
+            if not changed.rowcount:
+                raise HTTPException(404, "未找到凭据")
+            c.execute(
+                "UPDATE hosts SET last_status='untested',revision=revision+1 WHERE credential_id=? OR proxy_id IN (SELECT id FROM proxies WHERE credential_id=?)",
+                (credential_id, credential_id),
+            )
+    except Exception as exc:
+        fail(exc)
     store.audit(actor, "credential_rotate", str(credential_id), "success")
     return {"ok": True}
 

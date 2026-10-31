@@ -124,5 +124,9 @@ def save(body: RetentionIn, actor=Depends(admin)):
 @router.post("/cleanup")
 def run(actor=Depends(admin)):
     result = cleanup()
-    store.audit(actor, "retention_cleanup", "history", "success")
+    if result.get("busy"):
+        # Another cleanup holds the lock; this request deleted nothing.
+        store.audit(actor, "retention_cleanup", "history", "failed", "busy")
+    else:
+        store.audit(actor, "retention_cleanup", "history", "success")
     return result

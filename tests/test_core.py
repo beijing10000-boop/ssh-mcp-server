@@ -174,6 +174,34 @@ def test_credentials_encrypted_and_never_echoed(client):
     assert original not in str(listing)
 
 
+def test_credential_rename_to_existing_name_is_409_like_create(client, key_pair):
+    def add(name):
+        return client.post(
+            "/api/v1/credentials",
+            headers=auth(),
+            json={"name": name, "private_key": key_pair[0]},
+        )
+
+    def rotate(ident, name):
+        return client.put(
+            f"/api/v1/credentials/{ident}",
+            headers=auth(),
+            json={"name": name, "private_key": key_pair[0]},
+        )
+
+    first, second = add("诊断密钥 A"), add("诊断密钥 B")
+    assert first.status_code == second.status_code == 201
+    duplicate = add("诊断密钥 A")
+    assert duplicate.status_code == 409
+    renamed = rotate(second.json()["id"], "诊断密钥 A")
+    assert renamed.status_code == 409, renamed.text
+    assert renamed.json()["detail"] == duplicate.json()["detail"]
+    names = {c["name"] for c in client.get("/api/v1/credentials").json()}
+    assert names == {"诊断密钥 A", "诊断密钥 B"}
+    assert rotate(999999, "诊断密钥 C").status_code == 404
+    assert rotate(second.json()["id"], "诊断密钥 C").status_code == 200
+
+
 def test_diagnostics_gates_unverified_hosts(client):
     host_id = make_host(client)
     response = client.post("/api/v1/hosts/" + str(host_id) + "/test", headers=auth())
@@ -476,7 +504,7 @@ def test_scanner_keeps_candidate_but_not_trust(monkeypatch, client):
 
 
 def test_bulk_scan_by_filter_and_retry_failed(client, monkeypatch):
-    make_host(client)
+    hid = make_host(client)
     r = client.post(
         "/api/v1/hosts",
         headers=auth(),
@@ -491,14 +519,21 @@ def test_bulk_scan_by_filter_and_retry_failed(client, monkeypatch):
     from sshmcp import api as module
 
     # Avoid background-network tests; inspect results of the selection function.
-    monkeypatch.setattr(module, "_scan_batch", lambda batch, ids: None)
+    # Same signature as api._scan_batch: SCAN_WORKERS swallows a TypeError.
+    scanned = []
+    monkeypatch.setattr(
+        module,
+        "_scan_batch",
+        lambda batch, ids, actor=None: scanned.append((batch, ids, actor)),
+    )
     response = client.post(
         "/api/v1/host-keys/scan", headers=auth(), json={"query": "172.20.2"}
     )
     assert response.status_code == 202, response.text
+    first = response.json()["batch_id"]
     with store.db() as c:
         batch = c.execute(
-            "SELECT total FROM scan_batches WHERE id=?", (response.json()["batch_id"],)
+            "SELECT total FROM scan_batches WHERE id=?", (first,)
         ).fetchone()
     assert batch["total"] == 1
     response = client.post(
@@ -506,6 +541,12 @@ def test_bulk_scan_by_filter_and_retry_failed(client, monkeypatch):
     )
     assert response.status_code == 202, response.text
     assert response.json()["total"] == 2
+    # SCAN_WORKERS has one thread: once this no-op ran, both batches did too.
+    module.SCAN_WORKERS.submit(lambda: None).result(timeout=10)
+    assert scanned == [
+        (first, [r.json()["id"]], "ou_123456789"),
+        (response.json()["batch_id"], [hid, r.json()["id"]], "ou_123456789"),
+    ]
 
 
 def test_safe_directory_roots_and_bounded_commands():
@@ -543,6 +584,33 @@ def test_safe_directory_roots_and_bounded_commands():
             diagnostics.command_for(action, service="evil")
     with pytest.raises(ValueError):
         diagnostics.command_for("directory", service=";id", directory_root="/data")
+
+
+def test_tool_descriptions_match_accepted_roots_and_process_count():
+    import asyncio
+    import re
+
+    from sshmcp.catalog import CLASSIC_PARAMS
+    from sshmcp.mcp_tools import mcp
+
+    def roots(text):
+        return [r.removesuffix(" 及其子目录") for r in text.split("、")]
+
+    tools = {t.name: t.description for t in asyncio.run(mcp.list_tools())}
+    listed = roots(
+        re.search(r"支持 ([^；]+)；", tools["ssh_diagnose_directory_usage"])[1]
+    )
+    catalog = roots(re.search(r"（(.+)）", CLASSIC_PARAMS["root"]["description"])[1])
+    assert listed == catalog and "/root" in listed
+    for root in listed:
+        assert insights.validate_directory_root(root) == root
+    # `ps` prints a header line, so `head -n N` keeps N-1 processes.
+    for action, tool in (
+        ("processes", "ssh_diagnose_processes"),
+        ("memory_processes", "ssh_diagnose_memory_processes"),
+    ):
+        shown = int(re.search(r"head -n (\d+)", diagnostics.ACTIONS[action])[1]) - 1
+        assert f"前 {shown} 个进程" in tools[tool]
 
 
 def test_parse_biggest_directories_with_bytes():
