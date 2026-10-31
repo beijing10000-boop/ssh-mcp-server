@@ -302,6 +302,73 @@ def test_java_no_process_truncation_and_heap_defaults():
     assert "heap_max_unset" not in by_metric(argfile["findings"])
 
 
+# supervisord-launched services: `-jar` only selects jar mode in the java
+# launcher, so JVM options may still follow it before the jar itself.
+JAR_FIRST = """[AIOPS_JAVA]
+JAVA_TOTAL 1
+[AIOPS_JAVA_PID]
+PID 7301
+PS app 86400 1200000 3.0 7.5 120
+USER app
+UNIT supervisord.service
+ARG java
+ARG -jar
+ARG -Xms256m
+ARG -Xmx1024m
+ARG -XX:+HeapDumpOnOutOfMemoryError
+ARG -XX:HeapDumpPath=/data/dump
+ARG -Dspring.profiles.active=prod
+ARG -Dfile.encoding=UTF-8
+ARG /data/jar/dsp-api/dsp-api_445.jar
+ARG --server.port=8080
+ARGS_END 10
+"""
+
+
+def test_java_options_after_dash_jar_belong_to_the_jvm():
+    report = java_report(JAR_FIRST)
+    (row,) = report["summary"]["processes"]
+    assert row["main"] == {"kind": "jar", "name": "/data/jar/dsp-api/dsp-api_445.jar"}
+    assert row["application"] == "dsp-api_445"
+    assert (row["heap"]["xms"], row["heap"]["xmx"]) == ("256m", "1024m")
+    assert row["heap"]["xmx_MiB"] == 1024.0 and row["profiles"] == ["prod"]
+    assert row["gc"]["xx_flags"] == [
+        "-XX:+HeapDumpOnOutOfMemoryError",
+        "-XX:HeapDumpPath=/data/dump",
+    ]
+    assert row["system_properties_count"] == 2
+    assert "heap_max_unset" not in by_metric(report["findings"])
+    # An application name among the options after -jar still wins over the jar.
+    named = JAR_FIRST.replace(
+        "ARG -Dfile.encoding=UTF-8\n", "ARG -Dspring.application.name=dsp-api\n"
+    )
+    (row,) = java_report(named)["summary"]["processes"]
+    assert row["application"] == "dsp-api" and row["heap"]["xmx"] == "1024m"
+
+
+@pytest.mark.parametrize(
+    ("args", "main", "index"),
+    [
+        (["java", "-Xmx1g", "-jar", "app.jar", "--x"], ("jar", "app.jar"), 3),
+        (
+            ["java", "-jar", "-Xmx1g", "-cp", "lib.jar", "app.jar"],
+            ("jar", "app.jar"),
+            5,
+        ),
+        (["java", "-jar", "@opts", "[REDACTED]", "", "app.jar"], ("jar", "app.jar"), 5),
+        (["java", "-jar"], ("unknown", None), 2),
+        (["java", "-jar", "-Xmx1g", "-Dk=v"], ("unknown", None), 4),
+        (["java", "-cp", "a.jar", "com.x.Main", "-jar"], ("class", "com.x.Main"), 3),
+        (["java", "-m", "mod/com.x.Main", "y.jar"], ("class", "mod/com.x.Main"), 2),
+        (["java", "--module=mod/com.x.Main"], ("class", "mod/com.x.Main"), 1),
+        (["java", "-m"], ("unknown", None), 2),
+    ],
+)
+def test_main_of_skips_jvm_options_between_dash_jar_and_the_jar(args, main, index):
+    found, at = java_ext.main_of(args)
+    assert (found["kind"], found["name"], at) == (*main, index)
+
+
 @pytest.mark.parametrize(
     "text",
     [

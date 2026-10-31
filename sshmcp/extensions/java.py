@@ -265,15 +265,23 @@ def redact_args(args):
 
 
 def main_of(args):
-    """(main {kind, name}, argv index of the main jar/class) for java and jsvc."""
-    index = 1
+    """(main {kind, name}, argv index of the main jar/class) for java and jsvc.
+
+    As in the java launcher, ``-jar`` only selects jar mode: JVM options may
+    still follow it (``java -jar -Xmx1g app.jar``) and the first non-option
+    argument is the jar.
+    """
+    index, kind = 1, "class"
     while index < len(args):
         arg = args[index]
-        if arg in ("-jar", "-m", "--module"):
+        if arg == "-jar":
+            kind = "jar"
+            index += 1
+            continue
+        if arg in ("-m", "--module"):
             if index + 1 >= len(args):
                 break
-            kind = "jar" if arg == "-jar" else "class"
-            return {"kind": kind, "name": args[index + 1][:200]}, index + 1
+            return {"kind": "class", "name": args[index + 1][:200]}, index + 1
         if arg.startswith("--module="):
             return {"kind": "class", "name": arg[9:][:200]}, index
         if arg in VALUE_OPTIONS:
@@ -282,7 +290,7 @@ def main_of(args):
         if not arg or arg == REDACTED or arg.startswith(("-", "@")):
             index += 1
             continue
-        return {"kind": "class", "name": arg[:200]}, index
+        return {"kind": kind, "name": arg[:200]}, index
     return {"kind": "unknown", "name": None}, len(args)
 
 
