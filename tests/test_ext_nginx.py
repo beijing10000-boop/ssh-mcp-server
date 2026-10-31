@@ -320,7 +320,7 @@ def access_log_texts(since=SINCE):
 
 
 def ps_text(binary):
-    """(`ps -eo pid=,...,args=`, `ps -eo args=`) output.
+    """(`ps -e -o pid= ... -o args=`, `ps -eo args=`) output.
 
     The listing shows the usual binary path (its args are cut at 120 chars and
     must not depend on the temp dir); the args-only call names the fake binary

@@ -525,7 +525,7 @@ ukey=$(date -d "@$now" '+%Y/%m/%d %H:%M:%S' 2>/dev/null)
 procs=''
 margs=''
 if command -v ps >/dev/null 2>&1; then
-  procs=$(ps -eo pid=,ppid=,user=,etimes=,rss=,pcpu=,comm=,args= 2>/dev/null | awk '
+  procs=$(ps -e -o pid= -o ppid= -o user= -o etimes= -o rss= -o pcpu= -o comm= -o args= 2>/dev/null | awk '
     $7 == "nginx" || $7 == "openresty" || $7 == "tengine" || $8 ~ /^(nginx|openresty|tengine):$/ {
       a = $8
       for (i = 9; i <= NF; i++) a = a " " $i

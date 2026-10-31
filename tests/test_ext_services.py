@@ -125,7 +125,9 @@ def test_service_scripts_are_fixed_and_read_only():
     ) in nginx and " -- nginx.service" in nginx
     assert "systemctl cat -- nginx.service" in nginx
     assert "cgroup.procs" in nginx and "/sys/fs/cgroup/systemd$cg" in nginx
-    assert "ps -o pid=,ppid=,user:32=,etimes=,rss=,pcpu=,nlwp=,comm=" in nginx
+    assert (
+        "ps -o pid= -o ppid= -o user:32= -o etimes= -o rss= -o pcpu= -o nlwp= -o comm="
+    ) in nginx
     assert "ss -ltnup" in nginx and "ss -ltnupH" not in nginx
     assert "journal-permission" in nginx and '-u "$id" --since @' in nginx
     assert '_PID=1 "UNIT=$id" + "COREDUMP_UNIT=$id"' in nginx
@@ -709,9 +711,9 @@ show) cat {show};;
 cat) printf '# /usr/lib/systemd/system/nginx.service\\n[Service]\\nExecStart=/usr/sbin/nginx\\nEnvironment=API_TOKEN=abc\\n';;
 esac
 """,
-        "ps": f"""case "$2" in
-pid=,ppid=*) echo " 1234     1 root    86400  2348  0.0     1 nginx";;
-pid=,user*) IFS=,; for p in $4; do echo " $p root 100 2000"; done;;
+        "ps": f"""case "$*" in
+*"-o ppid="*) echo " 1234     1 root    86400  2348  0.0     1 nginx";;
+*"-o pid= -o user"*) for a; do l=$a; done; IFS=,; for p in $l; do echo " $p root 100 2000"; done;;
 esac
 """,
         "ss": f"""printf 'Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port Process\\n'

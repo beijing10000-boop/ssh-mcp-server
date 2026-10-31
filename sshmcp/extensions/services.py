@@ -246,13 +246,14 @@ END {
     }
 }"""
 
-PS_COLUMNS = "pid=,ppid=,{user}=,etimes=,rss=,pcpu=,nlwp=,comm="
+# One column per -o: EL7's procps-ng reads "-o pid=,ppid=" as one column.
+PS_COLUMNS = "-o pid= -o ppid= -o {user}= -o etimes= -o rss= -o pcpu= -o nlwp= -o comm="
 
 
 def _ps(columns: str) -> str:
     """ps for the PIDs in $pl; falls back from user:32 to the plain column."""
-    wide = timed(3, "ps -o " + columns.format(user="user:32") + ' -p "$pl"')
-    plain = timed(3, "ps -o " + columns.format(user="user") + ' -p "$pl"')
+    wide = timed(3, "ps " + columns.format(user="user:32") + ' -p "$pl"')
+    plain = timed(3, "ps " + columns.format(user="user") + ' -p "$pl"')
     return (
         "o=$("
         + wide
@@ -373,7 +374,7 @@ def map_script(options: dict) -> str:
         'pids=$(printf \'%s\\n\' "$out" | awk "$pidawk" | head -n 60)',
         "if [ -z \"$pids\" ]; then printf 'PROCESS_UNAVAILABLE\\n'; else",
         "pl=$(printf '%s\\n' \"$pids\" | tr '\\n' ',' | sed 's/,*$//')",
-        _ps("pid=,{user}=,etimes=,rss="),
+        _ps("-o pid= -o {user}= -o etimes= -o rss="),
         "{ printf '%s\\n' \"$o\" | awk 'NF == 4 { print \"P\", $1, $2, $3, $4 }'",
         'for p in $pids; do c=-; read -r c 2>/dev/null < "/proc/$p/comm" || c=-; '
         "c=$(printf '%s' \"$c\" | tr -c 'A-Za-z0-9_.:@+-' '_' | cut -c1-32); "

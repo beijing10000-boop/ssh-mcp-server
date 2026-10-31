@@ -2,7 +2,9 @@
 
 > 独立部署、中文优先、免 Agent 的 Linux SSH 诊断服务。默认 Web/MCP 端口 **9099**。
 
-**当前版本：v0.7.1**
+**当前版本：v0.7.2**
+
+v0.7.2 修复 CentOS/RHEL 7 等 procps-ng ≤ 3.3.11 的主机上 ps 只返回一列的问题：`ssh_diagnose_java` 的 RSS、CPU、内存占比与运行时长全部为空，服务深度诊断与端口映射缺进程属主/运行时长/RSS，Nginx 诊断看不到 Nginx 进程，`processes` 的 D 状态进程列表为空。每个 `ps -o` 现在只写一列，CI 在 CentOS 7 容器中实测全部 ps 调用。无数据库变化。详见 [v0.7.2 说明](docs/RELEASE-v0.7.2.md)。
 
 v0.7.1 修复两个线上问题：`java -jar -Xms… -Xmx… app.jar` 这类把 JVM 选项写在 `-jar` 之后的启动命令被解析错（应用名显示成 `-Xms256m`、`-Xmx` 未识别），以及 `memory_processes` 在按内存排第 24 的进程无法识别应用名时以退出码 1 结束、被标成部分完成。无数据库变化。详见 [v0.7.1 说明](docs/RELEASE-v0.7.1.md)。
 
@@ -60,7 +62,7 @@ docker compose exec ssh-mcp cat /app/data/bootstrap.token
 
 需开放给可信内网时，在项目目录创建 `.env`，并设置 `WEB_BIND_IP=内网绑定IP`；建议同时通过防火墙限制允许访问的源地址。
 
-本次升级见 [v0.7.1 说明](docs/RELEASE-v0.7.1.md)（界面与 v0.7.0 的改动见 [v0.7.0 说明](docs/RELEASE-v0.7.0.md)），v0.6.0 的工具与授权扩展见 [v0.6.0 说明](docs/RELEASE-v0.6.0.md)，备份与迁移步骤见 [v0.4 发布与迁移说明](docs/RELEASE-v0.4.md)。配置入口见 [v0.3.1 系统配置说明](docs/RELEASE-v0.3.1.md)。请先阅读 [v0.3 优化与升级说明](docs/RELEASE-v0.3.md)，以及 [安装部署](docs/INSTALLATION.md)、[v0.2 升级与验证](docs/RELEASE-v0.2.md)、[架构评估](docs/ARCHITECTURE.md)、[AI 平台改造方案](docs/AI-PLATFORM-INTEGRATION.md)、[MCP 接入](docs/MCP.md)、[安全说明](docs/SECURITY.md)、[目录与 IP 流量分析](docs/INSIGHTS.md)。
+本次升级见 [v0.7.2 说明](docs/RELEASE-v0.7.2.md)（上一版修复见 [v0.7.1 说明](docs/RELEASE-v0.7.1.md)，界面与 v0.7.0 的改动见 [v0.7.0 说明](docs/RELEASE-v0.7.0.md)），v0.6.0 的工具与授权扩展见 [v0.6.0 说明](docs/RELEASE-v0.6.0.md)，备份与迁移步骤见 [v0.4 发布与迁移说明](docs/RELEASE-v0.4.md)。配置入口见 [v0.3.1 系统配置说明](docs/RELEASE-v0.3.1.md)。请先阅读 [v0.3 优化与升级说明](docs/RELEASE-v0.3.md)，以及 [安装部署](docs/INSTALLATION.md)、[v0.2 升级与验证](docs/RELEASE-v0.2.md)、[架构评估](docs/ARCHITECTURE.md)、[AI 平台改造方案](docs/AI-PLATFORM-INTEGRATION.md)、[MCP 接入](docs/MCP.md)、[安全说明](docs/SECURITY.md)、[目录与 IP 流量分析](docs/INSIGHTS.md)。
 
 ## 核心能力
 

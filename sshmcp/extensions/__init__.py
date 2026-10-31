@@ -15,6 +15,9 @@ Rules for action modules:
 - Output stays bounded (head/tail/awk aggregation); the executor caps it.
 - Section markers ``[AIOPS_<NAME>]`` separate blocks; parsers use
   ``observations.section``.
+- ``ps`` takes one column per ``-o`` (``ps -o pid= -o comm=``): procps-ng up to
+  3.3.11 (EL7, Ubuntu 16.04) reads ``-o pid=,comm=`` on a command line of
+  POSIX options only as the single column ``pid`` headed ",comm=".
 """
 
 from __future__ import annotations
