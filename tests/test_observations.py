@@ -369,6 +369,44 @@ def test_resolve_hosts_reports_a_malformed_id_per_item(client, key_pair):
     assert single[1]["isError"]
 
 
+def test_job_tools_return_structured_errors(client, key_pair, monkeypatch):
+    hid = ready_host(client, key_pair)
+    owner, other = (
+        client.post(
+            "/api/v1/mcp/clients",
+            headers=auth(),
+            json={"name": name, "all_hosts": True, "actions": ["health"]},
+        ).json()["token"]
+        for name in ("job-owner", "job-other")
+    )
+    monkeypatch.setattr(jobs.POOL, "submit", lambda *_: None)
+    submitted = mcp_call(client, owner, "ssh_submit_diagnostics", {"host_ids": [hid]})
+    job = submitted[1]["job_ids"][0]
+    for tool in ("ssh_get_diagnostic_job", "ssh_cancel_diagnostic_job"):
+        for token, job_id, code in (
+            (owner, "not-a-job", "invalid_argument"),
+            (owner, "0" * 32, "unavailable"),
+            (other, job, "forbidden"),
+        ):
+            status, result = mcp_call(client, token, tool, {"job_id": job_id})
+            assert status == 200 and "isError" not in result, result
+            assert result["status"] == "failed" and result["error_code"] == code
+            assert not result["error"][:3].isdigit()  # no "404: …" / "409: …"
+            cancelling = tool == "ssh_cancel_diagnostic_job"
+            assert result.get("ok") is (False if cancelling else None)
+    cancel = {"job_id": job}
+    assert mcp_call(client, owner, "ssh_cancel_diagnostic_job", cancel)[1] == {
+        "ok": True
+    }
+    again = mcp_call(client, owner, "ssh_cancel_diagnostic_job", cancel)[1]
+    assert again["ok"] is False and again["error_code"] == "failed"
+    assert again["error"] == "任务不存在或已经结束"
+    # The job record itself is unchanged: a cancelled job, not an error.
+    found = mcp_call(client, owner, "ssh_get_diagnostic_job", cancel)[1]
+    assert found["id"] == job and found["status"] == "cancelled"
+    assert "error_code" not in found
+
+
 def test_inventory_parsers_use_named_fields():
     process = observations.analyze(
         "processes",
