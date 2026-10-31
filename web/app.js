@@ -84,12 +84,15 @@ const date = (s) =>
         String(s).includes("T") ? s : String(s).replace(" ", "T") + "Z",
       ).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })
     : "—";
+// Unix seconds (MCP client expiry) shown like every other timestamp.
+const epochDate = (seconds) => date(new Date(seconds * 1000).toISOString());
 const badge = (s) =>
-  '<span class="status ' + esc(s) + '">' + esc(statuses[s] || s) + "</span>";
-const actionName = (action) =>
-  state.tools.find((t) => t.id === action)?.name || action;
+  `<span class="status ${esc(s)}">${esc(statuses[s] || s)}</span>`;
+// A status chip whose text is not one of the state labels above.
+const chip = (text, tone = "") => `<span class="status ${tone}">${esc(text)}</span>`;
+const actionName = (action) => toolById(action)?.name || action;
+const sourceName = (source) => (source === "mcp" ? "MCP 客户端" : "Web 控制台");
 function go(page) {
-  if (["clients", "feishu"].includes(page)) page = "settings/" + page;
   if (location.hash === "#" + page) render();
   else location.hash = page;
 }
@@ -97,21 +100,9 @@ function pagination(name, data) {
   const pages = Math.max(1, Math.ceil(data.total / data.page_size));
   state[name + "Pages"] = pages;
   return (
-    '<div class="pagination"><span class="muted">共 ' +
-    data.total +
-    " 条 · 第 " +
-    data.page +
-    " / " +
-    pages +
-    ' 页</span><div class="actions"><button class="btn small" data-action="page-prev" data-id="' +
-    name +
-    '" ' +
-    (data.page <= 1 ? "disabled" : "") +
-    '>上一页</button><button class="btn small" data-action="page-next" data-id="' +
-    name +
-    '" ' +
-    (data.page >= pages ? "disabled" : "") +
-    ">下一页</button></div></div>"
+    `<div class="pagination"><span class="muted">共 ${data.total} 条 · 第 ${data.page} / ${pages} 页</span><div class="actions">` +
+    `<button class="btn small" data-action="page-prev" data-id="${name}" ${data.page <= 1 ? "disabled" : ""}>上一页</button>` +
+    `<button class="btn small" data-action="page-next" data-id="${name}" ${data.page >= pages ? "disabled" : ""}>下一页</button></div></div>`
   );
 }
 function hostQuery() {
@@ -140,7 +131,7 @@ async function api(path, method = "GET", body) {
     currentUser = null;
     $("#app").hidden = true;
     $("#login").hidden = false;
-    throw new Error("身份验证失效，请重新登录");
+    throw Object.assign(new Error("身份验证失效，请重新登录"), { status: 401 });
   }
   if (!result.ok) {
     const info = payload.detail;
@@ -165,40 +156,25 @@ function notice(text, failure = false) {
   box.hidden = !text;
   box.textContent = text || "";
   box.classList.toggle("error", failure);
+  // A floating notice: errors stay longer, a click dismisses it early.
+  clearTimeout(state.noticeTimer);
+  if (text) state.noticeTimer = setTimeout(() => notice(""), failure ? 12000 : 6000);
 }
 const btn = (name, text, id = "", kind = "") =>
-  '<button type="button" class="btn small ' +
-  kind +
-  '" data-action="' +
-  esc(name) +
-  '" data-id="' +
-  esc(id) +
-  '">' +
-  esc(text) +
-  "</button>";
+  `<button type="button" class="btn small ${kind}" data-action="${esc(name)}" data-id="${esc(id)}">${esc(text)}</button>`;
 function panel(title, body, tools = "") {
-  return (
-    '<section class="panel"><div class="section-head"><h2>' +
-    esc(title) +
-    '</h2><div class="actions">' +
-    tools +
-    "</div></div>" +
-    body +
-    "</section>"
-  );
+  return `<section class="panel"><div class="section-head"><h2>${esc(title)}</h2><div class="actions">${tools}</div></div>${body}</section>`;
 }
-function table(head, body) {
+function table(head, body, kind = "") {
   return (
-    '<div class="table-wrap"><table><thead><tr>' +
-    head.map((x) => "<th>" + x + "</th>").join("") +
+    `<div class="table-wrap${kind ? " " + kind : ""}"><table><thead><tr>` +
+    head.map((x) => `<th>${x}</th>`).join("") +
     "</tr></thead><tbody>" +
-    (body ||
-      '<tr><td colspan="' +
-        head.length +
-        '" class="empty">暂无记录</td></tr>') +
+    (body || `<tr><td colspan="${head.length}" class="empty">暂无记录</td></tr>`) +
     "</tbody></table></div>"
   );
 }
+// One labelled form control; `opts` ([value, label] pairs) renders a select.
 const field = (
   name,
   title,
@@ -209,53 +185,23 @@ const field = (
   help = "",
 ) => {
   const ident = "field-" + ++fieldId;
-  let input = opts
-    ? '<select name="' +
-      name +
-      '">' +
+  const input = opts
+    ? `<select id="${ident}" name="${name}">` +
       opts
         .map(
           ([v, t]) =>
-            '<option value="' +
-            esc(v) +
-            '" ' +
-            (String(value) === String(v) ? "selected" : "") +
-            ">" +
-            esc(t) +
-            "</option>",
+            `<option value="${esc(v)}" ${String(value) === String(v) ? "selected" : ""}>${esc(t)}</option>`,
         )
         .join("") +
       "</select>"
     : type === "textarea"
-      ? '<textarea name="' +
-        name +
-        '" autocomplete="off">' +
-        esc(value) +
-        "</textarea>"
+      ? `<textarea id="${ident}" name="${name}" autocomplete="off">${esc(value)}</textarea>`
       : type === "checkbox"
-        ? '<label class="check"><input type="checkbox" name="' +
-          name +
-          '" ' +
-          (value ? "checked" : "") +
-          "/> 启用</label>"
-        : '<input type="' +
-          type +
-          '" name="' +
-          name +
-          '" value="' +
-          esc(value) +
-          '" autocomplete="off"/>';
-  input = input.replace(/<(input|select|textarea) /, '<$1 id="' + ident + '" ');
+        ? `<label class="check"><input id="${ident}" type="checkbox" name="${name}" ${value ? "checked" : ""}/> 启用</label>`
+        : `<input id="${ident}" type="${type}" name="${name}" value="${esc(value)}" autocomplete="off"/>`;
   return (
-    '<div class="' +
-    (wide ? "wide" : "") +
-    '"><label for="' +
-    ident +
-    '">' +
-    esc(title) +
-    "</label>" +
-    input +
-    (help ? '<div class="help">' + esc(help) + "</div>" : "") +
+    `<div class="${wide ? "wide" : ""}"><label for="${ident}">${esc(title)}</label>${input}` +
+    (help ? `<div class="help">${esc(help)}</div>` : "") +
     "</div>"
   );
 };
@@ -291,10 +237,18 @@ function currentHost(id) {
   return state.hosts.find((h) => String(h.id) === String(id));
 }
 
-async function pageOverview() {
-  return dashboard();
+// The trusted-console command that prints the fingerprint for a host key
+// algorithm (all ECDSA curves share ssh_host_ecdsa_key).
+function hostKeyCommand(algorithm) {
+  const file = /^(ssh-rsa|rsa-sha2-)/.test(algorithm || "")
+    ? "rsa"
+    : /^ecdsa-sha2-/.test(algorithm || "")
+      ? "ecdsa"
+      : algorithm === "ssh-ed25519"
+        ? "ed25519"
+        : "*";
+  return `ssh-keygen -lf /etc/ssh/ssh_host_${file}_key.pub -E sha256`;
 }
-
 async function pageHosts() {
   const [data, groups, credentials, proxies] = await Promise.all([
     api("/inventory/hosts?" + hostQuery() + "&page=" + state.hostPage),
@@ -313,78 +267,39 @@ async function pageHosts() {
   state.credentials = credentials;
   state.proxies = proxies;
   const rows = hosts
-    .map(
-      (h) =>
-        '<tr><td><input class="row-check host-selected" type="checkbox" data-id="' +
-        h.id +
-        '" aria-label="选中' +
-        esc(h.name) +
-        '" ' +
-        (state.selected.has(h.id) ? "checked" : "") +
-        "/></td>" +
-        "<td>" +
-        btn("host-detail", h.name, h.id) +
-        "<small>资产 ID " +
-        h.id +
-        " · Zabbix Host ID " +
-        esc(h.zabbix_hostid || "未关联") +
-        "</small></td>" +
-        '<td class="mono">' +
-        esc(h.address) +
-        ":" +
-        h.port +
-        "<small>" +
-        esc(h.username) +
-        (h.proxy_id ? " · 跳板 " + h.proxy_id : " · 直连") +
-        "</small></td>" +
-        "<td>" +
-        esc(h.mode === "gateway" ? "B · 受限网关" : "A · 免 Agent") +
-        "</td>" +
-        "<td>" +
-        '<button type="button" class="readiness-button" data-action="prepare-host" data-id="' +
-        h.id +
-        '">' +
-        badge(h.readiness || "untested") +
-        "</button>" +
-        "<small>" +
-        esc(
-          h.group_ids
-            .map((id) => groups.find((g) => g.id === id)?.name)
-            .filter(Boolean)
-            .join(" · ") || "未分组",
-        ) +
-        "</small></td>" +
-        '<td class="date">' +
-        date(h.last_test_at) +
-        "<small>诊断 " +
-        date(h.last_diagnostic_at) +
-        "</small></td>" +
-        '<td><div class="actions">' +
+    .map((h) => {
+      const groupNames =
+        h.group_ids
+          .map((id) => groups.find((g) => g.id === id)?.name)
+          .filter(Boolean)
+          .join(" · ") || "未分组";
+      const actions =
         btn("edit-host", "编辑", h.id) +
         (h.enabled && h.has_host_key && h.credential_id
           ? btn("test", "测试", h.id) + btn("diagnose-host", "诊断", h.id)
-          : "") +
-        "</div></td></tr>",
+          : "");
+      return (
+        `<tr><td><input class="row-check host-selected" type="checkbox" data-id="${h.id}" aria-label="选中${esc(h.name)}" ${state.selected.has(h.id) ? "checked" : ""}/></td>` +
+        `<td><button type="button" class="text-button cell-title" data-action="host-detail" data-id="${h.id}">${esc(h.name)}</button><small>资产 ID ${h.id} · Zabbix Host ID ${esc(h.zabbix_hostid || "未关联")}</small></td>` +
+        `<td class="mono">${esc(h.address)}:${h.port}<small>${esc(h.username)}${h.proxy_id ? " · 跳板 " + esc(proxies.find((p) => p.id === h.proxy_id)?.name || h.proxy_id) : " · 直连"}</small></td>` +
+        `<td>${esc(h.mode === "gateway" ? "B · 受限强制命令网关" : "A · 标准免 Agent")}</td>` +
+        `<td><button type="button" class="readiness-button" data-action="prepare-host" data-id="${h.id}">${badge(h.readiness || "untested")}</button><small>${esc(groupNames)}</small></td>` +
+        `<td class="date">${date(h.last_test_at)}<small>诊断 ${date(h.last_diagnostic_at)}</small></td>` +
+        `<td><div class="actions">${actions}</div></td></tr>`
+      );
+    })
+    .join("");
+  const groupOptions = groups
+    .map(
+      (g) =>
+        `<option value="${g.id}" ${String(g.id) === state.hostGroup ? "selected" : ""}>${esc(g.name)}</option>`,
     )
     .join("");
   return panel(
     "主机与设备资产",
-    '<form id="host-search-form" class="toolbar"><input id="host-filter" aria-label="搜索主机" value="' +
-      esc(state.hostQuery) +
-      '" placeholder="主机名称、IP 或 Zabbix Host ID"/><select id="host-group" aria-label="筛选主机组"><option value="">全部主机组</option>' +
-      groups
-        .map(
-          (g) =>
-            '<option value="' +
-            g.id +
-            '" ' +
-            (String(g.id) === state.hostGroup ? "selected" : "") +
-            ">" +
-            esc(g.name) +
-            "</option>",
-        )
-        .join("") +
-      '</select><select id="host-status" aria-label="筛选主机状态">' +
+    `<form id="host-search-form" class="toolbar"><input id="host-filter" aria-label="搜索主机" value="${esc(state.hostQuery)}" placeholder="主机名称、IP 或 Zabbix Host ID"/>` +
+      `<select id="host-group" aria-label="筛选主机组"><option value="">全部主机组</option>${groupOptions}</select>` +
+      '<select id="host-status" aria-label="筛选主机状态">' +
       [
         ["all", "全部状态"],
         ["ready", "已配置 SSH"],
@@ -399,19 +314,11 @@ async function pageHosts() {
       ]
         .map(
           ([v, t]) =>
-            '<option value="' +
-            v +
-            '" ' +
-            (state.hostStatus === v ? "selected" : "") +
-            ">" +
-            t +
-            "</option>",
+            `<option value="${v}" ${state.hostStatus === v ? "selected" : ""}>${t}</option>`,
         )
         .join("") +
       '</select><button class="btn" type="submit">搜索</button></form>' +
-      '<div class="selection-bar"><span id="selected-count">已选 ' +
-      state.selected.size +
-      " 台</span>" +
+      `<div class="selection-bar"><span id="selected-count">已选 ${state.selected.size} 台</span>` +
       btn("select-filtered", "全选筛选结果") +
       btn("clear-selected", "清空") +
       btn("bind-selected", "绑定 SSH") +
@@ -450,14 +357,7 @@ async function pageGroups() {
         state.groups
           .map(
             (x) =>
-              "<tr><td>" +
-              x.id +
-              "</td><td>" +
-              esc(x.name) +
-              "</td><td>" +
-              btn("edit-group", "编辑", x.id) +
-              btn("delete-group", "删除", x.id, "danger") +
-              "</td></tr>",
+              `<tr><td>${x.id}</td><td>${esc(x.name)}</td><td>${btn("edit-group", "编辑", x.id)}${btn("delete-group", "删除", x.id, "danger")}</td></tr>`,
           )
           .join(""),
       ),
@@ -474,15 +374,7 @@ async function pageCredentials() {
         state.credentials
           .map(
             (x) =>
-              "<tr><td>" +
-              x.id +
-              "</td><td>" +
-              esc(x.name) +
-              "</td><td>" +
-              esc(x.created_at) +
-              "</td><td>" +
-              btn("rotate-credential", "轮换", x.id) +
-              "</td></tr>",
+              `<tr><td>${x.id}</td><td>${esc(x.name)}</td><td>${date(x.created_at)}</td><td>${btn("rotate-credential", "轮换", x.id)}</td></tr>`,
           )
           .join(""),
       ),
@@ -502,24 +394,8 @@ async function pageProxies() {
         state.proxies
           .map(
             (p) =>
-              "<tr><td>" +
-              p.id +
-              "</td><td>" +
-              esc(p.name) +
-              "</td><td>" +
-              esc(p.address) +
-              ":" +
-              esc(p.port) +
-              "</td><td>" +
-              esc(p.username) +
-              "</td><td>" +
-              esc(
-                state.credentials.find((c) => c.id === p.credential_id)?.name ||
-                  p.credential_id,
-              ) +
-              "</td><td>" +
-              btn("edit-proxy", "编辑", p.id) +
-              "</td></tr>",
+              `<tr><td>${p.id}</td><td>${esc(p.name)}</td><td>${esc(p.address)}:${esc(p.port)}</td><td>${esc(p.username)}</td>` +
+              `<td>${esc(state.credentials.find((c) => c.id === p.credential_id)?.name || p.credential_id)}</td><td>${btn("edit-proxy", "编辑", p.id)}</td></tr>`,
           )
           .join(""),
       ),
@@ -539,17 +415,8 @@ async function pageKeys() {
     );
     const batch = detail.batch;
     intro +=
-      '<div class="progress-heading">' +
-      badge(batch.status) +
-      "<strong>" +
-      batch.completed +
-      " / " +
-      batch.total +
-      ' 台</strong></div><progress value="' +
-      batch.completed +
-      '" max="' +
-      batch.total +
-      '" aria-label="公钥获取进度"></progress>';
+      `<div class="progress-heading">${badge(batch.status)}<strong>${batch.completed} / ${batch.total} 台</strong></div>` +
+      `<progress value="${batch.completed}" max="${batch.total}" aria-label="公钥获取进度"></progress>`;
     state.keyDetail = detail;
     records = detail.items
       .map((r) => {
@@ -567,47 +434,19 @@ async function pageKeys() {
           r.previous_fingerprint &&
           r.fingerprint &&
           r.previous_fingerprint !== r.fingerprint;
-        const command =
-          r.algorithm === "ssh-rsa"
-            ? "ssh-keygen -lf /etc/ssh/ssh_host_rsa_key.pub -E sha256"
-            : r.algorithm === "ecdsa-sha2-nistp256"
-              ? "ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub -E sha256"
-              : "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256";
+        const command = hostKeyCommand(r.algorithm);
+        const previous = r.previous_fingerprint
+          ? `<small>原可信指纹：${esc(r.previous_fingerprint)}</small>`
+          : "";
+        const hint = r.fingerprint
+          ? `<small>在目标可信控制台执行：<code>${esc(command)}</code></small>`
+          : "";
         return (
-          "<tr><td><strong>" +
-          esc(r.name || "") +
-          "</strong><small>资产 " +
-          r.host_id +
-          " · " +
-          esc(r.address || "") +
-          "</small></td>" +
-          '<td class="mono">' +
-          esc(r.fingerprint || "—") +
-          "<small>算法 " +
-          esc(r.algorithm || "—") +
-          "</small></td>" +
-          '<td><span class="' +
-          (changed ? "state-bad" : "") +
-          '">' +
-          esc(statusName) +
-          "</span>" +
-          (r.previous_fingerprint
-            ? "<small>原可信指纹：" + esc(r.previous_fingerprint) + "</small>"
-            : "") +
-          "</td>" +
-          "<td>" +
-          esc(r.error || "—") +
-          (r.fingerprint
-            ? "<small>在目标可信控制台执行：<code>" +
-              esc(command) +
-              "</code></small>"
-            : "") +
-          "</td>" +
-          "<td>" +
-          (r.status === "candidate" || r.status === "changed"
-            ? btn("confirm-key", "核验并保存", r.host_id)
-            : "—") +
-          "</td></tr>"
+          `<tr><td><strong>${esc(r.name || "")}</strong><small>资产 ${r.host_id} · ${esc(r.address || "")}</small></td>` +
+          `<td class="mono">${esc(r.fingerprint || "—")}<small>算法 ${esc(r.algorithm || "—")}</small></td>` +
+          `<td><span class="${changed ? "state-bad" : ""}">${esc(statusName)}</span>${previous}</td>` +
+          `<td>${esc(r.error || "—")}${hint}</td>` +
+          `<td>${r.status === "candidate" || r.status === "changed" ? btn("confirm-key", "核验并保存", r.host_id) : "—"}</td></tr>`
         );
       })
       .join("");
@@ -615,19 +454,7 @@ async function pageKeys() {
   const batchlist = batches
     .map(
       (x) =>
-        '<option value="' +
-        esc(x.id) +
-        '" ' +
-        (state.batchId === x.id ? "selected" : "") +
-        ">" +
-        esc(x.created_at) +
-        " · " +
-        esc(x.status) +
-        " · " +
-        x.completed +
-        "/" +
-        x.total +
-        "</option>",
+        `<option value="${esc(x.id)}" ${state.batchId === x.id ? "selected" : ""}>${date(x.created_at)} · ${esc(statuses[x.status] || x.status)} · ${x.completed}/${x.total}</option>`,
     )
     .join("");
   const scanButtons =
@@ -661,15 +488,9 @@ async function pageKeys() {
   const trust = panel(
     "批量导入可信指纹",
     '<p class="muted">批量核验无需逐台点击弹窗。请先通过服务器控制台、Ansible 可信通道或已有可信资产台账取得真实 SHA256 指纹，再按「主机 ID/IP + [可选算法] + SHA256 指纹」逐行粘贴；支持从已开启 SSH 主机身份校验的 Ansible 清单导入。<strong>不能直接复制本页面扫描到的指纹作为可信来源。</strong> 先逐行预检，确认后只保存匹配项；不匹配会记录安全审计。</p>' +
-      '<p class="muted">当前批次待确认：' +
-      matching.length +
-      " 台</p>" +
-      '<textarea id="trusted-fingerprints" aria-label="独立可信指纹清单" rows="7" placeholder="1 SHA256:独立可信渠道获取的指纹&#10;172.20.200.93 ssh-ed25519 SHA256:独立可信渠道获取的指纹">' +
-      esc(state.manifest) +
-      "</textarea>" +
-      '<div class="modal-actions">' +
-      btn("confirm-batch-from-manifest", "核对并保存可信指纹", "", "primary") +
-      "</div>",
+      `<p class="muted">当前批次待确认：${matching.length} 台</p>` +
+      `<textarea id="trusted-fingerprints" aria-label="独立可信指纹清单" rows="7" placeholder="1 SHA256:独立可信渠道获取的指纹&#10;192.0.2.10 ssh-ed25519 SHA256:独立可信渠道获取的指纹">${esc(state.manifest)}</textarea>` +
+      `<div class="modal-actions">${btn("confirm-batch-from-manifest", "核对并保存可信指纹", "", "primary")}</div>`,
   );
   return results + trust;
 }
@@ -678,103 +499,68 @@ async function pageDiagnostics() {
   state.tools = tools;
   state.groups = groups;
   const picker = await targetPicker();
-  return (
-    '<div class="page-intro"><p>选择目标与诊断方式。任务在后台执行，离开页面后仍可在历史中查看。</p>' +
-    btn("open-history", "查看诊断历史") +
-    "</div>" +
-    scenarioTemplates() +
-    '<div class="tool-categories" aria-label="按诊断场景筛选">' +
-    ["全部", ...new Set(tools.map((t) => t.category))]
-      .map(
-        (c) =>
-          '<button class="category-chip ' +
-          (state.toolCategory === c ? "active" : "") +
-          '" data-action="tool-category" data-id="' +
-          esc(c) +
-          '">' +
-          esc(c) +
-          "</button>",
-      )
-      .join("") +
-    "</div>" +
-    panel(
-      "创建诊断任务",
-      '<form id="diagnostic-form"><div class="fields">' +
-        picker +
-        field(
-          "action",
-          "诊断类型",
-          state.diagnosticAction || "health",
-          "text",
-          tools
-            .filter(
-              (t) =>
-                state.toolCategory === "全部" ||
-                t.category === state.toolCategory,
-            )
-            .map((t) => [t.id, t.name]),
-        ) +
-        field("symptom", "故障场景", state.scenario || "cpu_high", "text", [
-          ["cpu_high", "CPU 高"],
-          ["mem_high", "内存高"],
-          ["disk_full", "磁盘满"],
-          ["io_slow", "I/O 慢"],
-          ["service_down", "服务异常"],
-          ["network", "网络异常"],
-        ]) +
-        field("service", "systemd 服务名称", "nginx.service") +
-        field("minutes", "时间范围（分钟）", 30, "number") +
-        field(
-          "directory_root",
-          "扫描目录",
-          "/data",
-          "text",
-          null,
-          true,
-          "支持 /root、/root/.cache、/data、/var 等目录，每次最多扫描 8 秒；仅统计单层，不修改或清理文件。",
-        ) +
-        '<div id="diagnostic-options" class="wide" hidden></div>' +
-        '</div><div class="notice diagnostic-help">快照反映采集时刻的状态。日志、目录与流量数据需有相应读取权限；缺失能力会显示为部分完成。</div>' +
-        (!state.targets.size
-          ? '<p class="inline-error">请选择上方搜索结果中的主机，明确目标后提交。</p>'
-          : "") +
-        '<div class="modal-actions"><span class="muted">固定动作 · 无任意命令输入</span><button class="btn primary" type="submit" ' +
-        (!state.targets.size ? "disabled" : "") +
-        ">提交诊断</button></div></form>",
+  const visible = tools.filter(
+    (t) => state.toolCategory === "全部" || t.category === state.toolCategory,
+  );
+  const categories = ["全部", ...new Set(tools.map((t) => t.category))]
+    .map(
+      (c) =>
+        `<button class="category-chip ${state.toolCategory === c ? "active" : ""}" data-action="tool-category" data-id="${esc(c)}">${esc(c)}</button>`,
+    )
+    .join("");
+  const form =
+    '<form id="diagnostic-form"><div class="fields">' +
+    picker +
+    field(
+      "action",
+      "诊断类型",
+      state.diagnosticAction || "health",
+      "text",
+      visible.map((t) => [t.id, t.name]),
     ) +
-    '<div class="capability-grid">' +
-    tools
-      .filter(
-        (t) =>
-          state.toolCategory === "全部" || t.category === state.toolCategory,
-      )
-      .map(
-        (t) =>
-          '<button class="capability" data-action="choose-tool" data-id="' +
-          esc(t.id) +
-          '"><span class="capability-icon">' +
-          icon(t.sensitive ? "keys" : "diagnostics") +
-          "</span><div><strong>" +
-          esc(t.name) +
-          "</strong> " +
-          riskBadge(t.risk) +
-          "<p>" +
-          esc(t.question) +
-          "</p><small>参数：" +
-          esc(paramNames(t)) +
-          "</small><small>" +
-          esc(t.duration_hint) +
-          "</small><small>" +
-          (t.standard_only ? "标准 SSH 模式 · " : "") +
-          (t.sensitive ? "按授权范围采集" : "固定只读采集") +
-          "</small>" +
-          (Array.isArray(t.notes) ? t.notes : [])
-            .map((note) => "<small>" + esc(note) + "</small>")
-            .join("") +
-          "</div></button>",
-      )
-      .join("") +
-    "</div>"
+    field(
+      "symptom",
+      "故障场景",
+      state.scenario || "cpu_high",
+      "text",
+      faultScenarios,
+    ) +
+    field("service", "systemd 服务名称", "nginx.service") +
+    field("minutes", "时间范围（分钟）", 30, "number") +
+    field(
+      "directory_root",
+      "扫描目录",
+      "/data",
+      "text",
+      null,
+      true,
+      "支持 /root、/root/.cache、/data、/var 等目录，每次最多扫描 8 秒；仅统计单层，不修改或清理文件。",
+    ) +
+    '<div id="diagnostic-options" class="wide" hidden></div>' +
+    '</div><div class="notice diagnostic-help">快照反映采集时刻的状态。日志、目录与流量数据需有相应读取权限；缺失能力会显示为部分完成。</div>' +
+    (!state.targets.size
+      ? '<p class="inline-error">请选择上方搜索结果中的主机，明确目标后提交。</p>'
+      : "") +
+    `<div class="modal-actions"><span class="muted">固定动作 · 无任意命令输入</span><button class="btn primary" type="submit" ${!state.targets.size ? "disabled" : ""}>提交诊断</button></div></form>`;
+  const capabilities = visible
+    .map(
+      (t) =>
+        `<button class="capability" data-action="choose-tool" data-id="${esc(t.id)}"><span class="capability-icon">${icon(t.sensitive ? "keys" : "diagnostics")}</span>` +
+        `<div><strong>${esc(t.name)}</strong> ${riskBadge(t.risk)}<p>${esc(t.question)}</p>` +
+        `<small>参数：${esc(paramNames(t))}</small><small>${esc(t.duration_hint)}</small>` +
+        `<small>${t.standard_only ? "标准 SSH 模式 · " : ""}${t.sensitive ? "按授权范围采集" : "固定只读采集"}</small>` +
+        (Array.isArray(t.notes) ? t.notes : [])
+          .map((note) => `<small>${esc(note)}</small>`)
+          .join("") +
+        "</div></button>",
+    )
+    .join("");
+  return (
+    `<div class="page-intro"><p>选择目标与诊断方式。任务在后台执行，离开页面后仍可在历史中查看。</p>${btn("open-history", "查看诊断历史")}</div>` +
+    scenarioTemplates() +
+    `<div class="tool-categories" aria-label="按诊断场景筛选">${categories}</div>` +
+    panel("创建诊断任务", form) +
+    `<div class="capability-grid">${capabilities}</div>`
   );
 }
 function jobTable(items) {
@@ -789,34 +575,23 @@ function jobTable(items) {
   const rows = items
     .map((j) => {
       const cells = [
-        "<strong>" +
-          esc(j.host_name) +
-          '</strong><small class="mono">' +
-          esc(j.id.slice(0, 10)) +
-          "</small>",
+        `<strong>${esc(j.host_name)}</strong><small class="mono">${esc(j.id.slice(0, 10))}</small>`,
         esc(actionName(j.action)),
-        esc(j.source === "mcp" ? "MCP 客户端" : "Web 控制台"),
+        esc(sourceName(j.source)),
         badge(j.status),
         date(j.created_at),
         btn("job-detail", "查看", j.id),
       ];
       return (
-        '<tr data-key="' +
-        esc(j.id) +
-        '">' +
+        `<tr data-key="${esc(j.id)}">` +
         cells
-          .map(
-            (html, i) => '<td data-label="' + labels[i] + '">' + html + "</td>",
-          )
+          .map((html, i) => `<td data-label="${labels[i]}">${html}</td>`)
           .join("") +
         "</tr>"
       );
     })
     .join("");
-  return table(labels, rows).replace(
-    'class="table-wrap"',
-    'class="table-wrap job-history"',
-  );
+  return table(labels, rows, "job-history");
 }
 
 async function pageHistory() {
@@ -842,13 +617,7 @@ async function pageHistory() {
       ["all", "queued", "running", "success", "partial", "failed", "cancelled"]
         .map(
           (x) =>
-            '<option value="' +
-            x +
-            '" ' +
-            (state.historyStatus === x ? "selected" : "") +
-            ">" +
-            esc(x === "all" ? "全部状态" : statuses[x]) +
-            "</option>",
+            `<option value="${x}" ${state.historyStatus === x ? "selected" : ""}>${esc(x === "all" ? "全部状态" : statuses[x])}</option>`,
         )
         .join("") +
       "</select>" +
@@ -870,15 +639,10 @@ async function pageJob() {
       ? btn("cancel-job", "取消任务", job.id, "danger")
       : btn("retry-job", "重新诊断", job.id));
   const meta =
-    '<div class="job-meta"><div><small>目标主机</small><strong>' +
-    esc(job.host_name) +
-    "</strong></div><div><small>诊断动作</small><strong>" +
-    esc(actionName(job.action)) +
-    "</strong></div><div><small>提交时间</small><strong>" +
-    date(job.created_at) +
-    "</strong></div><div><small>状态</small>" +
-    badge(job.status) +
-    "</div></div>";
+    `<div class="job-meta"><div><small>目标主机</small><strong>${esc(job.host_name)}</strong></div>` +
+    `<div><small>诊断动作</small><strong>${esc(actionName(job.action))}</strong></div>` +
+    `<div><small>提交时间</small><strong>${date(job.created_at)}</strong></div>` +
+    `<div><small>状态</small>${badge(job.status)}</div></div>`;
   const result = job.result;
   // v0.6: non-fatal stderr (e.g. df gvfs noise) is kept as result.warnings
   // and no longer makes a result partial; do not show it as an error box.
@@ -888,24 +652,18 @@ async function pageJob() {
     result.warnings.length > 0 &&
     !result.error;
   return (
-    '<div class="page-intro"><span class="muted mono">任务 ' +
-    esc(job.id) +
-    '</span><div class="actions">' +
-    actions +
-    "</div></div>" +
+    `<div class="page-intro"><span class="muted mono">任务 ${esc(job.id)}</span><div class="actions">${actions}</div></div>` +
     panel("诊断记录", meta) +
     panel(
       "采集结果",
       active
-        ? '<div class="pending-result"><span class="spinner"></span><strong>' +
-            (job.status === "queued" ? "等待执行" : "正在采集") +
-            "</strong><p>可以离开此页面，结果将在诊断历史中保留。</p></div>"
+        ? `<div class="pending-result"><span class="spinner"></span><strong>${job.status === "queued" ? "等待执行" : "正在采集"}</strong><p>可以离开此页面，结果将在诊断历史中保留。</p></div>`
         : (job.error && !benign
-            ? '<p class="inline-error">' + esc(job.error) + "</p>"
+            ? `<p class="inline-error">${esc(job.error)}</p>`
             : "") +
             (result
               ? (result.note
-                  ? '<p class="notice">' + esc(result.note) + "</p>"
+                  ? `<p class="notice">${esc(result.note)}</p>`
                   : "") + diagnosticReport(result, job)
               : '<p class="muted">没有完成采集，尚无结果。</p>'),
     )
@@ -922,42 +680,30 @@ async function pageClients() {
   state.tools = tools;
   state.legacyEnabled = data.legacy_enabled;
   const rows = data.items
-    .map(
-      (c) =>
-        "<tr><td><strong>" +
-        esc(c.name) +
-        '</strong><small class="mono">' +
-        esc(c.prefix) +
-        "…</small></td><td>" +
-        esc(
-          c.all_hosts
-            ? "全部已登记主机"
-            : c.group_ids
-                .map(
-                  (id) => groups.find((g) => g.id === id)?.name || "已删除分组",
-                )
-                .join("、"),
-        ) +
-        "<small>" +
-        c.actions.length +
-        " 项诊断权限" +
-        esc(costlyActions(c.actions)) +
-        "</small></td><td>" +
-        date(new Date(c.expires_at * 1000).toISOString()) +
-        "<small>最近使用 " +
-        date(c.last_used_at) +
-        "</small></td><td>" +
-        badge(!c.enabled ? "已撤销" : c.expired ? "已过期" : "有效") +
-        "</td><td>" +
-        (c.enabled
-          ? '<div class="actions">' +
-            (c.expired ? "" : btn("edit-client", "编辑权限", c.id)) +
-            btn("revoke-client", "撤销", c.id, "danger") +
-            "</div>"
-          : "—") +
-        "</td></tr>",
-    )
+    .map((c) => {
+      const scope = c.all_hosts
+        ? "全部已登记主机"
+        : c.group_ids
+            .map((id) => groups.find((g) => g.id === id)?.name || "已删除分组")
+            .join("、");
+      const actions = c.enabled
+        ? '<div class="actions">' +
+          (c.expired ? "" : btn("edit-client", "编辑权限", c.id)) +
+          btn("revoke-client", "撤销", c.id, "danger") +
+          "</div>"
+        : "—";
+      return (
+        `<tr><td><strong>${esc(c.name)}</strong><small class="mono">${esc(c.prefix)}…</small></td>` +
+        `<td>${esc(scope)}<small>${c.actions.length} 项诊断权限${esc(costlyActions(c.actions))}</small></td>` +
+        `<td>${epochDate(c.expires_at)}<small>最近使用 ${date(c.last_used_at)}</small></td>` +
+        `<td>${!c.enabled ? chip("已撤销", "disabled") : c.expired ? chip("已过期", "warning") : chip("有效", "success")}</td><td>${actions}</td></tr>`
+      );
+    })
     .join("");
+  const endpoint = {
+    url: location.origin + "/mcp",
+    headers: { Authorization: "Bearer <客户端令牌>" },
+  };
   return (
     '<div class="page-intro"><p>为每个 AI 平台或集成系统签发独立令牌，限定主机组、工具与有效期。编辑权限不更换令牌，从下一次 MCP 请求起生效。</p></div>' +
     panel(
@@ -968,25 +714,15 @@ async function pageClients() {
     '<div class="grid2">' +
     panel(
       "接入配置",
-      '<p class="muted">协议为 Streamable HTTP。令牌放在 AI 平台的服务器端加密配置中。</p><pre class="code-result">' +
-        esc(
-          JSON.stringify(
-            {
-              url: location.origin + "/mcp",
-              headers: { Authorization: "Bearer <客户端令牌>" },
-            },
-            null,
-            2,
-          ),
-        ) +
-        '</pre><p class="help">Zabbix Host ID 通过 ssh_resolve_host 精确映射，不按 IP 或主机名猜测。</p>' +
+      '<p class="muted">协议为 Streamable HTTP。令牌放在 AI 平台的服务器端加密配置中。</p>' +
+        codeBlock(JSON.stringify(endpoint, null, 2)) +
+        '<p class="help">Zabbix Host ID 通过 ssh_resolve_host 精确映射，不按 IP 或主机名猜测。</p>' +
         '<p class="help">v0.6.0 起服务启动时，已获 logs 授权的客户端自动获得 nginx、nginx_access、syslog、java、service_detail（syslog 也随 log_errors 扩展），已获 sockets 或 service 的获得 service_map，并写入审计 mcp_client_actions_extended；jvm 只能手动授权。ssh_collect 按步骤授权，无需单独勾选。</p>',
     ) +
     panel(
       "原始兼容令牌",
-      "<p>当前状态：" +
-        badge(data.legacy_enabled ? "已启用" : "已停用") +
-        '</p><p class="muted">原始 mcp.token 拥有全部主机权限。迁移到独立客户端后可在此停用；不会影响飞书登录。</p>' +
+      `<p>当前状态：${data.legacy_enabled ? chip("已启用", "success") : chip("已停用", "disabled")}</p>` +
+        '<p class="muted">原始 mcp.token 拥有全部主机权限。迁移到独立客户端后可在此停用；不会影响飞书登录。</p>' +
         btn(
           "toggle-legacy",
           data.legacy_enabled ? "停用原始令牌" : "启用原始令牌",
@@ -1046,37 +782,22 @@ function clientActionLabel(t) {
 function clientScopeFields(actions = [], client = null) {
   const groups = client?.group_ids || [];
   return (
-    '<div class="wide"><label class="check"><input type="checkbox" name="all_hosts" ' +
-    (client?.all_hosts ? "checked" : "") +
-    ">授权全部已登记主机（包含未来新增主机）</label></div>" +
+    `<div class="wide"><label class="check"><input type="checkbox" name="all_hosts" ${client?.all_hosts ? "checked" : ""}>授权全部已登记主机（包含未来新增主机）</label></div>` +
     '<fieldset class="wide option-grid"><legend>或选择授权主机组</legend>' +
     state.groups
       .map(
         (g) =>
-          '<label class="check"><input type="checkbox" name="client_group" value="' +
-          g.id +
-          '" ' +
-          (groups.includes(g.id) ? "checked" : "") +
-          ">" +
-          esc(g.name) +
-          "</label>",
+          `<label class="check"><input type="checkbox" name="client_group" value="${g.id}" ${groups.includes(g.id) ? "checked" : ""}>${esc(g.name)}</label>`,
       )
       .join("") +
     "</fieldset>" +
-    '<div class="wide actions">' +
-    btn("recommend-client-actions", "按 AI Ops Platform 推荐勾选") +
+    `<div class="wide actions">${btn("recommend-client-actions", "按 AI Ops Platform 推荐勾选")}` +
     '<span id="client-action-hint" class="help">推荐范围覆盖预采集所需的只读动作，不含 jvm、triage、directory、peer_*；ssh_collect 按步骤授权。</span></div>' +
     '<fieldset class="wide option-grid"><legend>允许的诊断动作</legend>' +
     state.tools
       .map(
         (t) =>
-          '<label class="check"><input type="checkbox" name="client_action" value="' +
-          esc(t.id) +
-          '" ' +
-          (actions.includes(t.id) ? "checked" : "") +
-          ">" +
-          esc(clientActionLabel(t)) +
-          "</label>",
+          `<label class="check"><input type="checkbox" name="client_action" value="${esc(t.id)}" ${actions.includes(t.id) ? "checked" : ""}>${esc(clientActionLabel(t))}</label>`,
       )
       .join("") +
     "</fieldset>"
@@ -1109,88 +830,38 @@ function formatSize(n) {
   }
   return (v >= 10 || i === 0 ? v.toFixed(0) : v.toFixed(1)) + " " + unit[i];
 }
+// Ranking tables for the actions that return structured `data` (only called
+// when `result.data` is present).
 function summarizeDiagnostic(result) {
-  const d = result?.data;
-  if (!d)
-    return (
-      '<pre class="code-result">' +
-      esc(result?.output || result?.stderr || "没有输出") +
-      "</pre>"
-    );
+  const d = result.data;
   const label = result.status === "success" ? "完成" : "部分结果或采集能力不足";
-  let title =
-    '<p class="muted">' +
-    esc(label) +
-    " · " +
-    esc(d.metric || d.ranking_scope || "目录占用") +
-    " · " +
-    esc(result.duration_ms) +
-    " ms</p>";
+  let title = `<p class="muted">${esc(label)} · ${esc(d.metric || d.ranking_scope || "目录占用")} · ${esc(result.duration_ms)} ms</p>`;
   let rows = [],
     header = [];
   if (result.action === "directory") {
-    title +=
-      '<p class="muted">扫描根目录：<strong>' +
-      esc(d.root) +
-      "</strong>；根目录占用：" +
-      formatSize(d.scanned_root_bytes) +
-      "</p>";
+    title += `<p class="muted">扫描根目录：<strong>${esc(d.root)}</strong>；根目录占用：${formatSize(d.scanned_root_bytes)}</p>`;
     header = ["排名", "目录", "已占用空间"];
     rows = d.top_directories.map(
       (v, i) =>
-        "<tr><td>" +
-        (i + 1) +
-        '</td><td class="mono">' +
-        esc(v.directory) +
-        "</td><td>" +
-        formatSize(v.bytes) +
-        "</td></tr>",
+        `<tr><td>${i + 1}</td><td class="mono">${esc(v.directory)}</td><td>${formatSize(v.bytes)}</td></tr>`,
     );
   } else if (result.action === "peer_connections") {
     header = ["排名", "远端 IP", "TCP 连接总数", "其中已建立"];
     rows = d.ranking.map(
       (v, i) =>
-        "<tr><td>" +
-        (i + 1) +
-        '</td><td class="mono">' +
-        esc(v.peer_ip) +
-        "</td><td><strong>" +
-        esc(v.tcp_connections) +
-        "</strong></td><td>" +
-        esc(v.established_connections) +
-        "</td></tr>",
+        `<tr><td>${i + 1}</td><td class="mono">${esc(v.peer_ip)}</td><td><strong>${esc(v.tcp_connections)}</strong></td><td>${esc(v.established_connections)}</td></tr>`,
     );
   } else if (result.action === "peer_traffic") {
-    title +=
-      '<p class="muted">' +
-      esc(d.sample_seconds) +
-      " 秒 TCP 采样 · 两次都存在的 socket：" +
-      esc(d.matched_sockets) +
-      "（采样 A " +
-      esc(d.sample_a_sockets) +
-      " / B " +
-      esc(d.sample_b_sockets) +
-      "）</p>";
+    title += `<p class="muted">${esc(d.sample_seconds)} 秒 TCP 采样 · 两次都存在的 socket：${esc(d.matched_sockets)}（采样 A ${esc(d.sample_a_sockets)} / B ${esc(d.sample_b_sockets)}）</p>`;
     header = ["排名", "远端 IP", "发送增量", "接收增量", "总计", "平均每秒"];
     rows = d.ranking.map(
       (v, i) =>
-        "<tr><td>" +
-        (i + 1) +
-        '</td><td class="mono">' +
-        esc(v.peer_ip) +
-        "</td><td>" +
-        formatSize(v.sent_bytes) +
-        "</td><td>" +
-        formatSize(v.received_bytes) +
-        "</td><td><strong>" +
-        formatSize(v.total_bytes) +
-        "</strong></td><td>" +
-        formatSize(v.avg_bytes_per_second) +
-        "/s</td></tr>",
+        `<tr><td>${i + 1}</td><td class="mono">${esc(v.peer_ip)}</td><td>${formatSize(v.sent_bytes)}</td><td>${formatSize(v.received_bytes)}</td>` +
+        `<td><strong>${formatSize(v.total_bytes)}</strong></td><td>${formatSize(v.avg_bytes_per_second)}/s</td></tr>`,
     );
   }
   const caveats = (d.notes || [])
-    .map((v) => '<p class="help">· ' + esc(v) + "</p>")
+    .map((v) => `<p class="help">· ${esc(v)}</p>`)
     .join("");
   return (
     title +
@@ -1201,18 +872,12 @@ function summarizeDiagnostic(result) {
     caveats
   );
 }
-// v0.6 catalog entries carry `risk` and structured `params`; extension actions
-// take every parameter through the validated `options` object.
+// Cost level of a catalog action (`risk`); the diagnostic report shares it.
 const riskNames = { low: "低开销", medium: "中开销", high: "高开销" };
 function riskBadge(risk) {
   if (!Object.hasOwn(riskNames, risk)) return "";
-  return (
-    '<span class="status ' +
-    ({ low: "", medium: "partial", high: "failed" })[risk] +
-    '">' +
-    riskNames[risk] +
-    "</span>"
-  );
+  const tone = { low: "", medium: "partial", high: "failed" }[risk];
+  return `<span class="status ${tone}">${riskNames[risk]}</span>`;
 }
 function toolById(id) {
   return state.tools.find((t) => t.id === id);
@@ -1246,98 +911,64 @@ function compilePattern(source, flag = "u") {
 }
 function choiceLabel(value) {
   const name = actionName(value);
-  return name === value ? String(value) : name + "（" + value + "）";
+  return name === value ? String(value) : `${name}（${value}）`;
 }
 function optionHelp(p) {
   const parts = [p.description];
   if (Number.isFinite(p.minimum) || Number.isFinite(p.maximum))
     parts.push(
-      "范围 " +
-        (Number.isFinite(p.minimum) ? p.minimum : "…") +
-        "–" +
-        (Number.isFinite(p.maximum) ? p.maximum : "…"),
+      `范围 ${Number.isFinite(p.minimum) ? p.minimum : "…"}–${Number.isFinite(p.maximum) ? p.maximum : "…"}`,
     );
   if (p.default !== undefined && p.default !== null)
     parts.push(
-      "默认 " + (Array.isArray(p.default) ? p.default.join("、") : p.default),
+      `默认 ${Array.isArray(p.default) ? p.default.join("、") : p.default}`,
     );
   if (p.pattern) parts.push("格式 " + p.pattern);
   if (p.type === "integer" && /Unix/.test(p.description || ""))
     parts.push("当前 Unix 秒约 " + Math.floor(Date.now() / 1000));
   return parts.filter(Boolean).join(" · ");
 }
+// Extension actions take every parameter through the validated `options`
+// object; one input per structured catalog `params` entry.
 function optionField(p) {
   const ident = "field-" + ++fieldId,
     title = p.name + (p.required ? "（必填）" : "（可选）"),
     choices = Array.isArray(p.choices) ? p.choices.map(String) : [],
     help = optionHelp(p),
     hasDefault = p.default !== undefined && p.default !== null,
-    attrs =
-      ' id="' +
-      ident +
-      '" name="opt-' +
-      esc(p.name) +
-      '" data-option="' +
-      esc(p.name) +
-      '"' +
-      (p.required ? " required" : "");
+    attrs = ` id="${ident}" name="opt-${esc(p.name)}" data-option="${esc(p.name)}"${p.required ? " required" : ""}`;
   if (p.type === "array" && choices.length) {
     const defaults = Array.isArray(p.default) ? p.default.map(String) : [];
     // ssh_collect lists diagnostic action ids: show their console names too.
     const actions = choices.every((c) => toolById(c));
     return (
-      '<fieldset class="wide option-grid" data-option="' +
-      esc(p.name) +
-      '"><legend>' +
-      esc(title) +
-      "</legend>" +
+      `<fieldset class="wide option-grid" data-option="${esc(p.name)}"><legend>${esc(title)}</legend>` +
       choices
         .map(
           (c) =>
-            '<label class="check"><input type="checkbox" value="' +
-            esc(c) +
-            '" ' +
-            (defaults.includes(c) ? "checked" : "") +
-            "/>" +
-            esc(actions ? choiceLabel(c) : c) +
-            "</label>",
+            `<label class="check"><input type="checkbox" value="${esc(c)}" ${defaults.includes(c) ? "checked" : ""}/>${esc(actions ? choiceLabel(c) : c)}</label>`,
         )
         .join("") +
-      '<p class="help wide">' +
-      esc(help + (p.required ? "" : " · 不勾选则使用服务端默认值")) +
-      "</p></fieldset>"
+      `<p class="help wide">${esc(help + (p.required ? "" : " · 不勾选则使用服务端默认值"))}</p></fieldset>`
     );
   }
   let input;
   if (p.type === "integer")
     input =
-      '<input type="number" step="1"' +
-      attrs +
-      (Number.isFinite(p.minimum) ? ' min="' + p.minimum + '"' : "") +
-      (Number.isFinite(p.maximum) ? ' max="' + p.maximum + '"' : "") +
-      ' value="' +
-      esc(hasDefault ? p.default : "") +
-      '" autocomplete="off"/>';
+      `<input type="number" step="1"${attrs}` +
+      (Number.isFinite(p.minimum) ? ` min="${p.minimum}"` : "") +
+      (Number.isFinite(p.maximum) ? ` max="${p.maximum}"` : "") +
+      ` value="${esc(hasDefault ? p.default : "")}" autocomplete="off"/>`;
   else if (choices.length)
     input =
-      "<select" +
-      attrs +
-      ">" +
+      `<select${attrs}>` +
       (hasDefault && choices.includes(String(p.default))
         ? ""
-        : '<option value="">' +
-          (p.required ? "请选择" : "不限（使用服务端默认值）") +
-          "</option>") +
+        : `<option value="">${p.required ? "请选择" : "不限（使用服务端默认值）"}</option>`) +
       choices
         .map(
           (c) =>
-            '<option value="' +
-            esc(c) +
-            '" ' +
-            (hasDefault && String(p.default) === c ? "selected" : "") +
-            ">" +
-            esc(c) +
-            "</option>",
+            `<option value="${esc(c)}" ${hasDefault && String(p.default) === c ? "selected" : ""}>${esc(c)}</option>`,
         )
         .join("") +
       "</select>";
@@ -1346,30 +977,21 @@ function optionField(p) {
       p.type !== "array" && compilePattern(p.pattern, patternFlag)
         ? p.pattern
         : "";
+    const value = hasDefault
+      ? Array.isArray(p.default)
+        ? p.default.join(",")
+        : p.default
+      : "";
+    const placeholder =
+      p.type === "array" ? "多个值用英文逗号分隔" : p.required ? "" : "留空不传";
     input =
-      '<input type="text"' +
-      attrs +
-      (pattern ? ' pattern="' + esc(pattern) + '"' : "") +
-      ' value="' +
-      esc(
-        hasDefault
-          ? Array.isArray(p.default)
-            ? p.default.join(",")
-            : p.default
-          : "",
-      ) +
-      '" placeholder="' +
-      (p.type === "array" ? "多个值用英文逗号分隔" : p.required ? "" : "留空不传") +
-      '" autocomplete="off"/>';
+      `<input type="text"${attrs}` +
+      (pattern ? ` pattern="${esc(pattern)}"` : "") +
+      ` value="${esc(value)}" placeholder="${placeholder}" autocomplete="off"/>`;
   }
   return (
-    '<div><label for="' +
-    ident +
-    '">' +
-    esc(title) +
-    "</label>" +
-    input +
-    (help ? '<div class="help">' + esc(help) + "</div>" : "") +
+    `<div><label for="${ident}">${esc(title)}</label>${input}` +
+    (help ? `<div class="help">${esc(help)}</div>` : "") +
     "</div>"
   );
 }
@@ -1380,11 +1002,9 @@ function optionFields(tool) {
     (params.length
       ? params.map(optionField).join("")
       : '<p class="help wide">此动作无需额外参数。</p>') +
-    '<p class="help wide">' +
-    riskBadge(tool.risk) +
-    " 扩展诊断参数随任务以 options 提交，由服务端注册表校验；可选参数留空即不传，使用服务端默认值。</p>" +
+    `<p class="help wide">${riskBadge(tool.risk)} 扩展诊断参数随任务以 options 提交，由服务端注册表校验；可选参数留空即不传，使用服务端默认值。</p>` +
     (Array.isArray(tool.notes) ? tool.notes : [])
-      .map((note) => '<p class="help wide">' + esc(note) + "</p>")
+      .map((note) => `<p class="help wide">${esc(note)}</p>`)
       .join("") +
     "</div>"
   );
@@ -1480,42 +1100,23 @@ async function pageAudit() {
     page: state.auditPage,
   });
   const data = await api("/audit/page?" + query);
+  const outcomes = ["all", "success", "partial", "failed", "denied", "cancelled"]
+    .map(
+      (s) =>
+        `<option value="${s}" ${state.auditStatus === s ? "selected" : ""}>${esc(s === "all" ? "全部结果" : statuses[s] || s)}</option>`,
+    )
+    .join("");
   return panel(
     "操作审计",
-    '<form id="audit-search-form" class="toolbar"><input id="audit-search" aria-label="搜索审计记录" value="' +
-      esc(state.auditQuery) +
-      '" placeholder="动作、操作者或主机 ID"><select id="audit-status" aria-label="筛选审计结果">' +
-      ["all", "success", "partial", "failed", "denied", "cancelled"]
-        .map(
-          (s) =>
-            '<option value="' +
-            s +
-            '" ' +
-            (state.auditStatus === s ? "selected" : "") +
-            ">" +
-            esc(s === "all" ? "全部结果" : statuses[s] || s) +
-            "</option>",
-        )
-        .join("") +
-      '</select><button class="btn" type="submit">搜索</button></form>' +
+    `<form id="audit-search-form" class="toolbar"><input id="audit-search" aria-label="搜索审计记录" value="${esc(state.auditQuery)}" placeholder="动作、操作者或主机 ID">` +
+      `<select id="audit-status" aria-label="筛选审计结果">${outcomes}</select><button class="btn" type="submit">搜索</button></form>` +
       table(
         ["时间", "操作者", "动作", "目标", "结果", "说明"],
         data.items
           .map(
             (r) =>
-              '<tr><td class="date">' +
-              date(r.created_at) +
-              '</td><td class="mono">' +
-              esc(r.actor) +
-              "</td><td>" +
-              esc(actionName(r.action)) +
-              "</td><td>" +
-              esc(r.target) +
-              "</td><td>" +
-              badge(r.outcome) +
-              '</td><td class="mono">' +
-              esc(r.detail) +
-              "</td></tr>",
+              `<tr><td class="date">${date(r.created_at)}</td><td class="mono">${esc(r.actor)}</td><td>${esc(actionName(r.action))}</td>` +
+              `<td>${esc(r.target)}</td><td>${badge(r.outcome)}</td><td class="mono">${esc(r.detail)}</td></tr>`,
           )
           .join(""),
       ) +
@@ -1525,24 +1126,17 @@ async function pageAudit() {
 
 async function pageFeishu() {
   const r = await api("/settings/feishu");
+  const origin = r.web_protocol + "://" + r.web_public_host;
+  const readonly = (label, value, wide = false) =>
+    `<div${wide ? ' class="wide"' : ""}><label>${label}</label><div class="code-result">${esc(value)}</div></div>`;
   return panel(
     "飞书登录与授权管理",
     '<p class="intro">SSH MCP 控制台仅允许指定的飞书 Open ID 登录。首次初始化 Token 不再具备日常登录权限。</p>' +
       '<div class="fields">' +
-      '<div><label>飞书应用 App ID</label><div class="code-result">' +
-      esc(r.lark_app_id) +
-      "</div></div>" +
-      '<div><label>Web 外部访问地址</label><div class="code-result">' +
-      esc(r.web_protocol + "://" + r.web_public_host) +
-      "</div></div>" +
-      '<div class="wide"><label>飞书回调地址</label><div class="code-result">' +
-      esc(
-        r.web_protocol + "://" + r.web_public_host + "/api/v1/auth/callback",
-      ) +
-      "</div></div>" +
-      '<div class="wide"><label>App Secret</label><div class="pill">' +
-      (r.lark_app_secret_configured ? "已加密配置（不回显）" : "未配置") +
-      "</div></div>" +
+      readonly("飞书应用 App ID", r.lark_app_id) +
+      readonly("Web 外部访问地址", origin) +
+      readonly("飞书回调地址", origin + "/api/v1/auth/callback", true) +
+      `<div class="wide"><label>App Secret</label><div class="pill">${r.lark_app_secret_configured ? "已加密配置（不回显）" : "未配置"}</div></div>` +
       '</div><hr class="rule"/>' +
       '<form id="feishu-admins-form"><div class="fields">' +
       field(
@@ -1570,35 +1164,25 @@ async function pageRetention() {
       ]
         .map(([k, v]) => field(k, v, r[k], "number"))
         .join("") +
-      '</div><p class="muted">最近清理：' +
-      date(r.last_cleanup) +
-      " · 最近压缩：" +
-      date(r.last_vacuum) +
-      '</p><div class="modal-actions"><button class="btn primary" type="submit">保存保留策略</button></div></form>',
+      `</div><p class="muted">最近清理：${date(r.last_cleanup)} · 最近压缩：${date(r.last_vacuum)}</p>` +
+      '<div class="modal-actions"><button class="btn primary" type="submit">保存保留策略</button></div></form>',
   );
 }
 
+const settingsTabs = [
+  ["zabbix", "Zabbix MCP"],
+  ["clients", "MCP 接入"],
+  ["feishu", "飞书配置"],
+  ["retention", "数据保留"],
+];
 async function pageSettings() {
   const tab = state.settingsTab;
   const tabs =
-    '<nav class="settings-tabs" aria-label="系统配置分类">' +
-    [
-      ["zabbix", "Zabbix MCP"],
-      ["clients", "MCP 接入"],
-      ["feishu", "飞书配置"],
-      ["retention", "数据保留"],
-    ]
+    '<nav class="segmented" aria-label="系统配置分类">' +
+    settingsTabs
       .map(
         ([id, title]) =>
-          '<button class="category-chip ' +
-          (tab === id ? "active" : "") +
-          '" data-action="settings-tab" data-id="' +
-          id +
-          '" aria-pressed="' +
-          (tab === id) +
-          '">' +
-          title +
-          "</button>",
+          `<button type="button" class="${tab === id ? "active" : ""}" data-action="settings-tab" data-id="${id}" aria-pressed="${tab === id}">${title}</button>`,
       )
       .join("") +
     "</nav>";
@@ -1670,10 +1254,12 @@ function patchNode(old, next) {
   }
 }
 async function render(poll = false) {
+  // Also an event listener: only an explicit `true` is a background poll.
   poll = poll === true;
   clearTimeout(timer);
   const version = ++generation;
   const [page, id] = location.hash.slice(1).split("?")[0].split("/");
+  // Bookmarks from before the settings tabs existed.
   if (["clients", "feishu"].includes(page)) {
     location.replace("#settings/" + page);
     return;
@@ -1684,9 +1270,7 @@ async function render(poll = false) {
     state.loadedHash = location.hash;
   }
   if (state.page === "settings")
-    state.settingsTab = ["zabbix", "clients", "feishu", "retention"].includes(
-      id,
-    )
+    state.settingsTab = settingsTabs.some(([tab]) => tab === id)
       ? id
       : state.settingsTab;
   if (state.page === "job") state.jobId = id || "";
@@ -1713,7 +1297,7 @@ async function render(poll = false) {
       '<div class="loading-panel" role="status"><span class="spinner"></span>正在加载…</div>';
   try {
     const pages = {
-      overview: pageOverview,
+      overview: dashboard,
       hosts: pageHosts,
       zabbix: pageZabbix,
       groups: pageGroups,
@@ -1726,7 +1310,7 @@ async function render(poll = false) {
       audit: pageAudit,
       settings: pageSettings,
     };
-    const html = await (pages[state.page] || pageOverview)();
+    const html = await (pages[state.page] || dashboard)();
     if (version !== generation) return;
     const content = $("#content"),
       scroll = document.scrollingElement.scrollTop;
@@ -1761,28 +1345,24 @@ async function render(poll = false) {
   } catch (e) {
     if (version === generation)
       $("#content").innerHTML =
-        '<div class="inline-error" role="alert">' + esc(e.message) + "</div>";
+        `<div class="inline-error" role="alert">${esc(e.message)}</div>`;
   }
 }
 function updateSelection() {
   const count = $("#selected-count");
-  if (count)
-    count.textContent = "已选 " + state.selected.size + " 台（跨页保留）";
+  if (count) count.textContent = `已选 ${state.selected.size} 台（跨页保留）`;
   const boxes = [...document.querySelectorAll(".host-selected")];
   boxes.forEach((b) => (b.checked = state.selected.has(Number(b.dataset.id))));
   const ready = [...state.selected].filter((id) =>
     canExecute(state.selectedHosts.get(id) || {}),
   ).length;
-  for (const name of ["test-selected", "diagnose-selected"]) {
-    const button = document.querySelector('[data-action="' + name + '"]');
+  for (const [name, label] of [
+    ["test-selected", "测试 SSH"],
+    ["diagnose-selected", "批量诊断"],
+  ]) {
+    const button = document.querySelector(`[data-action="${name}"]`);
     if (button)
-      button.textContent =
-        (name === "test-selected" ? "测试 SSH" : "批量诊断") +
-        "（" +
-        ready +
-        "/" +
-        state.selected.size +
-        " 可执行）";
+      button.textContent = `${label}（${ready}/${state.selected.size} 可执行）`;
   }
   const page = $("#select-page");
   if (page) {
@@ -1798,7 +1378,12 @@ async function login() {
     currentUser = await api("/auth/me");
     csrfToken = currentUser.csrf || "";
     state.tools = await api("/tools");
-    $("#whoami").textContent = currentUser.name + " · 飞书管理员";
+    $("#whoami").textContent = currentUser.name;
+    $("#avatar").textContent = String(currentUser.name || "?").slice(0, 1);
+    fetch("/healthz")
+      .then((r) => r.json())
+      .then((h) => ($("#version").textContent = "v" + h.version))
+      .catch(() => ($("#version").textContent = "版本未知"));
     $("#login").hidden = true;
     $("#app").hidden = false;
     await render();
@@ -1807,14 +1392,17 @@ async function login() {
   } catch (e) {
     $("#app").hidden = true;
     $("#login").hidden = false;
-    $("#login-error").hidden = false;
-    $("#login-error").textContent = e.message;
+    const message = $("#login-error");
+    // Not being signed in yet is the normal state of this screen, not an error.
+    message.textContent = e.status === 401 ? "" : e.message;
     try {
       const r = await fetch("/api/v1/setup/status");
-      if (r.ok && (await r.json()).setup_required)
-        $("#login-error").textContent =
-          "首次部署，请先完成飞书绑定与管理员初始化。";
+      if (r.ok && (await r.json()).setup_required) {
+        message.textContent = "系统尚未初始化，请先进入初始化向导。";
+        message.className = "notice";
+      }
     } catch {}
+    message.hidden = !message.textContent;
   }
 }
 $("#logout").addEventListener("click", async () => {
@@ -1830,11 +1418,10 @@ $("#nav").addEventListener("click", (e) => {
   const b = e.target.closest("[data-page]");
   if (b) {
     notice("");
-    document.body.classList.remove("nav-open");
-    $("#menu-toggle").setAttribute("aria-expanded", "false");
     go(b.dataset.page);
   }
 });
+$("#notice").addEventListener("click", () => notice(""));
 $("#editor-close").addEventListener("click", closeModal);
 $("#editor-cancel").addEventListener("click", closeModal);
 $("#editor").addEventListener("cancel", () => clearEditor());
@@ -1849,8 +1436,7 @@ $("#editor-form").addEventListener("submit", async (e) => {
   try {
     const result = await state.editor(e.target);
     closeModal();
-    if (!result?.notice) notice("保存成功");
-    else notice(result.notice);
+    notice(result?.notice || "保存成功");
     await render();
     if (result?.token) {
       openModal(
@@ -1883,13 +1469,7 @@ function hostFields(h = {}) {
   const gs = state.groups
     .map(
       (g) =>
-        '<label class="check"><input type="checkbox" class="group-check" value="' +
-        g.id +
-        '" ' +
-        (selected.includes(g.id) ? "checked" : "") +
-        "/> " +
-        esc(g.name) +
-        "</label>",
+        `<label class="check"><input type="checkbox" class="group-check" value="${g.id}" ${selected.includes(g.id) ? "checked" : ""}/> ${esc(g.name)}</label>`,
     )
     .join("");
   return (
@@ -1935,9 +1515,7 @@ function hostFields(h = {}) {
       "checkbox",
     ) +
     "</div>" +
-    '<div class="wide"><label class="check"><input type="checkbox" name="gateway_approved" ' +
-    (h.gateway_approved ? "checked" : "") +
-    "/> 已核实受限强制命令网关（仅 B 模式）</label></div>" +
+    `<div class="wide"><label class="check"><input type="checkbox" name="gateway_approved" ${h.gateway_approved ? "checked" : ""}/> 已核实受限强制命令网关（仅 B 模式）</label></div>` +
     '<div class="wide"><label>所属主机组</label>' +
     (gs || '<div class="muted">暂无主机组</div>') +
     "</div>"
@@ -2048,11 +1626,7 @@ $("#editor-fields").addEventListener("change", (e) => {
   if (e.target.name === "key_file") {
     const file = e.target.files?.[0];
     $("#key-file-status").textContent = file
-      ? "已选择：" +
-        file.name +
-        " · " +
-        formatSize(file.size) +
-        "。保存时校验私钥与口令。"
+      ? `已选择：${file.name} · ${formatSize(file.size)}。保存时校验私钥与口令。`
       : "请选择 OpenSSH / PEM 私钥文件，最大 16 KB。";
   }
 });
@@ -2068,8 +1642,7 @@ $("#content").addEventListener("change", (e) => {
   if (e.target.classList.contains("zabbix-host-check")) {
     if (e.target.checked) state.zabbixSelected.add(e.target.value);
     else state.zabbixSelected.delete(e.target.value);
-    const count = $("#zabbix-selected-count");
-    if (count) count.textContent = "已选 " + state.zabbixSelected.size + " 台";
+    zabbixSelectedCount();
   }
   if (e.target.name === "action") state.diagnosticAction = e.target.value;
   if (["action", "symptom"].includes(e.target.name)) updateDiagnosticInputs();
@@ -2191,14 +1764,8 @@ $("#content").addEventListener("submit", async (e) => {
       };
     const result = await api("/jobs", "POST", body);
     notice(
-      "已接受 " +
-        result.total +
-        " 项；跳过 " +
-        result.skipped.length +
-        " 项。" +
-        result.skipped
-          .map((x) => "主机 " + x.host_id + ": " + x.reason)
-          .join("；"),
+      `已接受 ${result.total} 项；跳过 ${result.skipped.length} 项。` +
+        result.skipped.map((x) => `主机 ${x.host_id}: ${x.reason}`).join("；"),
       !result.total,
     );
     if (!result.total) return;
@@ -2274,7 +1841,7 @@ document.addEventListener("click", async (e) => {
       return;
     }
     if (action === "job-detail") {
-      if ($("#host-drawer").open) $("#host-drawer").close();
+      $("#host-drawer").close();
       go("job/" + id);
       return;
     }
@@ -2304,11 +1871,8 @@ document.addEventListener("click", async (e) => {
       const enabled = action === "enable-selected";
       if (
         !(await askConfirmation(
-          "确认" +
-            (enabled ? "启用" : "停用") +
-            "所选 " +
-            state.selected.size +
-            " 台主机？停用会立即阻止新的诊断。",
+          `确认${enabled ? "启用" : "停用"}所选 ${state.selected.size} 台主机？` +
+            (enabled ? "" : "停用会立即阻止新的诊断。"),
         ))
       )
         return;
@@ -2364,12 +1928,8 @@ document.addEventListener("click", async (e) => {
         action: "connection",
       });
       notice(
-        "接受 " +
-          r.total +
-          " 台；跳过 " +
-          r.skipped.length +
-          " 台。" +
-          r.skipped.map((x) => x.host_id + ": " + x.reason).join("；"),
+        `接受 ${r.total} 台；跳过 ${r.skipped.length} 台。` +
+          r.skipped.map((x) => `${x.host_id}: ${x.reason}`).join("；"),
         !r.total,
       );
       if (r.total)
@@ -2403,9 +1963,7 @@ document.addEventListener("click", async (e) => {
           const hosts = rows.map((line, index) => {
             const cells = line.split("\t").map((x) => x.trim());
             if (cells.length < 2 || cells.length > 3)
-              throw Error(
-                "第 " + (index + 1) + " 行应为 2–3 列，使用 Excel 制表符分隔",
-              );
+              throw Error(`第 ${index + 1} 行应为 2–3 列，使用 Excel 制表符分隔`);
             return {
               name: cells[0],
               address: cells[1],
@@ -2458,14 +2016,10 @@ document.addEventListener("click", async (e) => {
           "text",
           null,
           true,
-          "令牌（" +
-            c.prefix +
-            "…）保持不变；保存后从下一次 MCP 请求起按新范围授权，执行中的 SSH 不受影响。",
+          `令牌（${c.prefix}…）保持不变；保存后从下一次 MCP 请求起按新范围授权，执行中的 SSH 不受影响。`,
         ) +
           (dropped.length
-            ? '<p class="notice wide">以下动作已不在当前诊断目录中，保存后将移除：' +
-              esc(dropped.join("、")) +
-              "</p>"
+            ? `<p class="notice wide">以下动作已不在当前诊断目录中，保存后将移除：${esc(dropped.join("、"))}</p>`
             : "") +
           clientScopeFields(c.actions, c),
         async (form) => {
@@ -2474,7 +2028,7 @@ document.addEventListener("click", async (e) => {
             "PUT",
             clientScopeBody(form),
           );
-          return { notice: "已更新「" + c.name + "」的授权范围，令牌不变。" };
+          return { notice: `已更新「${c.name}」的授权范围，令牌不变。` };
         },
       );
       $("#editor-fields [name=name]").readOnly = true;
@@ -2488,28 +2042,21 @@ document.addEventListener("click", async (e) => {
         box.checked = recommendedClientActions.includes(box.value);
       const hint = $("#client-action-hint");
       if (hint)
-        hint.textContent =
-          "已按推荐勾选 " +
-          boxes.filter((box) => box.checked).length +
-          " 项（不含 jvm、triage、directory、peer_*），可继续手动调整。";
+        hint.textContent = `已按推荐勾选 ${boxes.filter((box) => box.checked).length} 项（不含 jvm、triage、directory、peer_*），可继续手动调整。`;
       return;
     }
     if (action === "copy-token") {
-      if (!navigator.clipboard)
-        throw Error("此访问方式不支持剪贴板，请选择文本后手动复制");
-      await navigator.clipboard.writeText(
-        $("#editor-fields [name=new_token]").value,
-      );
+      // copyText falls back to execCommand on plain-HTTP intranet access.
+      await copyText($("#editor-fields [name=new_token]").value);
       b.textContent = "已复制";
       return;
     }
     if (action === "revoke-client") {
-      const c = state.clients.find((x) => x.id === id);
+      const c = state.clients.find((x) => String(x.id) === id);
+      if (!c) throw Error("该客户端已不存在，请刷新页面后再操作。");
       if (
         !(await askConfirmation(
-          "撤销「" +
-            c.name +
-            "」的令牌？该客户端将无法继续访问 MCP，其他客户端不受影响。",
+          `撤销「${c.name}」的令牌？该客户端将无法继续访问 MCP，其他客户端不受影响。`,
         ))
       )
         return;
@@ -2537,7 +2084,7 @@ document.addEventListener("click", async (e) => {
         action === "edit-host"
           ? currentHost(id) || (await api("/hosts/" + id + "/detail")).host
           : {};
-      if ($("#host-drawer").open) $("#host-drawer").close();
+      $("#host-drawer").close();
       openModal(
         h.id ? "编辑主机资产" : "登记 Linux 主机",
         hostFields(h),
@@ -2619,24 +2166,9 @@ document.addEventListener("click", async (e) => {
           ),
       );
     } else if (action === "test") {
-      const value = await api("/jobs", "POST", {
-        host_ids: [Number(id)],
-        action: "connection",
-      });
-      if (value.total) go("job/" + value.job_ids[0]);
-      else notice(value.skipped.map((x) => x.reason).join("；"), true);
-    } else if (action === "disable-host") {
-      if (
-        !(await askConfirmation(
-          "确定停用资产 " + id + "？停用后 MCP 将无法诊断这台主机。",
-        ))
-      )
-        return;
-      await api("/hosts/" + id + "/disable", "POST");
-      notice("主机已停用");
-      render();
+      await startJob(Number(id), "connection");
     } else if (action === "diagnose-host") {
-      if ($("#host-drawer").open) $("#host-drawer").close();
+      $("#host-drawer").close();
       await setTargets([Number(id)]);
     } else if (action === "select-filtered") {
       const r = await api("/inventory/ids?" + hostQuery());
@@ -2668,28 +2200,19 @@ document.addEventListener("click", async (e) => {
       state.selected.clear();
       state.batchId = result.batch_id;
       state.manifest = "";
-      notice(
-        "已提交 " +
-          result.total +
-          " 台主机。请在可信渠道独立核对，再确认公钥。",
-      );
+      notice(`已提交 ${result.total} 台主机。请在可信渠道独立核对，再确认公钥。`);
       go("keys/" + result.batch_id);
     } else if (action === "confirm-batch-from-manifest") {
       await precheckManifest();
     } else if (action === "confirm-key") {
-      const h = await api("/hosts");
-      const asset = h.find((x) => String(x.id) === id);
       const current = await api(
         "/host-keys/batches/" + encodeURIComponent(state.batchId),
       );
       const entry = current.items.find((x) => String(x.host_id) === id);
       openModal(
         "人工核验主机公钥",
-        '<div class="wide"><p>主机：<strong>' +
-          esc(asset?.name) +
-          '</strong></p><p>候选指纹：<strong class="mono">' +
-          esc(entry?.fingerprint) +
-          '</strong></p><p class="muted">请在目标服务器可信控制台执行 ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256（根据实际协商的公钥算法选择文件），确认指纹后手工填入。</p></div>' +
+        `<div class="wide"><p>主机：<strong>${esc(entry?.name)}</strong></p><p>候选指纹：<strong class="mono">${esc(entry?.fingerprint)}</strong>（${esc(entry?.algorithm || "算法未知")}）</p>` +
+          `<p class="muted">请在目标服务器可信控制台执行 <code>${esc(hostKeyCommand(entry?.algorithm))}</code>，确认指纹后手工填入。</p></div>` +
           field(
             "fingerprint",
             "通过可信渠道独立核验的 SHA256 指纹",
@@ -2714,15 +2237,5 @@ document.addEventListener("click", async (e) => {
   }
 });
 window.addEventListener("hashchange", render);
-const theme =
-  localStorage.getItem("ssh-theme") ||
-  (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-document.documentElement.dataset.theme = theme;
-$("#theme-toggle").addEventListener("click", () => {
-  const value =
-    document.documentElement.dataset.theme === "dark" ? "light" : "dark";
-  document.documentElement.dataset.theme = value;
-  localStorage.setItem("ssh-theme", value);
-});
 initPresentation();
 login();

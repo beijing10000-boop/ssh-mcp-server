@@ -4,108 +4,113 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
-    <title>Linux 智能诊断 MCP 服务器</title>
+    <title>SSH MCP · Linux 智能诊断</title>
     <!-- ?v= follows the release so browsers drop cached scripts after an upgrade. -->
-    <link rel="stylesheet" href="/static/app.css?v=0.6.0" />
-    <script defer src="/static/inventory.js?v=0.6.0"></script>
-    <script defer src="/static/presentation.js?v=0.6.0"></script>
-    <script defer src="/static/interactions.js?v=0.6.0"></script>
-    <script defer src="/static/app.js?v=0.6.0"></script>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=0.7.0" />
+    <link rel="stylesheet" href="/static/ui-kit.css?v=0.7.0" />
+    <link rel="stylesheet" href="/static/app.css?v=0.7.0" />
+    <script src="/static/ui-kit.js?v=0.7.0"></script>
+    <script defer src="/static/inventory.js?v=0.7.0"></script>
+    <script defer src="/static/presentation.js?v=0.7.0"></script>
+    <script defer src="/static/interactions.js?v=0.7.0"></script>
+    <script defer src="/static/app.js?v=0.7.0"></script>
   </head>
   <body>
     <div id="login" class="login-wrap">
-      <div class="login-card">
+      <section class="login-card">
         <div class="logo" data-icon="terminal"></div>
         <div class="eyebrow">飞书身份认证</div>
-        <h1>Linux 智能诊断</h1>
-        <p class="muted">使用企业账号进入诊断控制台</p>
-        <a href="/api/v1/auth/login" class="btn primary stretch login-link"
-          >使用飞书账号登录 →</a
-        >
-        <p id="login-error" class="error" role="alert" hidden></p>
-        <p class="micro">仅在初始化时指定的飞书管理员可以登录。</p>
+        <h1>SSH MCP</h1>
+        <p class="muted">Linux 智能诊断控制台</p>
+        <a href="/api/v1/auth/login" class="btn primary">使用飞书账号登录</a>
+        <p class="small">仅初始化时指定的飞书管理员可以登录</p>
         <a href="/setup" class="setup-link">首次部署？进入初始化向导</a>
-      </div>
+        <p id="login-error" class="error" role="alert" hidden></p>
+      </section>
     </div>
     <div id="app" class="shell" hidden>
       <aside class="sidebar">
-        <div class="brand">
-          <span class="symbol" data-icon="terminal"></span>
-          <div><strong>SSH MCP</strong><small>Linux 智能诊断</small></div>
-        </div>
-        <nav id="nav" aria-label="主导航">
+        <a class="brand" href="#overview">
+          <span class="logo" data-icon="terminal"></span>
+          <span><strong>SSH MCP</strong><small>Linux 智能诊断</small></span>
+        </a>
+        <nav id="nav" class="nav" aria-label="主导航">
           <div class="nav-caption">概览</div>
-          <button class="nav-link" data-page="overview">
+          <button class="nav-link" type="button" data-page="overview">
             <span data-icon="overview"></span><span>运维总览</span>
           </button>
           <div class="nav-caption">资产接入</div>
-          <button class="nav-link" data-page="hosts">
+          <button class="nav-link" type="button" data-page="hosts">
             <span data-icon="hosts"></span><span>主机资产</span></button
-          ><button class="nav-link" data-page="zabbix">
+          ><button class="nav-link" type="button" data-page="zabbix">
             <span data-icon="zabbix"></span><span>Zabbix 资产同步</span></button
-          ><button class="nav-link" data-page="groups">
+          ><button class="nav-link" type="button" data-page="groups">
             <span data-icon="groups"></span><span>主机组</span></button
-          ><button class="nav-link" data-page="credentials">
+          ><button class="nav-link" type="button" data-page="credentials">
             <span data-icon="credentials"></span><span>SSH 凭据</span></button
-          ><button class="nav-link" data-page="proxies">
+          ><button class="nav-link" type="button" data-page="proxies">
             <span data-icon="proxies"></span><span>跳板管理</span></button
-          ><button class="nav-link" data-page="keys">
+          ><button class="nav-link" type="button" data-page="keys">
             <span data-icon="keys"></span><span>主机公钥核验</span>
           </button>
           <div class="nav-caption">诊断</div>
-          <button class="nav-link" data-page="diagnostics">
+          <button class="nav-link" type="button" data-page="diagnostics">
             <span data-icon="diagnostics"></span><span>诊断工作台</span></button
-          ><button class="nav-link" data-page="history">
+          ><button class="nav-link" type="button" data-page="history">
             <span data-icon="history"></span><span>诊断历史</span>
           </button>
           <div class="nav-caption">治理</div>
-          <button class="nav-link" data-page="audit">
+          <button class="nav-link" type="button" data-page="audit">
             <span data-icon="audit"></span><span>操作审计</span></button
-          ><button class="nav-link" data-page="settings">
+          ><button class="nav-link" type="button" data-page="settings">
             <span data-icon="settings"></span><span>系统配置</span>
           </button>
         </nav>
         <div class="sidebar-foot">
-          <span class="indicator"></span> 服务端口 9099 <span id="whoami"></span
-          ><button class="text-button" id="logout">退出飞书登录</button>
+          <div class="service-line">
+            <span class="indicator"></span><span id="version">版本加载中</span>
+            · 端口 9099 · 北京时间
+          </div>
+          <div class="user-card">
+            <span class="avatar" id="avatar" aria-hidden="true"></span>
+            <div>
+              <strong id="whoami"></strong><small>飞书管理员</small>
+            </div>
+            <button class="btn subtle small" id="logout" type="button">
+              退出
+            </button>
+          </div>
         </div>
       </aside>
+      <button
+        class="nav-backdrop"
+        data-action="toggle-nav"
+        type="button"
+        aria-label="关闭导航"
+      ></button>
       <main class="workspace">
-        <button
-          class="nav-backdrop"
-          data-action="toggle-nav"
-          type="button"
-          aria-label="关闭导航"
-        ></button>
         <header class="topbar">
-          <div>
-            <nav class="breadcrumb" aria-label="当前位置">
-              <span>SSH MCP</span><span aria-hidden="true">/</span
-              ><span id="breadcrumb-section">概览</span>
-            </nav>
-            <h1 id="page-title">运维总览</h1>
-          </div>
-          <div class="top-actions">
+          <div class="topbar-title">
             <button
-              class="btn subtle"
+              class="btn subtle icon-only"
               id="menu-toggle"
               data-action="toggle-nav"
+              data-icon="menu"
               aria-label="打开导航"
               aria-expanded="false"
               type="button"
-            >
-              <span data-icon="menu"></span></button
-            ><button
-              class="btn subtle"
-              id="density-toggle"
-              data-action="density-toggle"
-              type="button"
-              aria-pressed="false"
-            >
-              紧凑表格
-            </button>
+            ></button>
+            <div>
+              <nav class="breadcrumb" aria-label="当前位置">
+                <span>SSH MCP</span><span aria-hidden="true">/</span
+                ><span id="breadcrumb-section">概览</span>
+              </nav>
+              <h1 id="page-title">运维总览</h1>
+            </div>
+          </div>
+          <div class="top-actions">
             <button
-              class="btn subtle"
+              class="btn subtle small"
               id="task-indicator"
               data-action="open-history"
               type="button"
@@ -113,18 +118,33 @@
             >
               正在读取任务状态</button
             ><button
-              id="theme-toggle"
-              class="btn subtle"
-              aria-label="切换深浅色主题"
+              class="btn subtle small"
+              id="density-toggle"
+              data-action="density-toggle"
+              type="button"
+              aria-pressed="false"
             >
-              <span data-icon="moon"></span></button
-            ><button id="reload" class="btn subtle">刷新</button>
+              紧凑表格</button
+            ><button
+              id="reload"
+              class="btn subtle icon-only"
+              data-icon="refresh"
+              type="button"
+              aria-label="刷新当前页面"
+              title="刷新"
+            ></button
+            ><button
+              id="theme-toggle"
+              class="btn subtle icon-only"
+              type="button"
+              aria-label="切换深浅色主题"
+            ></button>
           </div>
         </header>
-        <div id="notice" class="notice" role="status" hidden></div>
-        <section id="content" aria-live="polite"></section>
+        <section id="content" class="content" aria-live="polite"></section>
       </main>
     </div>
+    <div id="notice" class="toast" role="status" hidden></div>
     <dialog id="action-confirm" aria-labelledby="action-confirm-title">
       <form method="dialog">
         <h2 id="action-confirm-title">确认操作范围</h2>
@@ -138,26 +158,22 @@
     <dialog id="host-drawer" class="host-drawer" aria-label="主机详情">
       <div id="host-drawer-content"></div>
     </dialog>
-    <dialog id="editor">
+    <dialog id="editor" aria-labelledby="editor-heading">
       <form id="editor-form">
         <div class="modal-title">
-          <div>
-            <h2 id="editor-heading">编辑</h2>
-          </div>
+          <h2 id="editor-heading">编辑</h2>
           <button
             class="close"
             type="button"
             id="editor-close"
+            data-icon="close"
             aria-label="关闭弹窗"
-          >
-            <span data-icon="close"></span>
-          </button>
+          ></button>
         </div>
         <div id="editor-fields" class="fields"></div>
         <p id="editor-feedback" role="alert" class="inline-error" hidden></p>
         <div class="modal-actions">
-          <button type="button" class="btn subtle" id="editor-cancel">
-            取消</button
+          <button type="button" class="btn" id="editor-cancel">取消</button
           ><button type="submit" class="btn primary">保存</button>
         </div>
       </form>

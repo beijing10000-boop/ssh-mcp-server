@@ -6,7 +6,7 @@ import asyncio
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from . import __version__, store, access, jobs, console_api, zabbix, maintenance
@@ -56,8 +56,6 @@ async def secure_transport(request: Request, call_next):
     path = request.url.path
     if path == "/mcp" or path.startswith("/mcp/"):
         authorization = request.headers.get("authorization", "")
-        from fastapi import HTTPException
-
         try:
             who = access.authenticate(authorization)
         except HTTPException as exc:
@@ -100,11 +98,6 @@ def setup_page():
     )
 
 
-@app.get("/static/setup.js")
-def setup_script():
-    return FileResponse(STATIC_DIR / "setup.js", media_type="application/javascript")
-
-
 @app.get("/")
 def homepage():
     return FileResponse(
@@ -116,35 +109,25 @@ def homepage():
     )
 
 
-@app.get("/static/app.css")
-def css():
-    return FileResponse(STATIC_DIR / "app.css", media_type="text/css")
+# Only these files are served; the HTML pages above carry their own CSP.
+STATIC_FILES = {
+    "ui-kit.css": "text/css",
+    "app.css": "text/css",
+    "ui-kit.js": "application/javascript",
+    "inventory.js": "application/javascript",
+    "presentation.js": "application/javascript",
+    "interactions.js": "application/javascript",
+    "app.js": "application/javascript",
+    "setup.js": "application/javascript",
+    "favicon.svg": "image/svg+xml",
+}
 
 
-@app.get("/static/app.js")
-def js():
-    return FileResponse(STATIC_DIR / "app.js", media_type="application/javascript")
-
-
-@app.get("/static/inventory.js")
-def inventory_js():
-    return FileResponse(
-        STATIC_DIR / "inventory.js", media_type="application/javascript"
-    )
-
-
-@app.get("/static/interactions.js")
-def interactions_js():
-    return FileResponse(
-        STATIC_DIR / "interactions.js", media_type="application/javascript"
-    )
-
-
-@app.get("/static/presentation.js")
-def presentation_js():
-    return FileResponse(
-        STATIC_DIR / "presentation.js", media_type="application/javascript"
-    )
+@app.get("/static/{name}")
+def static_file(name: str):
+    if name not in STATIC_FILES:
+        raise HTTPException(status_code=404)
+    return FileResponse(STATIC_DIR / name, media_type=STATIC_FILES[name])
 
 
 # Keep this final: Mount('/') matches every route after it.
