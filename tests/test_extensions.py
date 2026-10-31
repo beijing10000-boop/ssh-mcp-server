@@ -343,7 +343,11 @@ def test_client_actions_can_be_edited_and_are_extended_on_upgrade(client, key_pa
         c for c in client.get("/api/v1/mcp/clients").json()["items"] if c["id"] == ident
     )
     assert row["actions"] == ["cpu", "logs", "syslog"] and row["all_hosts"] == 1
-    # Startup extension: a client holding `logs` gains the implied log tools once.
+    # A client created on this release already has the full action list.
+    assert access.extend_client_actions() == []
+    # Startup extension: a client from before v0.6.0 holding `logs` gains the
+    # implied log tools once.
+    _created_before_v060(ident)
     changed = access.extend_client_actions()
     assert changed and changed[0][0] == ident
     row = next(
@@ -369,6 +373,15 @@ def _client_actions(client, ident):
     )
 
 
+def _created_before_v060(*idents):
+    """Make clients look like ones that existed before the extension marker."""
+    with store.db() as c:
+        c.executemany(
+            "UPDATE mcp_clients SET actions_extended='' WHERE id=?",
+            [(ident,) for ident in idents],
+        )
+
+
 def _extension_audits():
     with store.db() as c:
         return c.execute(
@@ -382,6 +395,7 @@ def test_removed_extension_actions_are_not_granted_again_on_restart(client):
         headers=auth(),
         json={"name": "platform", "all_hosts": True, "actions": ["cpu", "logs"]},
     ).json()["id"]
+    _created_before_v060(ident)
     assert [i for i, _ in access.extend_client_actions()] == [ident]
     assert "nginx" in _client_actions(client, ident)
     # The administrator removes an implied action with 编辑权限 ...
@@ -404,6 +418,7 @@ def test_removed_extension_actions_are_not_granted_again_on_restart(client):
         headers=auth(),
         json={"name": "cpu-only", "all_hosts": True, "actions": ["cpu"]},
     ).json()["id"]
+    _created_before_v060(other)
     assert access.extend_client_actions() == []
     assert (
         client.put(
@@ -427,6 +442,7 @@ def test_clients_extended_before_the_marker_existed_are_not_extended_again(clien
     )
     # v0.6.0 extended `old` and wrote its audit row; the administrator then
     # removed nginx. Neither client carries the new marker yet.
+    _created_before_v060(old, fresh)
     with store.db() as c:
         c.execute(
             "UPDATE mcp_clients SET actions=? WHERE id=?",

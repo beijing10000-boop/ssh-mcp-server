@@ -205,9 +205,11 @@ def create(body: ClientIn, actor=Depends(admin)):
             "SELECT 1 FROM mcp_clients WHERE name=?", (body.name.strip(),)
         ).fetchone():
             raise HTTPException(409, "客户端名称已经存在")
+        # A new client's actions are what the administrator picked from the full
+        # current list, so the startup extension never applies to it.
         c.execute(
-            "INSERT INTO mcp_clients(id,name,token_hash,prefix,group_ids,actions,all_hosts,expires_at) "
-            "VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO mcp_clients(id,name,token_hash,prefix,group_ids,actions,all_hosts,expires_at,actions_extended) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
             (
                 ident,
                 body.name.strip(),
@@ -217,6 +219,7 @@ def create(body: ClientIn, actor=Depends(admin)):
                 json.dumps(sorted(set(body.actions))),
                 int(body.all_hosts),
                 int(time.time()) + body.valid_days * 86400,
+                EXTENDS_RELEASE,
             ),
         )
     store.audit(actor, "mcp_client_create", ident, "success")
