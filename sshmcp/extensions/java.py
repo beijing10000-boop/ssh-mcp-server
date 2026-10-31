@@ -37,7 +37,7 @@ TMO = (
 # Every argv element is cut to 296 bytes; past a per-PID byte budget (16 KB
 # shared by all PIDs, 0.8–12 KB each) unimportant -D properties are only
 # counted, and positional arguments are kept so the main class stays known.
-JAVA_BODY = r"""all=$( { tmo3 ps -eo pid=,comm= --sort=-rss; } 2>/dev/null | awk '$2 == "jsvc" || $2 ~ /^java/ { print $1 }')
+JAVA_BODY = r"""all=$( { tmo3 ps -e -o pid= -o comm= --sort=-rss; } 2>/dev/null | awk '$2 == "jsvc" || $2 ~ /^java/ { print $1 }')
 if [ -z "$all" ]; then printf 'NO_JAVA\n'; exit 0; fi
 total=$(printf '%s\n' "$all" | wc -l)
 pids=$(printf '%s\n' "$all" | head -n 20)
@@ -54,8 +54,8 @@ read -r now rest < /proc/uptime; now=${now%%.*}; now=${now:-0}
 if [ $((now - up0)) -ge 10 ]; then printf 'JAVA_TIME_BUDGET %s\n' "$pid"; break; fi
 if [ ! -d "/proc/$pid" ]; then continue; fi
 printf '[AIOPS_JAVA_PID]\nPID %s\n' "$pid"
-pl=$( { tmo2 ps -o user=,etimes=,rss=,pcpu=,pmem=,nlwp= -p "$pid"; } 2>/dev/null | awk 'NF >= 6 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ { print "PS", $1, $2, $3, $4, $5, $6; exit }')
-if [ -z "$pl" ]; then pl=$( { tmo2 ps -o user=,etimes=,rss=,pcpu=,pmem= -p "$pid"; } 2>/dev/null | awk 'NF >= 5 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ { print "PS", $1, $2, $3, $4, $5, "-"; exit }'); fi
+pl=$( { tmo2 ps -o user= -o etimes= -o rss= -o pcpu= -o pmem= -o nlwp= -p "$pid"; } 2>/dev/null | awk 'NF >= 6 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ { print "PS", $1, $2, $3, $4, $5, $6; exit }')
+if [ -z "$pl" ]; then pl=$( { tmo2 ps -o user= -o etimes= -o rss= -o pcpu= -o pmem= -p "$pid"; } 2>/dev/null | awk 'NF >= 5 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ { print "PS", $1, $2, $3, $4, $5, "-"; exit }'); fi
 if [ -n "$pl" ]; then printf '%s\n' "$pl"; fi
 printf 'USER %s\n' "$(stat -c %U "/proc/$pid" 2>/dev/null)"
 awk '/^Threads:/ { print "THREADS", $2; exit }' "/proc/$pid/status" 2>/dev/null

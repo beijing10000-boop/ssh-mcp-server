@@ -27,9 +27,10 @@ INLINE_WAIT_SECONDS = 30
 # Process state counts, D-state waits and a 1 s CPU delta from two /proc/*/stat
 # samples (utime+stime, fields 14-15 after the parenthesised comm). Read-only,
 # nothing written to disk; the snapshot is held in shell variables only.
+# One column per -o: EL7's procps-ng reads "-o pid=,state=" as one column.
 PROCESS_SIGNALS = (
     "printf '[AIOPS_STATES]\\n'; ps -eo state= | cut -c1 | sort | uniq -c; "
-    "printf '[AIOPS_DSTATE]\\n'; ps -eo pid=,state=,wchan:32=,comm= | "
+    "printf '[AIOPS_DSTATE]\\n'; ps -e -o pid= -o state= -o wchan:32= -o comm= | "
     "awk '$2 ~ /^D/ {c=$4; for (i=5; i<=NF; i++) c=c\" \"$i; print $1, $2, $3, c}' | head -n 10; "
     "printf '[AIOPS_CPU_DELTA]\\n'; hz=$(getconf CLK_TCK 2>/dev/null || echo 100); "
     'snap() { for f in /proc/[0-9]*/stat; do read -r l 2>/dev/null < "$f" && printf \'%s\\n\' "$l"; done; }; '

@@ -37,6 +37,21 @@ jobs:
           /bin/sh -n gateway/aiops-diagnostic-gateway
       - name: 接口、权限与真实 SSH 协议回归
         run: python -m pytest -q
+  old-procps:
+    runs-on: ubuntu-24.04
+    env:
+      SSHMCP_OLD_PROCPS_IMAGE: centos:7.9.2009
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements.txt pytest
+      - name: 拉取 CentOS 7 镜像（procps-ng 3.3.10）
+        run: docker pull "$SSHMCP_OLD_PROCPS_IMAGE"
+      - name: 旧版 procps 上执行全部 ps 调用与 Java 盘点
+        run: python -m pytest -q -rs tests/test_procps_compat.py
   desktop:
     runs-on: ubuntu-24.04
     steps:
