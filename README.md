@@ -2,7 +2,9 @@
 
 > 独立部署、中文优先、免 Agent 的 Linux SSH 诊断服务。默认 Web/MCP 端口 **9099**。
 
-**当前版本：v0.6.0（待真实环境联调）**
+**当前版本：v0.7.0**
+
+v0.7.0 改为与 AI Ops Platform 统一的苹果风格界面（共用 `web/ui-kit.css` / `web/ui-kit.js`），逐行清理了后端与前端的冗余代码（不改变行为），并修复了逐行审读发现的问题：操作审计关键词搜索报 500、管理员去掉的扩展动作重启后被重新授予、凭据重名改名报 500、删除主机组后无法编辑客户端等。新增一列 `mcp_clients.actions_extended`（启动时自动添加）。详见 [v0.7.0 说明](docs/RELEASE-v0.7.0.md)。
 
 v0.6.0 新增 8 个只读 MCP 工具：Nginx 运行状态与 error.log 线索、Nginx 访问日志的状态码/TOP/分钟趋势聚合、按时间窗口检索系统日志（journalctl 优先、/var/log 回退）、Java 进程盘点与 JVM 堆/GC 探针、systemd 服务深度诊断、端口与服务映射，以及在一次 SSH 会话内执行 1–6 个固定诊断的 `ssh_collect`。参数由服务端注册表逐项校验，诊断目录返回结构化参数与风险等级；同主机排队等待延长到 30 秒，超时保留已读输出，日志结果在摘要中直接给出代表性日志行与分类命中，脱敏覆盖 Java 启动参数、连接串、云访问密钥与 JWT。已有日志、端口或服务权限的客户端启动时自动获得对应新动作（`jvm` 须手动授权），Web 支持编辑客户端权限且令牌不变。无数据库迁移，B 模式不支持新动作。详见 [v0.6.0 说明](docs/RELEASE-v0.6.0.md)。
 
@@ -56,7 +58,7 @@ docker compose exec ssh-mcp cat /app/data/bootstrap.token
 
 需开放给可信内网时，在项目目录创建 `.env`，并设置 `WEB_BIND_IP=内网绑定IP`；建议同时通过防火墙限制允许访问的源地址。
 
-本次升级见 [v0.6.0 说明](docs/RELEASE-v0.6.0.md)，备份与迁移步骤见 [v0.4 发布与迁移说明](docs/RELEASE-v0.4.md)。配置入口见 [v0.3.1 系统配置说明](docs/RELEASE-v0.3.1.md)。请先阅读 [v0.3 优化与升级说明](docs/RELEASE-v0.3.md)，以及 [安装部署](docs/INSTALLATION.md)、[v0.2 升级与验证](docs/RELEASE-v0.2.md)、[架构评估](docs/ARCHITECTURE.md)、[AI 平台改造方案](docs/AI-PLATFORM-INTEGRATION.md)、[MCP 接入](docs/MCP.md)、[安全说明](docs/SECURITY.md)、[目录与 IP 流量分析](docs/INSIGHTS.md)。
+本次升级见 [v0.7.0 说明](docs/RELEASE-v0.7.0.md)，v0.6.0 的工具与授权扩展见 [v0.6.0 说明](docs/RELEASE-v0.6.0.md)，备份与迁移步骤见 [v0.4 发布与迁移说明](docs/RELEASE-v0.4.md)。配置入口见 [v0.3.1 系统配置说明](docs/RELEASE-v0.3.1.md)。请先阅读 [v0.3 优化与升级说明](docs/RELEASE-v0.3.md)，以及 [安装部署](docs/INSTALLATION.md)、[v0.2 升级与验证](docs/RELEASE-v0.2.md)、[架构评估](docs/ARCHITECTURE.md)、[AI 平台改造方案](docs/AI-PLATFORM-INTEGRATION.md)、[MCP 接入](docs/MCP.md)、[安全说明](docs/SECURITY.md)、[目录与 IP 流量分析](docs/INSIGHTS.md)。
 
 ## 核心能力
 
