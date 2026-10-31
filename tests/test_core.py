@@ -800,3 +800,139 @@ def test_rss_identity_probe_uses_only_bounded_fixed_procfs_reads():
     assert "print v" in command  # print only safe basename, never argv
     with pytest.raises(ValueError):
         diagnostics.command_for("memory_processes", service="injected;id")
+
+
+def test_rss_identity_probe_exit_status_and_dash_jar_options():
+    command = diagnostics.command_for("memory_processes")
+    probe = command[command.index("printf '[AIOPS_APP_IDENTITY]") :]
+    # The loop's last statement must not turn "no identity" into exit 1.
+    assert '[ -n "$app" ] && printf' not in probe
+    assert probe.endswith(
+        "if [ -n \"$app\" ]; then printf 'AIOPS_APP %s %s %s\n' "
+        '"$pid" "$kind" "$app"; fi; done'
+    )
+    # JVM options (and the value of -cp-like options) between -jar and the
+    # jar are skipped; still only a whitelisted basename is ever printed.
+    assert '$0=="-jar" {found=1; next} !found {next}' in probe
+    assert "/^(-cp|-classpath|--class-path|" in probe and "{skip=1; next}" in probe
+    assert '$0=="" || /^[-@]/ {next}' in probe
+    # The section header, the jar basename, the unit name and the record.
+    assert probe.count("print") == 4
+    assert "if(v ~ /^[A-Za-z0-9_.-]+[.]jar$/) print v; exit}" in probe
+
+
+def _posix_sh():
+    import os
+    import shutil
+
+    return "/bin/sh" if os.path.exists("/bin/sh") else shutil.which("sh")
+
+
+def run_memory_processes_on_fixture(tmp_path, processes):
+    """Run the real memory_processes script under sh against a fake /proc.
+
+    ``processes`` maps PID -> (argv, cgroup text or None) in RSS order, or
+    None for a PID that exited between ps and the /proc reads. Only the two
+    ps calls and the /proc prefix are swapped for fixtures.
+    """
+    import os
+    import shlex
+    import subprocess
+
+    sh = _posix_sh()
+    if sh is None:
+        pytest.skip("needs a POSIX sh")
+    root = tmp_path / "fake"
+    (root / "proc").mkdir(parents=True)
+    rows = ["PID PPID COMMAND %CPU %MEM RSS ELAPSED S"]
+    for rank, (pid, entry) in enumerate(processes.items()):
+        rows.append(f"{pid} 1 java 1.0 {20 - rank}.0 {(20 - rank) * 100000} 01:00 S")
+        if entry is None:
+            continue
+        argv, cgroup = entry
+        proc = root / "proc" / str(pid)
+        proc.mkdir()
+        (proc / "cmdline").write_bytes(b"".join(a.encode() + b"\0" for a in argv))
+        if cgroup is not None:
+            (proc / "cgroup").write_text(cgroup)
+    command = diagnostics.command_for("memory_processes")
+    swaps = (
+        (
+            "ps -eo pid,ppid,comm,pcpu,pmem,rss,etime,state --sort=-rss",
+            "printf '%s\\n' " + " ".join(shlex.quote(row) for row in rows),
+        ),
+        ("ps -eo pid= --sort=-rss", "printf '%s\\n' " + " ".join(map(str, processes))),
+        ('"/proc/$pid/', '"$AIOPS_FAKE_ROOT/proc/$pid/'),
+    )
+    for old, new in swaps:
+        assert command.count(old) == (4 if old.startswith('"') else 1), old
+        command = command.replace(old, new)
+    return subprocess.run(
+        [sh, "-c", command],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        env={**os.environ, "AIOPS_FAKE_ROOT": root.as_posix()},
+    )
+
+
+def test_rss_identity_probe_runs_under_sh_and_exits_0_without_last_identity(
+    tmp_path,
+):
+    from sshmcp import observations
+
+    supervisord = "0::/system.slice/supervisord.service\n"
+    result = run_memory_processes_on_fixture(
+        tmp_path,
+        {
+            # supervisord-style: JVM options between -jar and the jar.
+            101: (
+                [
+                    "java",
+                    "-jar",
+                    "-Xms256m",
+                    "-Xmx1024m",
+                    "-XX:+HeapDumpOnOutOfMemoryError",
+                    "-Dspring.datasource.password=Hunter2",
+                    "/data/jar/dsp-api/dsp-api_445.jar",
+                    "--server.port=8080",
+                ],
+                supervisord,
+            ),
+            102: (["java", "-Xmx512m", "-jar", "/srv/billing-api.jar"], None),
+            # The value of -cp is not the jar.
+            103: (["java", "-jar", "-cp", "/opt/lib/extra.jar", "x.jar"], supervisord),
+            104: (
+                ["/usr/sbin/nginx", "-g", "daemon off;"],
+                "0::/system.slice/nginx.service\n",
+            ),
+            105: None,
+            # Last by RSS and unidentifiable: -jar without a jar, no service.
+            106: (
+                ["java", "-jar", "-Xmx1g"],
+                "0::/user.slice/user-1000.slice/session-3.scope\n",
+            ),
+        },
+    )
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    assert result.stderr == ""
+    records = [
+        line for line in result.stdout.splitlines() if line.startswith("AIOPS_APP ")
+    ]
+    assert records == [
+        "AIOPS_APP 101 jar dsp-api_445.jar",
+        "AIOPS_APP 102 jar billing-api.jar",
+        "AIOPS_APP 103 jar x.jar",
+        "AIOPS_APP 104 service nginx.service",
+    ]
+    assert "Hunter2" not in result.stdout and "-Xms256m" not in result.stdout
+    rows = {
+        row["pid"]: row
+        for row in observations.analyze("memory_processes", result.stdout)["summary"][
+            "processes"
+        ]
+    }
+    assert sorted(rows) == [101, 102, 103, 104, 105, 106]
+    assert rows[101]["application"] == "dsp-api_445.jar"
+    assert rows[101]["identity_source"] == "jar"
+    assert "application" not in rows[105] and "application" not in rows[106]
