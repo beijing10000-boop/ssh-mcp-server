@@ -64,14 +64,21 @@ ACTIONS = {
         "app=''; kind=''; "
         'if [ -r "/proc/$pid/cmdline" ]; then '
         "app=$(tr '\\000' '\\n' < \"/proc/$pid/cmdline\" | "
-        'awk \'$0=="-jar" {found=1; next} found {n=split($0,p,"/"); '
+        # -jar only selects jar mode: JVM options (and the value of the java
+        # launcher's value-taking options) may follow it before the jar.
+        'awk \'$0=="-jar" {found=1; next} !found {next} skip {skip=0; next} '
+        "/^(-cp|-classpath|--class-path|-p|--module-path|--upgrade-module-path|"
+        "--add-modules|--limit-modules|--add-reads|--add-exports|--add-opens|"
+        "--patch-module|--source|--enable-native-access)$/ {skip=1; next} "
+        '$0=="" || /^[-@]/ {next} {n=split($0,p,"/"); '
         "v=p[n]; if(v ~ /^[A-Za-z0-9_.-]+[.]jar$/) print v; exit}'); "
         '[ -n "$app" ] && kind=jar; fi; '
         'if [ -z "$app" ] && [ -r "/proc/$pid/cgroup" ]; then '
         "app=$(awk 'match($0,/[A-Za-z0-9_.@-]+[.]service/)"
         '{print substr($0,RSTART,RLENGTH); exit}\' "/proc/$pid/cgroup"); '
         '[ -n "$app" ] && kind=service; fi; '
-        '[ -n "$app" ] && printf \'AIOPS_APP %s %s %s\n\' "$pid" "$kind" "$app"; '
+        # `if`, not `&&`: an unidentified last process must not set exit 1.
+        'if [ -n "$app" ]; then printf \'AIOPS_APP %s %s %s\n\' "$pid" "$kind" "$app"; fi; '
         "done"
     ),
     "health": (
