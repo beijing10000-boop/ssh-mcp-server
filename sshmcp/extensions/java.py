@@ -294,6 +294,16 @@ def main_of(args):
     return {"kind": "unknown", "name": None}, len(args)
 
 
+def main_name(main):
+    """The main as one string: jar file name (its path goes to ``jar_path``),
+    class, or ``module/class``; a jar name ends in .jar/.war, only a module
+    main contains "/"."""
+    name = main["name"]
+    if name and main["kind"] == "jar":
+        return name.rsplit("/", 1)[-1] or name
+    return name
+
+
 def _props(args, prefix):
     found = {}
     for arg in args:
@@ -341,8 +351,6 @@ def heap_of(options):
                 if arg.startswith(prefix):
                     heap[key] = arg[len(prefix) :][:32]
                     break
-    size = size_bytes(heap["xmx"])
-    heap["xmx_MiB"] = round(size / 1048576, 1) if size else None
     return heap, bounded
 
 
@@ -426,7 +434,9 @@ def process_of(block):
         "exe": fields.get("EXE") or None,
         "java_version": release.get("JAVA_VERSION") or None,
         "implementor": release.get("IMPLEMENTOR") or None,
-        "main": main,
+        # One string keeps 13 inventories inside a 4000-character model view.
+        "main": main_name(main),
+        "jar_path": main["name"] if main["kind"] == "jar" else None,
         "application": application_of(sysprops, appprops, main, unit),
         "profiles": [
             item.strip()[:40] for item in (profiles or "").split(",") if item.strip()
@@ -483,7 +493,9 @@ def _finding(level, key, value, threshold, hint):
 def process_findings(proc, extra):
     label = {"pid": proc["pid"], "application": proc["application"]}
     heap = proc["heap"]
-    xmx, limit = heap["xmx_MiB"], proc["cgroup_memory_limit_bytes"]
+    size = size_bytes(heap["xmx"])
+    xmx = round(size / 1048576, 1) if size else None
+    limit = proc["cgroup_memory_limit_bytes"]
     found = []
     if (
         extra.get("args_complete")

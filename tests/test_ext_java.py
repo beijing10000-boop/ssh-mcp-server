@@ -154,9 +154,10 @@ def test_java_inventory_parses_spring_boot_tomcat_and_elasticsearch():
     assert summary["java_processes"] == 3 and "processes_shown" not in summary
     rows = {row["pid"]: row for row in summary["processes"]}
     boot, tomcat, es = rows[4242], rows[5151], rows[6363]
-    assert boot["main"] == {"kind": "jar", "name": "/app/billing-service-1.4.2.jar"}
+    assert boot["main"] == "billing-service-1.4.2.jar"
+    assert boot["jar_path"] == "/app/billing-service-1.4.2.jar"
     assert boot["application"] == "billing" and boot["profiles"] == ["prod", "cn"]
-    assert boot["heap"]["xmx"] == "2g" and boot["heap"]["xmx_MiB"] == 2048.0
+    assert boot["heap"]["xmx"] == "2g" and "xmx_MiB" not in boot["heap"]
     assert boot["heap"]["xms"] == "1g" and boot["heap"]["max_metaspace"] == "256m"
     assert boot["gc"]["collector"] == "G1"
     assert boot["gc"]["gc_log"] == "/data/logs/billing/gc.log"
@@ -172,10 +173,8 @@ def test_java_inventory_parses_spring_boot_tomcat_and_elasticsearch():
     )
     assert (boot["threads"], boot["fds"], boot["fd_limit"]) == (2300, 3500, 4096)
     assert boot["system_properties_count"] == 3 and not boot["args_truncated"]
-    assert tomcat["main"] == {
-        "kind": "class",
-        "name": "org.apache.catalina.startup.Bootstrap",
-    }
+    assert tomcat["main"] == "org.apache.catalina.startup.Bootstrap"
+    assert tomcat["jar_path"] is None
     assert tomcat["application"] == "tomcat" and tomcat["unit"] == "tomcat.service"
     assert tomcat["gc"] == {
         "collector": "Parallel",
@@ -188,8 +187,11 @@ def test_java_inventory_parses_spring_boot_tomcat_and_elasticsearch():
     assert any(path.endswith("(deleted)") for path in tomcat["logs"]["open_files"])
     assert tomcat["java_version"] == "1.8.0_392" and tomcat["implementor"] is None
     assert es["user"] == "1000" and es["container"] == "9b8f6a2c1d3e"
-    assert es["main"]["kind"] == "class"
-    assert es["main"]["name"].endswith("org.elasticsearch.bootstrap.Elasticsearch")
+    # A module main keeps its module: "module/class".
+    assert es["main"] == (
+        "org.elasticsearch.server/org.elasticsearch.bootstrap.Elasticsearch"
+    )
+    assert es["jar_path"] is None
     assert es["application"] == "未识别"
     assert es["heap"]["xss"] == "1m" and es["heap"]["max_direct"] == "2147483648"
     assert es["gc"]["gc_log"] == "/usr/share/elasticsearch/logs/gc.log"
@@ -201,10 +203,13 @@ def test_java_inventory_parses_spring_boot_tomcat_and_elasticsearch():
 def test_java_findings_follow_documented_thresholds():
     findings = by_metric(java_report(JAVA_OUTPUT)["findings"])
     assert {f["value"]["pid"] for f in findings["heap_exceeds_cgroup"]} == {4242}
+    # Rows carry -Xmx as written ("2g"); findings still compare in MiB.
+    assert findings["heap_exceeds_cgroup"][0]["value"]["xmx_MiB"] == 2048.0
     threads = findings["threads_high"][0]
     assert threads["level"] == "warning" and threads["value"]["threads"] == 2300
     assert findings["fds_near_limit"][0]["value"]["fd_limit"] == 4096
     assert findings["rss_far_above_heap"][0]["level"] == "info"
+    assert findings["rss_far_above_heap"][0]["value"]["xmx_MiB"] == 2048.0
     assert findings["recent_start"][0]["value"]["elapsed_seconds"] == 300
     assert "heap_max_unset" not in findings and "many_java_processes" not in findings
     for finding in java_report(JAVA_OUTPUT)["findings"]:
@@ -280,7 +285,7 @@ def test_java_no_process_truncation_and_heap_defaults():
     assert (
         orders["heap"]["max_ram_percentage"] == 75.0 and orders["heap"]["xmx"] is None
     )
-    assert cut["args_truncated"] and cut["main"]["kind"] == "unknown"
+    assert cut["args_truncated"] and cut["main"] is None and cut["jar_path"] is None
     metrics = by_metric(truncated["findings"])
     # Neither MaxRAMPercentage nor a cut-off argv may be reported as "no -Xmx".
     assert "heap_max_unset" not in metrics
@@ -328,10 +333,11 @@ ARGS_END 10
 def test_java_options_after_dash_jar_belong_to_the_jvm():
     report = java_report(JAR_FIRST)
     (row,) = report["summary"]["processes"]
-    assert row["main"] == {"kind": "jar", "name": "/data/jar/dsp-api/dsp-api_445.jar"}
+    assert row["main"] == "dsp-api_445.jar"
+    assert row["jar_path"] == "/data/jar/dsp-api/dsp-api_445.jar"
     assert row["application"] == "dsp-api_445"
     assert (row["heap"]["xms"], row["heap"]["xmx"]) == ("256m", "1024m")
-    assert row["heap"]["xmx_MiB"] == 1024.0 and row["profiles"] == ["prod"]
+    assert row["profiles"] == ["prod"]
     assert row["gc"]["xx_flags"] == [
         "-XX:+HeapDumpOnOutOfMemoryError",
         "-XX:HeapDumpPath=/data/dump",
@@ -367,6 +373,23 @@ def test_java_options_after_dash_jar_belong_to_the_jvm():
 def test_main_of_skips_jvm_options_between_dash_jar_and_the_jar(args, main, index):
     found, at = java_ext.main_of(args)
     assert (found["kind"], found["name"], at) == (*main, index)
+
+
+@pytest.mark.parametrize(
+    ("main", "name"),
+    [
+        (
+            {"kind": "jar", "name": "/data/jar/dsp-api/dsp-api_445.jar"},
+            "dsp-api_445.jar",
+        ),
+        ({"kind": "jar", "name": "app.war"}, "app.war"),
+        ({"kind": "class", "name": "com.x.Main"}, "com.x.Main"),
+        ({"kind": "class", "name": "mod/com.x.Main"}, "mod/com.x.Main"),
+        ({"kind": "unknown", "name": None}, None),
+    ],
+)
+def test_main_is_one_string_whose_kind_stays_readable(main, name):
+    assert java_ext.main_name(main) == name
 
 
 @pytest.mark.parametrize(
