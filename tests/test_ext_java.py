@@ -900,7 +900,7 @@ def test_jvm_script_interpolates_only_the_pid_and_requested_probes():
     assert "jskip=timeout" in default and default.count("timeout -k 1 8 ") == 2
     log_only = diagnostics.command_for("jvm", options={"pid": 99, "probes": ["gc_log"]})
     assert "tail -n 40" in log_only and "GC_LOG_FOREIGN_OWNER" in log_only
-    assert "/proc/$pid/root" in log_only and 'stat -c %u "$rt$gl"' in log_only
+    assert "/proc/$pid/root" in log_only and 'stat -L -c %u "$rt$gl"' in log_only
     assert (
         "jcmd" not in log_only and "jstat" not in log_only and "runuser" not in log_only
     )

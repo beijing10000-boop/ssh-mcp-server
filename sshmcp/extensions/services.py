@@ -126,9 +126,11 @@ index($0, "users:((") {
 }"""
 # PID 1 lifecycle records of the unit: kind per line, the newest 40 lines and
 # counters over all of them (one canonical line per failure / restart). An
-# `AIOPS_RC n` line carries journalctl's exit code: when it is not 0 (124:
-# timed out) the counters are unknown, so only HCOUNT_INCOMPLETE is printed
-# and awk exits 1.
+# `AIOPS_RC n` line carries journalctl's exit code: when it is not 0 the
+# counters are unknown, so only HCOUNT_INCOMPLETE is printed. Only a timeout
+# (124, or 137 after the KILL) makes awk exit 1: an account outside the
+# journal groups gets exit 1 ("insufficient permissions"), a host limit that
+# CAPABILITY_MISSING:journal-permission already reports, not a failed run.
 HISTORY_AWK = """/^AIOPS_RC [0-9]+$/ {
     jrc = $2
     next
@@ -177,7 +179,9 @@ END {
         print "H", kind[i % 40], buf[i % 40]
     if (jrc != "" && jrc != 0) {
         print "HCOUNT_INCOMPLETE", jrc
-        exit 1
+        if (jrc == 124 || jrc == 137)
+            exit 1
+        exit 0
     }
     print "HCOUNT starts", sc + 0
     print "HCOUNT failures", fc + 0
@@ -370,7 +374,8 @@ def detail_script(options: dict) -> str:
         "printf '[AIOPS_HISTORY]\\n'",
         # PID 1's own records about the unit (and its core dumps): complete
         # for 24 h even when the service itself logs heavily. The exit code
-        # rides along: a timed-out or failed read gives no counts (and rc=1).
+        # rides along: a timed-out or failed read gives no counts, and only a
+        # timed-out one sets rc=1 (no journal access stays a host limit).
         "{ "
         + timed(
             4,

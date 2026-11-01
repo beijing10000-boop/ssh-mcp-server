@@ -561,7 +561,7 @@ def test_safe_directory_roots_and_bounded_commands():
         assert "timeout -k 1 8" in command
         assert "du -B1 -x -d 1" in command
         assert command.endswith(" -- " + root)
-    assert "ss -H -t -a -n" in diagnostics.command_for("peer_connections")
+    assert "ss -t -a -n | awk" in diagnostics.command_for("peer_connections")
     assert "sleep 3" in diagnostics.command_for("peer_traffic")
     for invalid in (
         "/etc/shadow",
@@ -720,7 +720,7 @@ def test_remote_connection_awk_pipeline_on_fixture():
     import subprocess
 
     source = diagnostics.PEER_CONNECTIONS_CMD
-    script = source[source.index("ss -H -t -a -n | awk") :]
+    script = source[source.index("ss -t -a -n | awk") :]
     scripted_input = (
         "printf '%s\\n' "
         "'ESTAB 0 0 10.0.0.10:80 172.20.1.3:55000' "
@@ -728,7 +728,7 @@ def test_remote_connection_awk_pipeline_on_fixture():
         "'CLOSE-WAIT 0 0 [::1]:80 [fd00::12]:5555' "
         "'ESTAB 0 0 10.0.0.10:80 172.20.1.4:55002'"
     )
-    script = script.replace("ss -H -t -a -n", scripted_input)
+    script = script.replace("ss -t -a -n", scripted_input)
     proc = subprocess.run(
         ["/bin/sh", "-c", script], capture_output=True, text=True, timeout=5
     )
@@ -750,7 +750,7 @@ def test_remote_tcp_sampler_awk_on_fixture_without_ssh():
         "'ESTAB 0 0 10.0.0.10:443 172.20.1.3:55000' "
         "'    cubic bytes_sent:1500 bytes_received:900 rto:200'"
     )
-    script = script.replace("ss -H -t -n -i state established", fixture).replace(
+    script = script.replace("ss -t -n -i state established", fixture).replace(
         "sleep 3", "true"
     )
     proc = subprocess.run(
