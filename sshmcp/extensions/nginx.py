@@ -532,10 +532,15 @@ opt() {
 # without a discovered binary the master's own is used (how=" running"); when it
 # is the discovered one, its absolute -p/-c (mpfx/mconf, else empty) drive
 # nginx -T and the relative paths, so both actions follow the serving instance.
-_MASTER = r"""
+# ps reads every /proc/<pid>/cmdline, which stalls on a process stuck in D
+# state: bounded like every other command that may hang.
+_MASTER = (
+    r"""
 margs=''
 if command -v ps >/dev/null 2>&1; then
-  margs=$(ps -eo args= 2>/dev/null | awk '$1 ~ /^(nginx|openresty|tengine):$/ && $2 == "master" {print; exit}')
+  margs=$( { """
+    + timed(3, "ps -eo args=")
+    + r"""; } 2>/dev/null | awk '$1 ~ /^(nginx|openresty|tengine):$/ && $2 == "master" {print; exit}')
 fi
 mbin=$(printf '%s\n' "$margs" | awk '{print $4}')
 mpfx=$(printf '%s\n' "$margs" | awk '{for (i = 5; i < NF; i++) if ($i == "-p") {print $(i + 1); exit}}')
@@ -560,6 +565,7 @@ else
   mconf=''
 fi
 """
+)
 
 NGINX_TEMPLATE = (
     r"""
@@ -1065,7 +1071,8 @@ ERROR_LEVELS = ("error", "crit", "alert", "emerg")
 
 
 def redact_log(value: str) -> str:
-    """Second redaction layer for evidence lines (nginx here, syslog entries).
+    """Second redaction layer for nginx evidence lines (syslog has its own,
+    syslog.redact_line, without the broad key rule).
 
     The shared rules (secrets, pwd/pass, session cookies, Authorization, phone
     and ID-card numbers) are the executor's redact_output, which already ran

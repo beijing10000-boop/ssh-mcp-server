@@ -11,7 +11,10 @@ the client before anything runs, and background re-checks do the same.
 
 ``timeout_seconds`` bounds the whole call (slot wait plus run, see
 ``diagnostics.execute``) and gives every step its own timeout; without it a
-collection runs as before, up to 120 s after up to 30 s of waiting.
+collection runs as before, up to 120 s after up to 30 s of waiting. A step's
+own inner ``timeout`` (``timeout -k 1 N cmd`` in its fixed script) runs its
+command in a process group of its own, so when the per-step timeout ends the
+step, that child may keep running until its own limit.
 """
 
 from __future__ import annotations

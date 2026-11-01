@@ -1,9 +1,10 @@
 """Regressions for the 2026-11 audit of the diagnostics core.
 
 SSH-DIAG-01..09, SSH-CORE-01 and the redact_output part of SSH-NGX-01: GC log
-reads never follow symlinks, single-state ss output, comm names with spaces,
-collect status / time bounds, redaction gaps, service_detail unknowns, restart
-loop and OOM rules, and a long stderr that must not cut stdout short.
+reads never follow a container's symlinks, single-state ss output, comm names
+with spaces, collect status / time bounds, redaction gaps, service_detail
+unknowns, restart loop and OOM rules, and a long stderr that must not cut
+stdout short.
 """
 
 import json
@@ -122,7 +123,7 @@ def fake_ssh(monkeypatch, chan):
 
     monkeypatch.setattr(store, "get_host", lambda hid: host)
     monkeypatch.setattr(diagnostics, "private_key", lambda cid: object())
-    monkeypatch.setattr(diagnostics, "_route", lambda host: (None, None))
+    monkeypatch.setattr(diagnostics, "_route", lambda host, **_: (None, None))
     monkeypatch.setattr(diagnostics, "client_connect", connect)
     return seen
 
@@ -668,10 +669,13 @@ def gc_filter():
     return script.split("2>/dev/null | awk '", 1)[1].split("'\n", 1)[0]
 
 
-def test_gc_log_probe_never_follows_symlinks():
+def test_gc_log_probe_refuses_symlinks_outside_our_root():
+    # Symlinks only for a JVM sharing our root; a container's are refused
+    # (test_audit_followup runs both cases).
     script = java_ext.PROBE_SCRIPTS["gc_log"]
     assert '[ -L "$rt$gq" ]' in script and "gq=${gq%/*}" in script
-    assert "cut -c1-300" not in script and "| awk '/^[[]/" in script
+    assert 'while [ -z "$same" ]' in script and "GC_LOG_SYMLINK" in script
+    assert "cut -c1-300" not in script and "| awk 'NR == 1 {" in script
     assert "runuser" not in script and "jcmd" not in script
 
 
@@ -705,7 +709,11 @@ def test_gc_log_probe_prints_only_gc_shaped_lines():
 
 
 @needs_linux
-def test_gc_log_probe_refuses_symlinked_files_and_directories(tmp_path):
+def test_gc_log_probe_on_our_root_follows_symlinks_and_prints_only_gc_lines(
+    tmp_path,
+):
+    # The fake JVM shares our root: links are followed (the file is the JVM
+    # user's own), and only GC-shaped lines ever come out.
     from test_ext_java import run_sh, spawn_java
 
     secret = tmp_path / "secret.txt"
@@ -719,10 +727,11 @@ def test_gc_log_probe_refuses_symlinked_files_and_directories(tmp_path):
     (tmp_path / "logs").mkdir()
     (tmp_path / "logs" / "gc.log").symlink_to(secret)
     (tmp_path / "linkdir").symlink_to(real)
-    for target, expected in (
-        (tmp_path / "logs" / "gc.log", "unreadable"),
-        (tmp_path / "linkdir" / "gc.log", "unreadable"),
-        (real / "gc.log", "ok"),
+    gc_line = "[5.000s][info][gc] GC(1) Pause Full (System.gc()) 10M->2M(256M) 15.000ms"
+    for target, lines in (
+        (tmp_path / "logs" / "gc.log", []),
+        (tmp_path / "linkdir" / "gc.log", [gc_line]),
+        (real / "gc.log", [gc_line]),
     ):
         proc = spawn_java(tmp_path, "-Xloggc:" + str(target))
         options = {"pid": proc.pid, "probes": ["gc_log"]}
@@ -733,11 +742,9 @@ def test_gc_log_probe_refuses_symlinked_files_and_directories(tmp_path):
             proc.wait()
         assert "Hunter" not in result.stdout, (target, result.stdout)
         summary = observations.analyze("jvm", result.stdout, options=options)["summary"]
-        assert summary["probes"] == {"gc_log": expected}, (target, result.stdout)
+        assert summary["probes"] == {"gc_log": "ok"}, (target, result.stdout)
+        assert summary["gc_log"]["lines"] == lines, (target, result.stdout)
     assert summary["gc_log"]["full_pauses"] == 1
-    assert summary["gc_log"]["lines"] == [
-        "[5.000s][info][gc] GC(1) Pause Full (System.gc()) 10M->2M(256M) 15.000ms"
-    ]
 
 
 @needs_sh

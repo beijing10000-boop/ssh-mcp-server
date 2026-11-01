@@ -615,7 +615,7 @@ def test_timeout_keeps_partial_output_and_benign_stderr_stays_success(monkeypatc
     }
     monkeypatch.setattr(store, "get_host", lambda hid: host)
     monkeypatch.setattr(diagnostics, "private_key", lambda cid: object())
-    monkeypatch.setattr(diagnostics, "_route", lambda host: (None, None))
+    monkeypatch.setattr(diagnostics, "_route", lambda host, **_: (None, None))
     chan = Chan(b"", b"df: /run/user/1000/gvfs: Permission denied\n")
     chan.out = b"Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda 100 50 50 50% /\n"
     monkeypatch.setattr(diagnostics, "client_connect", lambda *a, **k: Client(chan))

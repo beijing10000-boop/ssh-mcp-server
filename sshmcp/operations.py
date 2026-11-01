@@ -27,10 +27,13 @@ SCRIPTS = {
         'code=$?; [ "$code" = 0 ] || exit "$code"; '
         "if command -v chronyc >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then timeout -k 1 5 chronyc tracking; fi"
     ),
+    # No `ss -H` (iproute2 4.11 on EL7 lacks it): awk skips the header line.
     "tcp_states": (
         "if ! command -v ss >/dev/null 2>&1; then printf 'CAPABILITY_MISSING:ss\\n'; exit 69; fi; "
-        'rows=$(ss -H -tan); code=$?; [ "$code" = 0 ] || exit "$code"; '
-        "printf '%s\\n' \"$rows\" | awk 'NF>=5 {states[$1]++} END {for (s in states) print s,states[s]}' | sort"
+        'rows=$(ss -tan); code=$?; [ "$code" = 0 ] || exit "$code"; '
+        "printf '%s\\n' \"$rows\" | awk '"
+        'NR==1 && ($1=="State" || $1=="Recv-Q" || $1=="Netid") {next} '
+        "NF>=5 {states[$1]++} END {for (s in states) print s,states[s]}' | sort"
     ),
     "service_inventory": (
         "if ! command -v systemctl >/dev/null 2>&1; then printf 'CAPABILITY_MISSING:systemctl\\n'; exit 69; fi; "

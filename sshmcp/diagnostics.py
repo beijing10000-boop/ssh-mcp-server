@@ -114,12 +114,16 @@ ACTIONS = {
 ACTIONS.update(operations.SCRIPTS)
 
 # Static scripts only: no user-provided IP, shell, or filesystem path enters awk.
+# No `ss -H`: iproute2 4.11 (EL7) lacks it. The awk skips the header instead,
+# a first line starting with State (Recv-Q when one state is selected, Netid
+# with several socket tables), so newer iproute2 gives the same output.
 PEER_CONNECTIONS_CMD = r"""
 if ! command -v ss >/dev/null 2>&1; then
   printf 'CAPABILITY_MISSING:ss\n'
   exit 69
 fi
-ss -H -t -a -n | awk '
+ss -t -a -n | awk '
+  NR == 1 && ($1 == "State" || $1 == "Recv-Q" || $1 == "Netid") { next }
   NF >= 5 {
     peer=$5
     if (substr(peer,1,1)=="[") {
@@ -142,11 +146,12 @@ fi
 # With one state selected ss prints no State column: socket lines start with
 # Recv-Q and Send-Q. ESTAB-first lines are kept for any ss that still prints it.
 capture_peers() {
-  ss -H -t -n -i state established | awk '
+  ss -t -n -i state established | awk '
     function emit() {
       if (local!="" && peer!="" && sent!="" && received!="")
         print local "\t" peer "\t" sent "\t" received
     }
+    NR==1 && ($1=="State" || $1=="Recv-Q" || $1=="Netid") { next }
     $1=="ESTAB" || ($1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/) {
       emit()
       if ($1=="ESTAB") { local=$4; peer=$5 } else { local=$3; peer=$4 }
@@ -225,12 +230,32 @@ ARG_SECRET_NEXT = re.compile(
     + ARG_KEY
     + r"[^\s=:]*[ \t]*\nARG[ \t]+)(?!-)[^\n]+"
 )
-# Client passwords on a command line (cron and unit lines carry them as is):
-# mysql/mariadb -pSECRET (attached to the option) and redis-cli -a SECRET.
+# Client passwords on a command line (cron, unit and ps lines carry them as
+# is), also as the first option (mysql -pSECRET db): the mysql/mariadb
+# clients' -pSECRET (attached: "-p x" prompts and selects database x; mysqld
+# and mysql-proxy take no password), redis-cli -a SECRET, sshpass -p SECRET
+# (among sshpass's own options only: the -p of the ssh it runs is a port),
+# mongo/mongosh and the mongo tools -p SECRET, docker/podman login -p SECRET.
+# Their --password SECRET is FLAG_SECRETS' case. The mongo and docker option
+# is looked for in the same command only (not past ";" or "|", for docker not
+# past "&" either).
 CLIENT_PASSWORDS = re.compile(
-    r"((?<![\w.-])(?:mysql|mariadb)[\w-]*[ \t][^\n]*?[ \t]-p"
-    r"|(?<![\w.-])redis-cli[ \t][^\n]*?[ \t]-a[ \t]+)"
+    r"((?<![\w.-])(?:mysql|mariadb)"
+    r"(?:[-_]?(?:dump|admin|import|show|check|slap|binlog|pump|upgrade)|sh)?"
+    r"(?:[ \t][^\n]*?)??[ \t]-p"
+    r"|(?<![\w.-])redis-cli(?:[ \t][^\n]*?)??[ \t]-a[ \t]+"
+    r"|(?<![\w.-])sshpass(?:[ \t]+-(?:[ehvV]|[dfP][ \t]*\S+))*[ \t]+-p[ \t]*"
+    r"|(?<![\w.-])mongo(?:sh|dump|restore|export|import|stat|top|files)?"
+    r"(?:[ \t][^\n;|]*?)??[ \t]-p[ \t]*"
+    r"|(?<![\w.-])(?:docker|podman)[ \t]+login(?:[ \t][^\n;&|]*?)??[ \t]-p[ \t]*)"
     r"(?=[^\s-])(?:'[^'\n]*'|\"[^\"\n]*\"|\S+)"
+)
+# curl -u / --user (and -U / --proxy-user) user:SECRET: the user stays, the
+# password goes, up to the closing quote when the value is quoted.
+CURL_USER = re.compile(
+    r"((?<![\w.-])curl(?:[ \t][^\n;|]*?)??[ \t]"
+    r"(?:-[uU][ \t]*|--(?:proxy-)?user[ \t]+)(?:(')|(\"))?[^\s'\":]*:)"
+    r"(?(2)[^'\n]+|(?(3)[^\"\n]+|[^\s'\"]+))"
 )
 # Personal data in log text, masked as the log MCP masks it (138****8000,
 # 110101********1234). A mobile number counts only where a machine counter
@@ -241,8 +266,15 @@ PHONE = re.compile(
     r"(?:(?<=[/\"'(\[<>,;&#|])|(?<=[^\x00-\x7f])|(?<=\+86)|(?<=\+86[ -]))"
     r"(1[3-9][0-9])[0-9]{4}([0-9]{4})(?![0-9A-Za-z])"
 )
+# "tel" is a key word only where a part of the name begins (after a
+# non-letter, or as the camelCase hump of userTel) and when it stands alone
+# (tel, tel_no, telNo, telephone, telphone): intel_*, hotel* and telemetry_*
+# hold counters, not phone numbers.
 PHONE_KEY = re.compile(
-    r"(?i)((?:phone|mobile|msisdn|tel|手机|电话)[\w.-]*[\"']?[ \t]*[:=][ \t]*[\"']?)"
+    r"((?:(?i:phone|mobile|msisdn)|手机|电话"
+    r"|(?:(?<![A-Za-z0-9])|(?<=[a-z0-9])(?=T))"
+    r"(?:[Tt]el(?:e?phone)?(?![a-z])|TEL(?:E?PHONE)?(?![A-Za-z])))"
+    r"[\w.-]*[\"']?[ \t]*[:=][ \t]*[\"']?)"
     r"(1[3-9][0-9])[0-9]{4}([0-9]{4})(?![0-9A-Za-z])"
 )
 # 18-digit resident ID numbers: region, birth date (19xx/20xx), sequence, check.
@@ -267,6 +299,7 @@ def redact_output(text: str) -> str:
     text = ARG_SECRET_VALUE.sub(r"\1[REDACTED]", text)
     text = ARG_SECRET_NEXT.sub(r"\1[REDACTED]", text)
     text = CLIENT_PASSWORDS.sub(r"\1[REDACTED]", text)
+    text = CURL_USER.sub(r"\1[REDACTED]", text)
     text = ID_CARD.sub(r"\1********\2", text)
     text = PHONE_KEY.sub(r"\1\2****\3", text)
     return PHONE.sub(r"\1****\2", text)
@@ -470,18 +503,22 @@ def client_connect(target: dict, key, *, sock=None, timeout=6):
         raise
 
 
-def _route(host: dict):
+def _route(host: dict, timeout=6):
+    """(jump client, tunnel) through the host's jump host, or (None, None);
+    each stage of the jump (TCP, banner, auth, channel) waits up to ``timeout``."""
     proxy = store.get_proxy(host.get("proxy_id"))
     jump = None
     tunnel = None
     if proxy:
-        jump = client_connect(proxy, private_key(proxy["credential_id"]))
+        jump = client_connect(
+            proxy, private_key(proxy["credential_id"]), timeout=timeout
+        )
         try:
             tunnel = jump.get_transport().open_channel(
                 "direct-tcpip",
                 (host["address"], int(host["port"])),
                 ("127.0.0.1", 0),
-                timeout=6,
+                timeout=timeout,
             )
         except Exception:
             jump.close()
@@ -600,13 +637,14 @@ def _execute_inner(
     began = time.monotonic()
     jump = client = chan = None
     try:
-        jump, tunnel = _route(host)
-        # Within a caller's bound the handshake stages share what is left.
+        # Within a caller's bound the handshake stages share what is left,
+        # the jump host's connect and channel included.
         stage = (
             6
             if finish_by is None
             else max(1.0, min(6.0, (finish_by - time.monotonic()) / 5))
         )
+        jump, tunnel = _route(host, timeout=stage)
         client = client_connect(
             host, private_key(host["credential_id"]), sock=tunnel, timeout=stage
         )

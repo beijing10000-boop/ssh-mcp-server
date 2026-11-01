@@ -37,8 +37,7 @@ from . import (
     timed,
     unit_name,
 )
-from ..observations import LOG_PATTERNS, metric, section
-from .nginx import redact_log
+from ..observations import LOG_KINDS, LOG_PATTERNS, metric, section
 
 PRIORITIES = ("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug")
 # Level counts (journalctl -p FROM..TO); a range runs when the requested
@@ -53,25 +52,13 @@ LINE_CHARS = 240
 # Bytes of log lines per source so the whole output stays near 24 KiB.
 JOURNAL_BUDGET = 16000
 SHARED_BUDGETS = (6000, 9000)  # journal, file: both sources are read
-# POSIX ERE equivalents of observations.LOG_PATTERNS (matched against the
-# lower-cased line on the host), so the classification spans the whole window.
-# The kinds pass reads info lines too, so no pattern may match routine info
-# messages: "NIC Link is Up" (link-down lines all say "link is down"/"link
-# down"), the boot-time "NMI watchdog: Enabled" (a real one reports a hard
-# LOCKUP) and application "DEBUG: x" lines: only the kernel's "BUG: <what>"
-# (after a non-letter; every line starts with its time stamp) and "kernel BUG
-# at <file>" count, as observations.LOG_PATTERNS has it.
-AWK_PATTERNS = {
-    "oom": "oom[- ]kill|out of memory|killed process",
-    "io_error": "i/o error|blk_update_request|ext4-fs error|xfs_|buffer i/o"
-    "|read-only file system|remounting|medium error",
-    "network": "link is down|link down|carrier lost|no carrier",
-    "service": "failed to start|failed with result|start request repeated too quickly"
-    "|main process exited|entered failed state",
-    "kernel": "segfault|soft lockup|hung_task|hung task|hard lockup"
-    "|general protection|call trace|kernel bug at|[^a-z]bug: ",
-    "auth": "failed password|authentication failure|invalid user|possible break-in",
-}
+# The POSIX EREs behind observations.LOG_PATTERNS, matched against the
+# lower-cased line on the host so the classification spans the whole window;
+# parse() re-classifies the returned entries with LOG_PATTERNS, the same
+# expressions, so a routine info line (NIC Link is Up, NMI watchdog: Enabled,
+# DEBUG:) counts on neither side (every line starts with its time stamp, so
+# "[^a-z]bug: " sees the kernel's "BUG: " after a space).
+AWK_PATTERNS = dict(LOG_KINDS)
 KINDS = tuple(AWK_PATTERNS)
 # Any classified line (grep -i -E on the host): the journal kinds pass, which
 # ignores the requested priority, hands only these lines to awk.
@@ -357,6 +344,32 @@ COUNT_AWK = (
     "/^AIOPS_RC [0-9]+$/ { rc = $2; next } /^[0-9]/ { n++ } END { print n + 0, rc + 0 }"
 )
 
+# A Basic/Bearer credential standing alone in a log line ("proxy sent Basic
+# dXNlcjpw..."): a token of 8 or more characters holding a digit, "=", "+",
+# "/" or both upper and lower case, so "Basic authentication succeeded"
+# stays as it is.
+BARE_CREDENTIAL = re.compile(r"(?i:\b(basic|bearer))([ \t]+)([A-Za-z0-9._~+/=-]{8,})")
+
+
+def _credential(token: str) -> bool:
+    return re.search(r"[0-9=+/]", token) is not None or (
+        token != token.lower() and token != token.upper()
+    )
+
+
+def redact_line(value: str) -> str:
+    """Log text on its way to the model: the shared rules of the executor's
+    diagnostics.redact_output (applied again, so the parser is safe on any
+    text) plus bare Basic/Bearer credentials. Not nginx's broad "key" rule:
+    "Could not load host key: /etc/ssh/...", "key_load_public: invalid
+    format", redis "keys: 123456" and auditd key="privileged" stay readable."""
+    from ..diagnostics import redact_output  # diagnostics imports extensions
+
+    return BARE_CREDENTIAL.sub(
+        lambda m: m[1] + m[2] + "[REDACTED]" if _credential(m[3]) else m[0],
+        redact_output(value),
+    )
+
 
 def script(options: dict) -> str:
     since, until = resolve_window(options)
@@ -584,7 +597,7 @@ def _block(body: str) -> dict:
         elif m := re.fullmatch(r"MATCHLINE (\w+) (.*)", line):
             if m[1] in KINDS and m[2].strip():
                 data["samples"].setdefault(m[1], []).append(
-                    redact_log(m[2])[:LINE_CHARS]
+                    redact_line(m[2])[:LINE_CHARS]
                 )
         elif m := re.fullmatch(
             r"COUNT (crit|err|warning) (\d{1,12})(?: (\d{1,5}))?", line
@@ -611,8 +624,8 @@ def _block(body: str) -> dict:
         elif m := re.fullmatch(r"CAPABILITY_MISSING:([\w-]+)", line):
             data["capabilities"].add(m[1])
         else:
-            # Log text goes to the model: the log-line redaction nginx uses too.
-            data["entries"].append(redact_log(line)[:LINE_CHARS])
+            # Log text goes to the model: redacted again (redact_line).
+            data["entries"].append(redact_line(line)[:LINE_CHARS])
     return data
 
 
