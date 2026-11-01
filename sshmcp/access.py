@@ -3,7 +3,10 @@
 from contextvars import ContextVar
 import hashlib
 import json
+import logging
 import secrets
+import sqlite3
+import threading
 import time
 import uuid
 
@@ -15,7 +18,15 @@ from .auth import admin
 from .catalog import RECOMMENDED, TITLES, entries
 
 router = APIRouter(prefix="/api/v1")
+log = logging.getLogger(__name__)
 principal = ContextVar("mcp_principal", default=None)
+# mcp_clients.last_used_at only informs the console: it is written at most
+# once a minute per client, waiting at most a second for a locked database
+# (and then skipped), so authenticating an MCP request is a read.
+LAST_USED_INTERVAL = 60
+LAST_USED_WAIT = 1
+_last_used = {}
+_last_used_lock = threading.Lock()
 
 
 def legacy_enabled():
@@ -42,17 +53,34 @@ def authenticate(authorization):
             "SELECT * FROM mcp_clients WHERE token_hash=? AND enabled=1 AND expires_at>?",
             (digest, int(time.time())),
         ).fetchone()
-        if not row:
-            raise HTTPException(401, "MCP 令牌无效、已过期或已撤销")
-        c.execute(
-            "UPDATE mcp_clients SET last_used_at=CURRENT_TIMESTAMP WHERE id=?",
-            (row["id"],),
-        )
+    if not row:
+        raise HTTPException(401, "MCP 令牌无效、已过期或已撤销")
+    _touch(row["id"])
     data = dict(row)
     data.pop("token_hash")
     data["actions"] = json.loads(data["actions"])
     data["group_ids"] = json.loads(data["group_ids"])
     return data
+
+
+def _touch(client_id):
+    """Record the client's last use, throttled and best effort."""
+    now = time.monotonic()
+    with _last_used_lock:
+        last = _last_used.get(client_id)
+        if last is not None and now - last < LAST_USED_INTERVAL:
+            return
+        _last_used[client_id] = now
+    try:
+        with store.db(timeout=LAST_USED_WAIT) as c:
+            c.execute(
+                "UPDATE mcp_clients SET last_used_at=CURRENT_TIMESTAMP WHERE id=?",
+                (client_id,),
+            )
+    except sqlite3.OperationalError as exc:
+        # A long write (VACUUM, a large job batch) holds the database: the
+        # request goes on, the next interval writes the time.
+        log.debug("last_used_at of %s not written: %s", client_id, exc)
 
 
 def identity():

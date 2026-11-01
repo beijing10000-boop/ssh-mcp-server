@@ -8,6 +8,9 @@ services:
     environment:
       DATA_DIR: /app/data
       TZ: Asia/Shanghai
+      # HTTPS reverse proxy in front: its address as the container sees it
+      # (docs/INSTALLATION.md). Empty: Origin checked against the request only.
+      SSHMCP_TRUSTED_PROXIES: ${SSHMCP_TRUSTED_PROXIES:-}
     volumes:
       - ssh_mcp_data:/app/data
     healthcheck:

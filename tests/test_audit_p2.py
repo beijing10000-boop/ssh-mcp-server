@@ -3,23 +3,39 @@
 Unknown counts are null, not 0 (SSH-DIAG-12); time_sync works without
 `timedatectl show` (SSH-DIAG-16); unhealthy containers are reported
 (SSH-DIAG-17); the jvm probe's side effects are written down (SSH-DIAG-15);
-nginx_access finds request_time through the log_format (SSH-NGX-06).
+nginx_access finds request_time through the log_format (SSH-NGX-06); MCP
+authentication is a read off the event loop (SSH-CORE-02); SSH tools have a
+pool of their own (SSH-CORE-03); a client that leaves frees its slot
+(SSH-CORE-04); the Origin check follows a trusted proxy (SSH-CORE-10).
 
-Parser and awk tests run everywhere awk is installed; the script runs need
-/bin/sh (dash on CI). The EL7 run of time_sync is in test_audit_followup.py
-(-k el7).
+Parser, API and awk tests run everywhere awk is installed; the script runs
+need /bin/sh (dash on CI). The EL7 run of time_sync is in
+test_audit_followup.py (-k el7).
 """
 
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
+import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import tempfile
+import threading
+import time
 
+import anyio
 import pytest
+from fastapi.testclient import TestClient
+from starlette.requests import Request
 
-from sshmcp import catalog, diagnostics, mcp_tools, observations, operations
+from sshmcp import access, auth, catalog, diagnostics, jobs, mcp_tools, store
+from sshmcp import observations, operations
 from sshmcp.extensions import nginx
+from sshmcp.main import app
+from test_console import mcp_call, ready_host
+from test_core import auth as csrf
 
 HAS_SH = os.path.exists("/bin/sh")
 needs_sh = pytest.mark.skipif(not HAS_SH, reason="needs /bin/sh")
@@ -538,3 +554,338 @@ def test_access_script_reads_the_layout_of_a_given_path(tmp_path, monkeypatch):
     # combined lines are read at their position, JSON lines by key, and the
     # one line with an extra quoted field is guessed.
     assert sources and int(sources[1]) > 0 and int(sources[3]) == 1, out
+
+
+# --------------------------------- SSH-CORE-02: authentication is a read ----
+
+
+def new_client(client, name="p2-client", actions=("cpu",)):
+    created = client.post(
+        "/api/v1/mcp/clients",
+        headers=csrf(),
+        json={"name": name, "all_hosts": True, "actions": list(actions)},
+    ).json()
+    return created["id"], created["token"]
+
+
+def last_used(ident):
+    with store.db() as c:
+        return c.execute(
+            "SELECT last_used_at FROM mcp_clients WHERE id=?", (ident,)
+        ).fetchone()[0]
+
+
+def test_mcp_authentication_runs_off_the_event_loop(client, monkeypatch):
+    _, token = new_client(client)
+    seen = []
+    original = access.authenticate
+
+    def observed(authorization):
+        try:
+            asyncio.get_running_loop()
+            seen.append("event loop")
+        except RuntimeError:
+            seen.append("worker thread")
+        return original(authorization)
+
+    monkeypatch.setattr(access, "authenticate", observed)
+    status, result = mcp_call(client, token, "ssh_list_groups")
+    assert status == 200 and seen == ["worker thread"], (seen, result)
+
+
+def test_last_used_is_written_at_most_once_a_minute(client, monkeypatch):
+    ident, token = new_client(client)
+    access._last_used.pop(ident, None)
+    access.authenticate("Bearer " + token)
+    assert last_used(ident) is not None
+    with store.db() as c:
+        c.execute(
+            "UPDATE mcp_clients SET last_used_at='2000-01-01' WHERE id=?", (ident,)
+        )
+    access.authenticate("Bearer " + token)
+    assert last_used(ident) == "2000-01-01"  # not a write per request
+    monkeypatch.setattr(access, "LAST_USED_INTERVAL", 0)
+    access.authenticate("Bearer " + token)
+    assert last_used(ident) != "2000-01-01"
+
+
+def test_a_locked_database_does_not_fail_authentication(client):
+    ident, token = new_client(client)
+    access._last_used.pop(ident, None)
+    holder = sqlite3.connect(str(store.DATA_DIR / "ssh-mcp.sqlite3"), timeout=1)
+    try:
+        holder.execute("BEGIN IMMEDIATE")  # e.g. VACUUM or a 100-host batch
+        started = time.monotonic()
+        who = access.authenticate("Bearer " + token)
+        took = time.monotonic() - started
+    finally:
+        holder.rollback()
+        holder.close()
+    assert who["id"] == ident and took < 5, took
+    assert last_used(ident) is None  # skipped, written at the next interval
+
+
+# ------------------------------ SSH-CORE-03: SSH tools have their own pool --
+
+
+def test_ssh_tools_run_in_their_own_pool(client, key_pair, monkeypatch):
+    hid = ready_host(client, key_pair)
+    threads = {}
+
+    def inline(*args, **kwargs):
+        threads["ssh"] = threading.current_thread().name
+        return {"status": "success", "summary": {}, "findings": []}
+
+    def catalog_entries():
+        threads["catalog"] = threading.current_thread().name
+        return []
+
+    monkeypatch.setattr(jobs, "run_inline", inline)
+    monkeypatch.setattr(mcp_tools, "entries", catalog_entries)
+    token = store.token("mcp.token")
+    assert mcp_call(client, token, "ssh_diagnose_cpu", {"host_id": hid})[0] == 200
+    assert mcp_call(client, token, "ssh_list_tool_catalog")[0] == 200
+    assert threads["ssh"].startswith("ssh-inline"), threads
+    assert not threads["catalog"].startswith("ssh-inline"), threads
+
+
+def test_time_queued_for_a_thread_counts_toward_the_slot_wait(monkeypatch):
+    monkeypatch.setattr(
+        diagnostics, "_execute_inner", lambda *a, **k: pytest.fail("not its turn")
+    )
+    # Accepted 30 s ago, all of it queued for a thread of the pool.
+    token = diagnostics.CALL_ACCEPTED_AT.set(
+        time.monotonic() - diagnostics.INLINE_WAIT_SECONDS
+    )
+    with diagnostics._SLOTS:
+        diagnostics._ACTIVE_HOSTS.add(9)  # the host is busy
+    try:
+        started = time.monotonic()
+        with pytest.raises(diagnostics.SSHDiagnosticError, match="繁忙"):
+            diagnostics.execute(9, "cpu")
+        assert time.monotonic() - started < 3  # not another 30 s
+    finally:
+        diagnostics.CALL_ACCEPTED_AT.reset(token)
+        with diagnostics._SLOTS:
+            diagnostics._ACTIVE_HOSTS.discard(9)
+            diagnostics._SLOTS.notify_all()
+
+
+def test_light_tools_answer_while_ssh_calls_fill_every_thread(
+    client, key_pair, monkeypatch
+):
+    hid = ready_host(client, key_pair)
+    token = store.token("mcp.token")
+    release, entered = threading.Event(), []
+
+    def slow(*args, **kwargs):
+        entered.append(1)
+        release.wait(60)
+        return {"status": "success", "summary": {}, "findings": []}
+
+    monkeypatch.setattr(jobs, "run_inline", slow)
+    # More waiting SSH calls than asyncio's default pool has threads.
+    calls = min(32, (os.cpu_count() or 1) + 4) + 2
+    with ThreadPoolExecutor(max_workers=calls + 2) as pool:
+        try:
+            blocked = [
+                pool.submit(
+                    mcp_call, client, token, "ssh_diagnose_cpu", {"host_id": hid}
+                )
+                for _ in range(calls)
+            ]
+            for _ in range(200):
+                if len(entered) >= mcp_tools.INLINE_WORKERS:
+                    break
+                time.sleep(0.05)
+            catalog_call = pool.submit(mcp_call, client, token, "ssh_list_tool_catalog")
+            status, result = catalog_call.result(timeout=10)
+            assert status == 200 and result["result"], result
+        finally:
+            release.set()
+        assert all(task.result(timeout=60)[0] == 200 for task in blocked)
+
+
+# ------------------------- SSH-CORE-04: a client that leaves frees its slot --
+
+
+def mcp_scope(token, body):
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/mcp",
+        "raw_path": b"/mcp",
+        "root_path": "",
+        "query_string": b"",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"authorization", ("Bearer " + token).encode()),
+            (b"content-type", b"application/json"),
+            (b"accept", b"application/json, text/event-stream"),
+            (b"content-length", str(len(body)).encode()),
+        ],
+        "client": ("127.0.0.1", 50000),
+        "server": ("testserver", 80),
+    }
+
+
+def test_client_leaving_while_waiting_for_the_slot_gives_up(
+    client, key_pair, monkeypatch
+):
+    hid = ready_host(client, key_pair)
+    token = store.token("mcp.token")
+    monkeypatch.setattr(
+        diagnostics,
+        "_execute_inner",
+        lambda *a, **k: pytest.fail("a call whose client left reached SSH"),
+    )
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "ssh_diagnose_cpu", "arguments": {"host_id": hid}},
+        }
+    ).encode()
+    pending = [{"type": "http.request", "body": body, "more_body": False}]
+    sent = []
+
+    async def receive():
+        if pending:
+            return pending.pop()
+        await anyio.sleep(0.5)  # the client gives up while the call waits
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+
+    async def call():
+        await app(mcp_scope(token, body), receive, send)
+
+    with diagnostics._SLOTS:
+        diagnostics._ACTIVE_HOSTS.add(hid)  # another diagnostic holds the host
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            started = time.monotonic()
+            pool.submit(client.portal.call, call).result(timeout=10)
+            took = time.monotonic() - started
+    finally:
+        with diagnostics._SLOTS:
+            diagnostics._ACTIVE_HOSTS.discard(hid)
+            diagnostics._SLOTS.notify_all()
+    # Well within the 30 s slot wait: it gave up instead of holding on.
+    assert took < 8, took
+    with store.db() as c:
+        job = c.execute(
+            "SELECT status,error FROM diagnostic_jobs WHERE host_id=?", (hid,)
+        ).fetchone()
+    assert tuple(job) == ("cancelled", diagnostics.CALLER_GONE_ERROR)
+
+
+def test_running_ssh_read_stops_when_the_client_leaves(monkeypatch):
+    captured = {}
+
+    def inner(host_id, action, *args, cancelled, **kwargs):
+        captured["before"] = cancelled()
+        gone.set()  # the client disconnects while the output is read
+        captured["after"] = cancelled()
+        return {"status": "success"}
+
+    monkeypatch.setattr(diagnostics, "_execute_inner", inner)
+    gone = threading.Event()
+    token = diagnostics.CALLER_GONE.set(gone)
+    try:
+        diagnostics.execute(7, "cpu", cancelled=lambda: False)
+    finally:
+        diagnostics.CALLER_GONE.reset(token)
+    assert captured == {"before": False, "after": True}
+    # Background jobs carry no event: only their own cancel flag counts.
+    diagnostics.execute(7, "cpu", cancelled=lambda: False)
+    assert captured == {"before": False, "after": False}
+
+
+def test_a_queued_call_whose_client_left_does_not_start():
+    gone = threading.Event()
+    gone.set()
+    token = diagnostics.CALLER_GONE.set(gone)
+    try:
+        result = asyncio.run(
+            mcp_tools.run_inline_tool(
+                lambda: pytest.fail("started after the client left")
+            )
+        )
+    finally:
+        diagnostics.CALLER_GONE.reset(token)
+    assert result["status"] == "cancelled" and result["error_code"] == "cancelled"
+
+
+# ------------------------------- SSH-CORE-10: Origin behind a trusted proxy --
+
+
+def origin_request(peer, **headers):
+    raw = [(k.replace("_", "-").encode(), v.encode()) for k, v in headers.items()]
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/api/v1/groups",
+            "query_string": b"",
+            "headers": raw,
+            "client": (peer, 40000),
+            "server": ("10.0.0.5", 9099),
+        }
+    )
+
+
+PROXIED = {
+    "host": "10.0.0.5:9099",
+    "origin": "https://ssh.example.com",
+    "x_forwarded_proto": "https",
+    "x_forwarded_host": "ssh.example.com",
+}
+
+
+def test_origin_check_follows_a_trusted_proxy_only(monkeypatch):
+    monkeypatch.delenv(auth.TRUSTED_PROXIES_ENV, raising=False)
+    # Default: a direct deployment is checked as before.
+    assert not auth.trusted_origin(origin_request("172.18.0.1", **PROXIED))
+    direct = {"host": "10.0.0.5:9099", "origin": "http://10.0.0.5:9099"}
+    assert auth.trusted_origin(origin_request("192.0.2.9", **direct))
+    monkeypatch.setenv(auth.TRUSTED_PROXIES_ENV, "172.16.0.0/12, 192.0.2.1")
+    assert auth.trusted_origin(origin_request("172.18.0.1", **PROXIED))
+    assert auth.trusted_origin(origin_request("192.0.2.1", **PROXIED))
+    # The request's own origin still counts behind the proxy.
+    assert auth.trusted_origin(origin_request("172.18.0.1", **direct))
+    # A peer outside the list cannot forge the forwarded headers.
+    assert not auth.trusted_origin(origin_request("192.0.2.9", **PROXIED))
+    # The forwarded origin must still be the one the browser sent.
+    assert not auth.trusted_origin(
+        origin_request("172.18.0.1", **{**PROXIED, "origin": "https://evil.example"})
+    )
+    # Without X-Forwarded-Host the proxy's Host header is used.
+    host_kept = {**PROXIED, "host": "ssh.example.com"}
+    host_kept.pop("x_forwarded_host")
+    assert auth.trusted_origin(origin_request("172.18.0.1", **host_kept))
+    monkeypatch.setenv(auth.TRUSTED_PROXIES_ENV, "not-an-address")
+    assert not auth.trusted_origin(origin_request("172.18.0.1", **PROXIED))
+
+
+def test_console_writes_work_through_a_trusted_https_proxy(client, monkeypatch):
+    proxy = TestClient(app, client=("172.18.0.1", 40000))
+    proxy.cookies.update(client.cookies)
+    headers = {
+        **csrf(),
+        "Origin": "https://ssh.example.com",
+        "X-Forwarded-Proto": "https",
+        "X-Forwarded-Host": "ssh.example.com",
+    }
+    monkeypatch.delenv(auth.TRUSTED_PROXIES_ENV, raising=False)
+    refused = proxy.post("/api/v1/groups", headers=headers, json={"name": "via-proxy"})
+    assert refused.status_code == 403 and "来源" in refused.json()["detail"]
+    monkeypatch.setenv(auth.TRUSTED_PROXIES_ENV, "172.16.0.0/12")
+    created = proxy.post("/api/v1/groups", headers=headers, json={"name": "via-proxy"})
+    assert created.status_code == 201, created.text

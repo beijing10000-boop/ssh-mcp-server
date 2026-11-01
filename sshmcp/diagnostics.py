@@ -11,6 +11,7 @@ import shlex
 import socket
 import time
 import threading
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from contextlib import suppress
 
@@ -314,6 +315,25 @@ class SSHDiagnosticError(RuntimeError):
 _ACTIVE_HOSTS = set()
 _SLOTS = threading.Condition()
 _BACKGROUND_ACTIVE = 0
+# A synchronous MCP call carries an event that is set once its client is gone
+# (main.CallerWatch: the HTTP connection closed before the response; or the
+# call was cancelled): still waiting for a slot it gives up without taking
+# one, running it stops reading and closes the channel (the job is cancelled).
+CALLER_GONE: ContextVar[threading.Event | None] = ContextVar(
+    "ssh_caller_gone", default=None
+)
+CALLER_GONE_ERROR = "MCP 客户端已断开连接，诊断已取消"
+# When the synchronous call was accepted (monotonic), before it queued for a
+# thread of mcp_tools.INLINE_POOL: the slot wait and timeout_seconds count
+# from here, so time spent queued for a thread is not added to them.
+CALL_ACCEPTED_AT: ContextVar[float | None] = ContextVar(
+    "ssh_call_accepted_at", default=None
+)
+
+
+def caller_gone() -> bool:
+    event = CALLER_GONE.get()
+    return event is not None and event.is_set()
 
 
 def slot_usage():
@@ -551,6 +571,16 @@ def execute(
 ) -> dict:
     global _BACKGROUND_ACTIVE
     started = time.monotonic()
+    accepted = CALL_ACCEPTED_AT.get()
+    if accepted is not None:
+        started = min(started, accepted)
+    gone = CALLER_GONE.get()
+    if gone is not None:
+        requested = cancelled
+
+        def cancelled():
+            return gone.is_set() or requested()
+
     budget = time_budget(action, options)
     deadline = started + (180 if background else INLINE_WAIT_SECONDS)
     if budget:

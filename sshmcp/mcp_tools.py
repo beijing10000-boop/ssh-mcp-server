@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import contextvars
 import inspect
 import json
 import re
+import threading
+import time
 from typing import Annotated, Literal
-from functools import wraps
+from functools import partial, wraps
 
 from fastapi import HTTPException
 from mcp.server.fastmcp import FastMCP
@@ -35,8 +39,56 @@ READ_ONLY = ToolAnnotations(
 )
 
 
+# Tools that run an SSH diagnostic wait up to 30 s for their host's slot and
+# then run for up to 20-120 s. They get a pool of their own: a burst of them
+# (an AI platform fans several out per host) queues here instead of filling
+# asyncio's default pool, which keeps serving the light tools (resolve,
+# catalog, job status) and MCP authentication. Eight threads cover the four
+# SSH slots plus four calls waiting for one.
+INLINE_WORKERS = 8
+INLINE_POOL = ThreadPoolExecutor(
+    max_workers=INLINE_WORKERS, thread_name_prefix="ssh-inline"
+)
+
+
+def runs_ssh(name):
+    return name.startswith("ssh_diagnose_") or name in {
+        "ssh_test_connection",
+        "ssh_triage",
+        "ssh_collect",
+    }
+
+
+def _unless_gone(gone, fn, *args, **kwargs):
+    """A call whose client left while it was queued does not start."""
+    if gone.is_set():
+        return {
+            "status": "cancelled",
+            "error": diagnostics.CALLER_GONE_ERROR,
+            "error_code": "cancelled",
+        }
+    return fn(*args, **kwargs)
+
+
+async def run_inline_tool(fn, *args, **kwargs):
+    """``fn`` in INLINE_POOL with the caller's context (the MCP principal) and
+    its diagnostics.CALLER_GONE event: set by main.CallerWatch when the client
+    disconnects, or here when the call is cancelled."""
+    gone = diagnostics.CALLER_GONE.get() or threading.Event()
+    context = contextvars.copy_context()
+    context.run(diagnostics.CALLER_GONE.set, gone)
+    # The slot wait (30 s) and timeout_seconds count from now, queue included.
+    context.run(diagnostics.CALL_ACCEPTED_AT.set, time.monotonic())
+    call = partial(context.run, _unless_gone, gone, fn, *args, **kwargs)
+    try:
+        return await asyncio.get_running_loop().run_in_executor(INLINE_POOL, call)
+    except asyncio.CancelledError:
+        gone.set()
+        raise
+
+
 def offload(fn):
-    """FastMCP must await tools; to_thread preserves the MCP ContextVar."""
+    """FastMCP must await tools; the threads keep the MCP ContextVar."""
 
     summarized = fn.__name__.startswith("ssh_diagnose_") or fn.__name__ in {
         "ssh_test_connection",
@@ -45,13 +97,17 @@ def offload(fn):
         "ssh_get_diagnostic_job",
         "ssh_get_diagnostic_batch",
     }
+    ssh = runs_ssh(fn.__name__)
 
     @wraps(fn)
     async def run(*args, **kwargs):
         detail = kwargs.pop("detail", "summary") if summarized else None
         if summarized and detail not in {"summary", "full"}:
             raise ValueError("detail 必须为 summary 或 full")
-        result = await asyncio.to_thread(fn, *args, **kwargs)
+        if ssh:
+            result = await run_inline_tool(fn, *args, **kwargs)
+        else:
+            result = await asyncio.to_thread(fn, *args, **kwargs)
         return observations.present(result, detail) if summarized else result
 
     if summarized:

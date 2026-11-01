@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 import hashlib
 import hmac
+import ipaddress
 import logging
+import os
 import re
 import secrets
 import time
@@ -81,21 +84,74 @@ def secure_cookie() -> bool:
     return store.setting("web_protocol") == "https"
 
 
+# Reverse proxies whose X-Forwarded-Proto / X-Forwarded-Host count in the
+# Origin check: SSHMCP_TRUSTED_PROXIES, comma-separated addresses or networks
+# of the proxy as this service sees its connection (behind Docker's port
+# mapping usually the bridge gateway, e.g. 172.17.0.1 or 172.16.0.0/12).
+# Unset or empty (the default): only the request's own scheme and Host count,
+# as before; forwarded headers from any other peer are ignored.
+TRUSTED_PROXIES_ENV = "SSHMCP_TRUSTED_PROXIES"
+
+
+@lru_cache(maxsize=8)
+def _proxy_networks(value: str) -> tuple:
+    networks = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            log.warning("%s: ignored invalid entry %r", TRUSTED_PROXIES_ENV, item[:64])
+    return tuple(networks)
+
+
+def trusted_proxy(request: Request) -> bool:
+    """The connection comes from a configured reverse proxy."""
+    networks = _proxy_networks(os.environ.get(TRUSTED_PROXIES_ENV, ""))
+    if not networks or request.client is None:
+        return False
+    try:
+        peer = ipaddress.ip_address(request.client.host)
+    except ValueError:
+        return False
+    return any(peer in network for network in networks)
+
+
+def _first_forwarded(request: Request, name: str) -> str:
+    # A chain of proxies appends values; the first is what the browser used.
+    return request.headers.get(name, "").split(",")[0].strip()
+
+
 def trusted_origin(request: Request) -> bool:
+    """A browser request (Origin set) must come from the console's own origin:
+    the request's scheme and Host, or, through a trusted proxy, the scheme and
+    host the proxy forwards (X-Forwarded-Proto, X-Forwarded-Host)."""
     origin = request.headers.get("origin")
     if not origin:
         return True
     try:
         value = urlsplit(origin)
-        return (
-            value.scheme == request.url.scheme
-            and value.netloc == request.headers.get("host")
-            and not value.username
-            and not value.password
-            and not value.path
-            and not value.query
-            and not value.fragment
-        )
+        if (
+            value.username
+            or value.password
+            or value.path
+            or value.query
+            or value.fragment
+        ):
+            return False
+        allowed = {(request.url.scheme, request.headers.get("host"))}
+        if trusted_proxy(request):
+            scheme = _first_forwarded(request, "x-forwarded-proto").lower()
+            host = _first_forwarded(request, "x-forwarded-host")
+            allowed.add(
+                (
+                    scheme if scheme in {"http", "https"} else request.url.scheme,
+                    host or request.headers.get("host"),
+                )
+            )
+        return (value.scheme, value.netloc) in allowed
     except ValueError:
         return False
 

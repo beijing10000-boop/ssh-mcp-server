@@ -293,12 +293,17 @@ def work(ident, background=False):
         status = "failed"
         # Execution-stage failures carry the same stable code as pre-checks, so
         # a client can tell a busy host from a stale revision or a dead SSH.
+        code = error_code(exc, error)
+        if code == "cancelled" and diagnostics.caller_gone():
+            # The MCP client left (diagnostics.CALLER_GONE): the call stopped
+            # waiting for its slot, or its SSH read, and kept nothing.
+            status, error = "cancelled", diagnostics.CALLER_GONE_ERROR
         result = {
             "host_id": job["host_id"],
             "action": job["action"],
             "status": status,
             "error": error,
-            "error_code": error_code(exc, error),
+            "error_code": code,
         }
     for attempt in range(1, SAVE_ATTEMPTS + 1):
         try:

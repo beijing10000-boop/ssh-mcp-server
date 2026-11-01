@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+import sqlite3
+import threading
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from . import __version__, store, access, jobs, console_api, zabbix, maintenance
+from . import diagnostics
 from .api import router
 from .auth import router as auth_router, trusted_origin
 from .mcp_tools import mcp
@@ -18,6 +21,57 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "web"
 
 # Mounted child lifespan is not started automatically: the top-level lifespan owns it.
 mcp_app = mcp.streamable_http_app()
+
+
+class CallerWatch:
+    """The MCP endpoint, watching for a client that leaves before its answer.
+
+    In JSON-response mode the MCP SDK reads the request body and never looks
+    at the connection again, so a client that gave up (closed the connection)
+    kept its diagnostic waiting for, or holding, the host's slot. Once the
+    body is read this wrapper waits for the disconnect; one before the
+    response is sent sets the call's diagnostics.CALLER_GONE event, which the
+    diagnostic checks while it waits for its slot and while it reads.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        gone = threading.Event()
+        body_read = asyncio.Event()
+        responded = False
+
+        async def receive_body():
+            message = await receive()
+            if message["type"] == "http.request" and not message.get("more_body"):
+                body_read.set()
+            elif message["type"] == "http.disconnect":
+                gone.set()
+            return message
+
+        async def send_response(message):
+            nonlocal responded
+            if message["type"] == "http.response.body" and not message.get("more_body"):
+                responded = True
+            await send(message)
+
+        async def watch():
+            await body_read.wait()
+            with suppress(Exception):
+                if (await receive())["type"] == "http.disconnect" and not responded:
+                    gone.set()
+
+        token = diagnostics.CALLER_GONE.set(gone)
+        watcher = asyncio.create_task(watch())
+        try:
+            await self.app(scope, receive_body, send_response)
+        finally:
+            watcher.cancel()
+            diagnostics.CALLER_GONE.reset(token)
 
 
 @asynccontextmanager
@@ -57,12 +111,20 @@ async def secure_transport(request: Request, call_next):
     if path == "/mcp" or path.startswith("/mcp/"):
         authorization = request.headers.get("authorization", "")
         try:
-            who = access.authenticate(authorization)
+            # SQLite (and the token file) off the event loop: a locked
+            # database must not stall the Web console and the other clients.
+            who = await asyncio.to_thread(access.authenticate, authorization)
         except HTTPException as exc:
             return JSONResponse(
                 {"detail": exc.detail},
                 status_code=exc.status_code,
                 headers={"WWW-Authenticate": "Bearer"},
+            )
+        except sqlite3.OperationalError:
+            return JSONResponse(
+                {"detail": "服务繁忙，请稍后重试"},
+                status_code=503,
+                headers={"Retry-After": "2"},
             )
         # Refuse cross-origin browser requests; non-browser MCP clients do not set Origin.
         if not trusted_origin(request):
@@ -131,4 +193,4 @@ def static_file(name: str):
 
 
 # Keep this final: Mount('/') matches every route after it.
-app.mount("/", mcp_app)
+app.mount("/", CallerWatch(mcp_app))
