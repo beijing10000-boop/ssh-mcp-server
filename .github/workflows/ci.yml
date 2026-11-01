@@ -54,6 +54,32 @@ jobs:
         run: python -m pytest -q -rs tests/test_procps_compat.py
       - name: EL7（iproute 4.11 无 ss -H，sh 为 bash 4.2）上执行 ss 采集与 GC 日志探针
         run: python -m pytest -q -rs tests/test_audit_followup.py -k el7
+  platform-contract:
+    # AI Ops Platform 的联合测试（它的 MCP 客户端对接本服务）：工具、字段或
+    # 推荐授权的改动若破坏平台依赖，在合并前失败。
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: beijing10000-boop/ai-ops-platform
+          ref: main
+          path: consumer
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 安装本服务与平台两套依赖
+        run: |
+          python -m venv /tmp/self && /tmp/self/bin/pip install -r requirements.txt
+          python -m pip install -r consumer/requirements-dev.txt
+      - name: 平台联合测试（SSH MCP 部分）
+        env:
+          AIOPS_JOINT_SSH_MCP_REPO: ${{ github.workspace }}
+          AIOPS_JOINT_SSH_MCP_PYTHON: /tmp/self/bin/python
+        run: |
+          if [ ! -d consumer/tests/joint ]; then echo "平台 main 尚无 tests/joint，跳过"; exit 0; fi
+          cd consumer && python -m pytest -q -rs tests/joint/test_joint_ssh_mcp.py
   desktop:
     runs-on: ubuntu-24.04
     steps:

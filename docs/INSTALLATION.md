@@ -95,9 +95,9 @@ ANSIBLE_HOST_KEY_CHECKING=True ansible-playbook \
 该 Playbook 使用 `raw`，**目标端无需 Python/Agent**；输出位于执行目录的 `trusted-host-fingerprints.txt`，格式例如：
 
 ```text
-172.20.200.93 ssh-ed25519 SHA256:示例指纹
-172.20.200.93 ssh-rsa SHA256:示例指纹
-172.20.200.94 ssh-ed25519 SHA256:示例指纹
+192.0.2.93 ssh-ed25519 SHA256:示例指纹
+192.0.2.93 ssh-rsa SHA256:示例指纹
+192.0.2.94 ssh-ed25519 SHA256:示例指纹
 ```
 
 接下来，在新 SSH MCP Web「主机公钥核验」：
