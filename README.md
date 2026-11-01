@@ -2,7 +2,9 @@
 
 > 独立部署、中文优先、免 Agent 的 Linux SSH 诊断服务。默认 Web/MCP 端口 **9099**。
 
-**当前版本：v0.8.0**
+**当前版本：v0.9.0**
+
+v0.9.0 是 2026-11 联合审计的修复版本：关闭 jvm GC 日志探针经符号链接越权读取的问题，`ssh_collect` 新增可选参数 `timeout_seconds` 且有步骤失败时状态为 partial，修正 peer_traffic、带空格进程名、service_detail、Nginx 与 syslog 的若干误报和漏报，补齐脱敏，错误码与授权记录更精确。**MCP 契约只增不改**，无数据库结构变化。详见 [v0.9.0 说明](docs/RELEASE-v0.9.0.md)。
 
 v0.8.0 精简 `ssh_diagnose_java` 的进程行，让 13 个 Java 进程能完整放进 AI 平台 4000 字符的模型视图：`main` 由 `{kind, name}` 改为一个字符串（jar 文件名、主类或 `模块/主类`），jar 的完整路径移到新字段 `jar_path`，`heap` 去掉 `xmx_MiB`（`heap.xmx` 保留原写法）。**这是 MCP 输出字段变化**，读取 `main.kind`、`main.name` 或 `heap.xmx_MiB` 的客户端需要调整。无数据库变化。详见 [v0.8.0 说明](docs/RELEASE-v0.8.0.md)。
 
@@ -64,7 +66,7 @@ docker compose exec ssh-mcp cat /app/data/bootstrap.token
 
 需开放给可信内网时，在项目目录创建 `.env`，并设置 `WEB_BIND_IP=内网绑定IP`；建议同时通过防火墙限制允许访问的源地址。
 
-本次升级见 [v0.8.0 说明](docs/RELEASE-v0.8.0.md)（ps 列修复见 [v0.7.2 说明](docs/RELEASE-v0.7.2.md)，Java 启动命令修复见 [v0.7.1 说明](docs/RELEASE-v0.7.1.md)，界面与 v0.7.0 的改动见 [v0.7.0 说明](docs/RELEASE-v0.7.0.md)），v0.6.0 的工具与授权扩展见 [v0.6.0 说明](docs/RELEASE-v0.6.0.md)，备份与迁移步骤见 [v0.4 发布与迁移说明](docs/RELEASE-v0.4.md)。配置入口见 [v0.3.1 系统配置说明](docs/RELEASE-v0.3.1.md)。请先阅读 [v0.3 优化与升级说明](docs/RELEASE-v0.3.md)，以及 [安装部署](docs/INSTALLATION.md)、[v0.2 升级与验证](docs/RELEASE-v0.2.md)、[架构评估](docs/ARCHITECTURE.md)、[AI 平台改造方案](docs/AI-PLATFORM-INTEGRATION.md)、[MCP 接入](docs/MCP.md)、[安全说明](docs/SECURITY.md)、[目录与 IP 流量分析](docs/INSIGHTS.md)。
+本次升级见 [v0.9.0 说明](docs/RELEASE-v0.9.0.md)，上一版见 [v0.8.0 说明](docs/RELEASE-v0.8.0.md)（ps 列修复见 [v0.7.2 说明](docs/RELEASE-v0.7.2.md)，Java 启动命令修复见 [v0.7.1 说明](docs/RELEASE-v0.7.1.md)，界面与 v0.7.0 的改动见 [v0.7.0 说明](docs/RELEASE-v0.7.0.md)），v0.6.0 的工具与授权扩展见 [v0.6.0 说明](docs/RELEASE-v0.6.0.md)，备份与迁移步骤见 [v0.4 发布与迁移说明](docs/RELEASE-v0.4.md)。配置入口见 [v0.3.1 系统配置说明](docs/RELEASE-v0.3.1.md)。请先阅读 [v0.3 优化与升级说明](docs/RELEASE-v0.3.md)，以及 [安装部署](docs/INSTALLATION.md)、[v0.2 升级与验证](docs/RELEASE-v0.2.md)、[架构评估](docs/ARCHITECTURE.md)、[AI 平台改造方案](docs/AI-PLATFORM-INTEGRATION.md)、[MCP 接入](docs/MCP.md)、[安全说明](docs/SECURITY.md)、[目录与 IP 流量分析](docs/INSIGHTS.md)。
 
 ## 核心能力
 

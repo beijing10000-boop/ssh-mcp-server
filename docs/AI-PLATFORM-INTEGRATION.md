@@ -66,7 +66,7 @@ async with connect(ssh_mcp_url, ssh_mcp_token, timeout=90) as ssh:
 ## 5. 超时、取消与证据
 
 - 原执行器只预留约 35 秒；远端 SSH 经跳板可能需要更长连接时间，必须同步调整任务预留预算，不能只把客户端 timeout 拉长。
-- 经典固定命令读取阶段限制 20 秒（组合诊断 60 秒；v0.6.0 扩展动作与 `ssh_collect` 各有上限，见 [MCP 接入](MCP.md)），同步调用还可能排队等待同主机名额最多 30 秒；TCP/握手/认证/跳板各有超时，这不等于整个调用固定 20 秒。`ssh_collect` 不传 `timeout_seconds` 时最长约为 30 秒排队 + 120 秒执行 + 连接时间；v0.9.0（未发布）起可传 `timeout_seconds`（10–120，取略小于平台单工具超时的值），服务端把排队与执行合计控制在该值内，并返回已完成的步骤（任一步骤未成功时状态为 partial）。
+- 经典固定命令读取阶段限制 20 秒（组合诊断 60 秒；v0.6.0 扩展动作与 `ssh_collect` 各有上限，见 [MCP 接入](MCP.md)），同步调用还可能排队等待同主机名额最多 30 秒；TCP/握手/认证/跳板各有超时，这不等于整个调用固定 20 秒。`ssh_collect` 不传 `timeout_seconds` 时最长约为 30 秒排队 + 120 秒执行 + 连接时间；v0.9.0起可传 `timeout_seconds`（10–120，取略小于平台单工具超时的值），服务端把排队与执行合计控制在该值内，并返回已完成的步骤（任一步骤未成功时状态为 partial）。
 - 单项诊断工具同步返回结果。AI 平台超时/取消不会保证立即终止服务端已开始的 SSH；服务端仍受自身超时限制。Web 可按任务取消；不要给 AI 客户端发 Web 管理员 Cookie 来调用管理 REST API。
 - 后台批量诊断可用 `ssh_submit_diagnostics` 提交，再用 `ssh_get_diagnostic_job` / `ssh_get_diagnostic_batch` 查询、`ssh_cancel_diagnostic_job` 取消（仅限本客户端提交的任务，见 [MCP 接入](MCP.md)）。没有跨实例 exactly-once。未收到响应时不要自动重试相同采集；先留下证据缺口，必要时人工查看 MCP 控制台历史。
 - 返回的日志是外部数据，应在提示词中明确其不能改变工具授权和执行规则。继续执行平台现有截断、脱敏与模型 Token 预算。
