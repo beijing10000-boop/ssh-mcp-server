@@ -10,7 +10,11 @@ approximated by keywords and the summary says so.
 One POSIX awk pass per source keeps the newest lines within a byte budget,
 counts every matching line, ranks the logging units and classifies OOM / I/O /
 link / service / kernel / auth lines over the whole window, so only bounded
-evidence leaves the host. Window bounds are absolute Unix seconds computed by
+evidence leaves the host. Below info, a second journal pass (-p info, only the
+classified lines) keeps the requested priority from hiding link-down,
+segfault or sshd lines, which the kernel and sshd log at info/notice. The
+crit/err/warning counts follow unit and pid but not the keyword
+(``counts_filters``). Window bounds are absolute Unix seconds computed by
 the server (``journalctl --since @N``, systemd >= 219); the file fallback
 compares MMDDHHMMSS keys built by the host's ``date`` in its local time.
 """
@@ -33,7 +37,7 @@ from . import (
     timed,
     unit_name,
 )
-from ..observations import LOG_PATTERNS, metric, section
+from ..observations import LOG_KINDS, LOG_PATTERNS, metric, section
 
 PRIORITIES = ("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug")
 # Level counts (journalctl -p FROM..TO); a range runs when the requested
@@ -48,20 +52,17 @@ LINE_CHARS = 240
 # Bytes of log lines per source so the whole output stays near 24 KiB.
 JOURNAL_BUDGET = 16000
 SHARED_BUDGETS = (6000, 9000)  # journal, file: both sources are read
-# POSIX ERE equivalents of observations.LOG_PATTERNS (matched against the
-# lower-cased line on the host), so the classification spans the whole window.
-AWK_PATTERNS = {
-    "oom": "oom[- ]kill|out of memory|killed process",
-    "io_error": "i/o error|blk_update_request|ext4-fs error|xfs_|buffer i/o"
-    "|read-only file system|remounting|medium error",
-    "network": "link is down|link down|nic link|carrier lost|no carrier",
-    "service": "failed to start|failed with result|start request repeated too quickly"
-    "|main process exited|entered failed state",
-    "kernel": "segfault|soft lockup|hung_task|hung task|nmi watchdog"
-    "|general protection|call trace|bug:",
-    "auth": "failed password|authentication failure|invalid user|possible break-in",
-}
+# The POSIX EREs behind observations.LOG_PATTERNS, matched against the
+# lower-cased line on the host so the classification spans the whole window;
+# parse() re-classifies the returned entries with LOG_PATTERNS, the same
+# expressions, so a routine info line (NIC Link is Up, NMI watchdog: Enabled,
+# DEBUG:) counts on neither side (every line starts with its time stamp, so
+# "[^a-z]bug: " sees the kernel's "BUG: " after a space).
+AWK_PATTERNS = dict(LOG_KINDS)
 KINDS = tuple(AWK_PATTERNS)
+# Any classified line (grep -i -E on the host): the journal kinds pass, which
+# ignores the requested priority, hands only these lines to awk.
+KIND_WORDS = "|".join(AWK_PATTERNS.values())
 # Files carry no syslog priority: warning and stricter keep lines with these
 # words (plus every classified pattern above) and the result says so.
 PRIORITY_WORDS = "|".join(
@@ -343,6 +344,32 @@ COUNT_AWK = (
     "/^AIOPS_RC [0-9]+$/ { rc = $2; next } /^[0-9]/ { n++ } END { print n + 0, rc + 0 }"
 )
 
+# A Basic/Bearer credential standing alone in a log line ("proxy sent Basic
+# dXNlcjpw..."): a token of 8 or more characters holding a digit, "=", "+",
+# "/" or both upper and lower case, so "Basic authentication succeeded"
+# stays as it is.
+BARE_CREDENTIAL = re.compile(r"(?i:\b(basic|bearer))([ \t]+)([A-Za-z0-9._~+/=-]{8,})")
+
+
+def _credential(token: str) -> bool:
+    return re.search(r"[0-9=+/]", token) is not None or (
+        token != token.lower() and token != token.upper()
+    )
+
+
+def redact_line(value: str) -> str:
+    """Log text on its way to the model: the shared rules of the executor's
+    diagnostics.redact_output (applied again, so the parser is safe on any
+    text) plus bare Basic/Bearer credentials. Not nginx's broad "key" rule:
+    "Could not load host key: /etc/ssh/...", "key_load_public: invalid
+    format", redis "keys: 123456" and auditd key="privileged" stay readable."""
+    from ..diagnostics import redact_output  # diagnostics imports extensions
+
+    return BARE_CREDENTIAL.sub(
+        lambda m: m[1] + m[2] + "[REDACTED]" if _credential(m[3]) else m[0],
+        redact_output(value),
+    )
+
 
 def script(options: dict) -> str:
     since, until = resolve_window(options)
@@ -379,6 +406,25 @@ def script(options: dict) -> str:
         for name, span, top in COUNT_RANGES
         if top <= max(level, 2)
     ]
+    # Link-down, segfault and sshd failures are logged at info/notice: below
+    # info the classification gets its own -p info pass (same unit, pid and
+    # keyword), so the requested priority filters the entries only.
+    kinds = (
+        [
+            "printf '[AIOPS_JOURNAL_KINDS]\\n'",
+            "{ "
+            + timed(3, journal + " -p info" + matches)
+            + "; printf '\\nAIOPS_RC %s\\n' \"$?\"; } 2>/dev/null"
+            + keyword_grep
+            + " | grep -i -E -e 'AIOPS_RC ' -e "
+            + quote(KIND_WORDS)
+            + " | awk -v n=1 -v b=0 -v w="
+            + str(LINE_CHARS)
+            + " -v tf=0 -v jr=1 \"$agg\" | grep -E '^(MATCH|MATCHLINE|EXIT) '",
+        ]
+        if level < PRIORITIES.index("info")
+        else []
+    )
     parts = [
         "agg='" + AGG_AWK + "'",
         "authawk='" + AUTH_AWK + "'",
@@ -429,6 +475,7 @@ def script(options: dict) -> str:
         + str(LINE_CHARS)
         + ' -v tf=0 -v jr=1 "$agg"',
         *counts,
+        *kinds,
         "fi",
         'if [ "$need" = 1 ]; then',
         "printf '[AIOPS_FILES]\\n'",
@@ -549,7 +596,9 @@ def _block(body: str) -> dict:
                 data["match"][m[1]] = int(m[2])
         elif m := re.fullmatch(r"MATCHLINE (\w+) (.*)", line):
             if m[1] in KINDS and m[2].strip():
-                data["samples"].setdefault(m[1], []).append(m[2][:LINE_CHARS])
+                data["samples"].setdefault(m[1], []).append(
+                    redact_line(m[2])[:LINE_CHARS]
+                )
         elif m := re.fullmatch(
             r"COUNT (crit|err|warning) (\d{1,12})(?: (\d{1,5}))?", line
         ):
@@ -575,8 +624,20 @@ def _block(body: str) -> dict:
         elif m := re.fullmatch(r"CAPABILITY_MISSING:([\w-]+)", line):
             data["capabilities"].add(m[1])
         else:
-            data["entries"].append(line[:LINE_CHARS])
+            # Log text goes to the model: redacted again (redact_line).
+            data["entries"].append(redact_line(line)[:LINE_CHARS])
     return data
+
+
+def _merge_kinds(journal: dict, kinds: dict) -> None:
+    """Fold the priority-free kinds pass into the journal block's counts."""
+    for kind, n in kinds["match"].items():
+        journal["match"][kind] = max(journal["match"].get(kind, 0), n)
+    for kind, lines in kinds["samples"].items():
+        journal["samples"][kind] = lines + journal["samples"].get(kind, [])
+    # A timed-out pass (124) leaves the counts partial: journal_query_incomplete.
+    journal["count_exit"]["kinds"] = kinds["exit"] or 0
+    journal["kinds_pass"] = True
 
 
 def _auth(body: str, present: bool) -> dict:
@@ -614,7 +675,9 @@ def _int(value, default=None):
     return value if isinstance(value, int) and not isinstance(value, bool) else default
 
 
-def _coverage(name, state, covers, file_path, priority, total, shown, auth) -> str:
+def _coverage(
+    name, state, covers, file_path, priority, total, shown, auth, kinds, unfiltered
+) -> str:
     login = (
         "登录审计来自 " + (auth["source"] or "未知来源")
         if auth["available"]
@@ -644,9 +707,19 @@ def _coverage(name, state, covers, file_path, priority, total, shown, auth) -> s
             f"{reason}，改读 {file_path} 尾部 20MB 在主机上按时间过滤"
             "（不含轮转文件，级别按关键字近似）"
         )
+    classified = (
+        "单元排行覆盖全部匹配行，分类计数另按 info 及以上级别统计、不受 priority 限制"
+        if kinds
+        else "分类计数与单元排行覆盖全部匹配行"
+    )
+    levels = (
+        "crit/err/warning 级别计数只按 unit/pid 统计、不受 keyword 过滤；"
+        if unfiltered
+        else ""
+    )
     return (
         f"{scope}；{shown_text}（受 lines 与字节上限约束），"
-        f"分类计数与单元排行覆盖全部匹配行；{login}；无匹配不能证明未发生故障"
+        f"{classified}；{levels}{login}；无匹配不能证明未发生故障"
     )
 
 
@@ -658,6 +731,8 @@ def parse(text: str, summary: dict, findings: list, options: dict) -> None:
     priority = priority if priority in PRIORITIES else "warning"
     src = _source(section(text, "SOURCE"))
     journal = _block(section(text, "JOURNAL")) if has_section(text, "JOURNAL") else None
+    if journal is not None and has_section(text, "JOURNAL_KINDS"):
+        _merge_kinds(journal, _block(section(text, "JOURNAL_KINDS")))
     files = _block(section(text, "FILES")) if has_section(text, "FILES") else None
     state = src["journal"]
     if state == "available" and src["limited"]:
@@ -688,6 +763,10 @@ def parse(text: str, summary: dict, findings: list, options: dict) -> None:
             for level in ("crit", "err", "warning")
         },
     }
+    # A keyword narrows total/entries/matched but not the level counts.
+    keyword_levels = bool(options.get("keyword")) and any(
+        counts[level] is not None for level in ("crit", "err", "warning")
+    )
     # Counts: the larger whole-window count of either source (journal and
     # file overlap, so never their sum), at least the hits among the entries.
     matched, match_counts, hits = {}, {}, {}
@@ -734,6 +813,12 @@ def parse(text: str, summary: dict, findings: list, options: dict) -> None:
             },
             "window": {"since": since, "until": until, "host_now": src["now"]},
             "counts": counts,
+            # total follows the entries' filters; the level counts cover the
+            # whole window of the unit/pid, whatever keyword was given.
+            "counts_filters": {
+                "total": ["priority", "unit", "pid", "keyword"],
+                "levels": ["unit", "pid"],
+            },
             "top_units": primary["units"][:15] if primary else [],
             "entries": entries,
             "matched": matched,
@@ -743,7 +828,16 @@ def parse(text: str, summary: dict, findings: list, options: dict) -> None:
             "first_at": primary["first_at"] if primary else None,
             "last_at": primary["last_at"] if primary else None,
             "coverage": _coverage(
-                name, state, covers, file_path, priority, total, len(entries), auth
+                name,
+                state,
+                covers,
+                file_path,
+                priority,
+                total,
+                len(entries),
+                auth,
+                kinds=name == "journal" and bool(journal.get("kinds_pass")),
+                unfiltered=keyword_levels,
             ),
         }
     )
@@ -761,6 +855,7 @@ def parse(text: str, summary: dict, findings: list, options: dict) -> None:
         auth=auth,
         booted=booted,
         rebooted=rebooted,
+        keyword_levels=keyword_levels,
     )
 
 
@@ -779,6 +874,7 @@ def _findings(
     auth,
     booted,
     rebooted,
+    keyword_levels=False,
 ):
     usable = primary is not None and not (
         name == "journal" and state == "limited" and not (files and files["file"])
@@ -806,6 +902,12 @@ def _findings(
                 "本次结果为空不代表系统无异常；请让诊断账号加入 systemd-journal/adm 组或改用有权限的账号",
             }
         )
+    unfiltered = (
+        "（级别计数按 unit/pid 统计整个窗口，未按 keyword 过滤，可能与 keyword 无关；"
+        "entries 中未必有这些条目，去掉 keyword 重查可定位来源）"
+        if keyword_levels
+        else ""
+    )
     metric(
         summary,
         findings,
@@ -813,7 +915,8 @@ def _findings(
         counts["crit"],
         threshold=1,
         critical=1,
-        hint="窗口内存在 crit/alert/emerg 级别日志（经验阈值：≥1 即严重）；查看 entries 与 top_units 定位来源",
+        hint="窗口内存在 crit/alert/emerg 级别日志（经验阈值：≥1 即严重）；查看 entries 与 top_units 定位来源"
+        + unfiltered,
     )
     metric(
         summary,
@@ -822,7 +925,8 @@ def _findings(
         counts["err"],
         threshold=10,
         critical=50,
-        hint="err 级别日志偏多（经验阈值：≥10 警告、≥50 严重）；按 top_units 找出主要来源，再用 service_detail 深入",
+        hint="err 级别日志偏多（经验阈值：≥10 警告、≥50 严重）；按 top_units 找出主要来源，再用 service_detail 深入"
+        + unfiltered,
     )
     for kind, level, hint in (
         (
@@ -999,7 +1103,8 @@ register(
         estimated_seconds=8,
         notes=(
             "journal 缺失、无权限或未覆盖窗口时回退到 /var/log/messages 或 syslog 尾部 20MB，级别按关键字近似。",
-            "条目受 lines 与约 16KB 字节上限约束；分类计数与单元排行覆盖窗口内全部匹配行。",
+            "条目受 lines 与约 16KB 字节上限约束；分类计数与单元排行覆盖窗口内全部匹配行，journal 的分类计数另按 info 及以上级别统计、不受 priority 限制。",
+            "crit/err/warning 级别计数只按 unit/pid 统计，不受 keyword 过滤（见 counts_filters）。",
         ),
     )
 )

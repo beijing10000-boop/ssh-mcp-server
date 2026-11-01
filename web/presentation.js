@@ -2,8 +2,11 @@
 // Icons, the theme switch and the narrow-screen drawer come from ui-kit.js.
 const icon = UIKit.icon;
 function initPresentation() {
-  document.documentElement.dataset.density =
-    localStorage.getItem("ssh-density") || "comfortable";
+  let density = null;
+  try {
+    density = localStorage.getItem("ssh-density");
+  } catch {} // storage blocked: default density, and login still runs
+  document.documentElement.dataset.density = density || "comfortable";
   updateDensity();
 }
 function updateDensity() {
@@ -717,6 +720,8 @@ document.addEventListener("click", async (e) => {
     return;
   e.preventDefault();
   e.stopImmediatePropagation();
+  // One run per click, as in app.js: a double click must not act twice.
+  b.disabled = true;
   try {
     if (a === "density-toggle") {
       const density =
@@ -724,7 +729,9 @@ document.addEventListener("click", async (e) => {
           ? "comfortable"
           : "compact";
       document.documentElement.dataset.density = density;
-      localStorage.setItem("ssh-density", density);
+      try {
+        localStorage.setItem("ssh-density", density);
+      } catch {} // not remembered, still applied
       updateDensity();
     }
     if (a === "funnel-filter") go("hosts?status=" + id);
@@ -758,5 +765,7 @@ document.addEventListener("click", async (e) => {
     }
   } catch (ex) {
     notice(ex.message, true);
+  } finally {
+    b.disabled = false;
   }
 });

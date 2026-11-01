@@ -125,9 +125,23 @@ async function pageZabbix() {
   state.credentials = credentials;
   state.proxies = proxies;
   if (!state.zabbixRun && runs.items.length) state.zabbixRun = runs.items[0].id;
-  const detail = state.zabbixRun
-    ? await api("/zabbix/runs/" + state.zabbixRun + "?page=" + state.zabbixPage)
-    : null;
+  const load = (id) =>
+    unlessGone(api("/zabbix/runs/" + id + "?page=" + state.zabbixPage));
+  let detail = state.zabbixRun ? await load(state.zabbixRun) : null;
+  if (state.zabbixRun && !detail) {
+    // Removed after zabbix_days (a bookmark or a long-open tab): show the latest.
+    const gone = state.zabbixRun;
+    state.zabbixRun = runs.items.find((r) => r.id !== gone)?.id || null;
+    state.zabbixPage = 1;
+    state.zabbixSelected.clear();
+    history.replaceState(
+      null,
+      "",
+      "#zabbix" + (state.zabbixRun ? "/" + state.zabbixRun : ""),
+    );
+    notice("该资产发现记录已过期被清理，已改为显示最新记录。", true);
+    detail = state.zabbixRun ? await load(state.zabbixRun) : null;
+  }
   state.zabbixPolling =
     !!detail && ["queued", "running"].includes(detail.run.status);
   state.zabbixPreview = detail;
@@ -348,13 +362,18 @@ async function submitZabbixForm(form) {
 }
 async function zabbixAction(action, id) {
   if (action === "zabbix-test") {
-    await saveZabbixConnection();
-    zabbixFeedback("正在验证 MCP 握手与读取权限…");
-    const r = await api("/zabbix/test", "POST");
-    zabbixAcceptGroups(r.groups);
-    zabbixFeedback(
-      `${r.note}。可见主机 ${r.host_count} 台，主机组 ${r.groups.length} 个。`,
-    );
+    try {
+      await saveZabbixConnection();
+      zabbixFeedback("正在验证 MCP 握手与读取权限…");
+      const r = await api("/zabbix/test", "POST");
+      zabbixAcceptGroups(r.groups);
+      zabbixFeedback(
+        `${r.note}。可见主机 ${r.host_count} 台，主机组 ${r.groups.length} 个。`,
+      );
+    } catch (e) {
+      // A failed save or test replaces "正在验证…" instead of a passing toast.
+      zabbixFeedback(e.message, true);
+    }
   } else if (action === "zabbix-groups") {
     const r = await api("/zabbix/groups", "POST");
     zabbixAcceptGroups(r.items);

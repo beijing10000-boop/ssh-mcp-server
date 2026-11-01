@@ -24,6 +24,8 @@ PREFIX = "PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; LC_ALL=C; export LC_A
 # AI clients issue several independent diagnostics of one host at once; the
 # executor serialises them here instead of failing the later ones as "busy".
 INLINE_WAIT_SECONDS = 30
+# stderr kept per result; the rest is read and dropped.
+STDERR_LIMIT = 2048
 # Process state counts, D-state waits and a 1 s CPU delta from two /proc/*/stat
 # samples (utime+stime, fields 14-15 after the parenthesised comm). Read-only,
 # nothing written to disk; the snapshot is held in shell variables only.
@@ -112,12 +114,16 @@ ACTIONS = {
 ACTIONS.update(operations.SCRIPTS)
 
 # Static scripts only: no user-provided IP, shell, or filesystem path enters awk.
+# No `ss -H`: iproute2 4.11 (EL7) lacks it. The awk skips the header instead,
+# a first line starting with State (Recv-Q when one state is selected, Netid
+# with several socket tables), so newer iproute2 gives the same output.
 PEER_CONNECTIONS_CMD = r"""
 if ! command -v ss >/dev/null 2>&1; then
   printf 'CAPABILITY_MISSING:ss\n'
   exit 69
 fi
-ss -H -t -a -n | awk '
+ss -t -a -n | awk '
+  NR == 1 && ($1 == "State" || $1 == "Recv-Q" || $1 == "Netid") { next }
   NF >= 5 {
     peer=$5
     if (substr(peer,1,1)=="[") {
@@ -137,15 +143,19 @@ if ! command -v ss >/dev/null 2>&1; then
   printf 'CAPABILITY_MISSING:ss\n'
   exit 69
 fi
+# With one state selected ss prints no State column: socket lines start with
+# Recv-Q and Send-Q. ESTAB-first lines are kept for any ss that still prints it.
 capture_peers() {
-  ss -H -t -n -i state established | awk '
+  ss -t -n -i state established | awk '
     function emit() {
       if (local!="" && peer!="" && sent!="" && received!="")
         print local "\t" peer "\t" sent "\t" received
     }
-    $1=="ESTAB" {
+    NR==1 && ($1=="State" || $1=="Recv-Q" || $1=="Netid") { next }
+    $1=="ESTAB" || ($1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/) {
       emit()
-      local=$4; peer=$5; sent=""; received=""
+      if ($1=="ESTAB") { local=$4; peer=$5 } else { local=$3; peer=$4 }
+      sent=""; received=""
       next
     }
     {
@@ -175,18 +185,26 @@ def standard_only(action):
 # key=value and key: value pairs whose key names a secret, including dotted or
 # camel-cased Java/Spring properties (-Dspring.datasource.password=, keyStorePassword=).
 # key=value / key: value, never across a line break (an empty `-Dx.password=`
-# must not swallow the next line). `db_pwd` / `pwd.x` count; the PWD and OLDPWD
-# directory variables do not.
+# must not swallow the next line). Any key holding "pwd" counts (db_pwd,
+# loginPwd, ?pwd=) except the PWD and OLDPWD directory variables; "pass" counts
+# as a whole part of the name (DB_PASS, redis.pass, ?pass=), not inside bypass;
+# requirepass / masterauth are redis options; session cookies (JSESSIONID,
+# PHPSESSID, sessionid, connect.sid, sid) count too. An Authorization value
+# loses its scheme word together with the credential (Basic <base64>).
 REDACTION = re.compile(
-    r"(?i)([\w.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key"
-    r"|private[_-]?key|credential|authorization)[\w.-]*"
-    r"|[\w.-]*[_.-]pwd[\w.-]*|pwd[_.-][\w.-]*)"
-    r"([\"']?[ \t]*[:=][ \t]*)(?:bearer[ \t]+)?(?:\"[^\"\n]*\"|'[^'\n]*'|[^\s,;&]+)"
+    r"(?i)(?<![\w.-])(?!(?-i:(?:OLD)?PWD)(?![\w.-]))"
+    r"([\w.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key"
+    r"|private[_-]?key|credential|authorization|pwd|(?<![a-z0-9])pass(?![a-z0-9])"
+    r"|requirepass|masterauth)[\w.-]*"
+    r"|[\w.-]*(?:sess(?:ion)?[_-]?id|session|\.sid)|sid)"
+    r"([\"']?[ \t]*[:=][ \t]*)(?:(?:bearer|basic|digest)[ \t]+)?"
+    r"(?:\"[^\"\n]*\"|'[^'\n]*'|[^\s,;&]+)"
 )
 # `--password value` style options: the secret is the next argument.
 FLAG_SECRETS = re.compile(
     r"(?i)((?<![\w.-])--?[\w.-]*(?:password|passwd|passphrase|secret|token"
-    r"|api[_-]?key|access[_-]?key|credential)[\w.-]*)"
+    r"|api[_-]?key|access[_-]?key|credential|(?<![a-z0-9])pass(?![a-z0-9])"
+    r"|requirepass|masterauth)[\w.-]*)"
     r"([ \t]+)(?!-)(?:\"[^\"\n]*\"|'[^'\n]*'|\S+)"
 )
 # user:password@ in any URL scheme (jdbc:mysql://, redis://:pw@, amqp://, https://).
@@ -195,6 +213,74 @@ URL_CREDENTIALS = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^\s/@:]*:[^\s/@]+@")
 BARE_SECRETS = re.compile(
     r"\b(?:AKIA[0-9A-Z]{16}|LTAI[A-Za-z0-9]{12,30})\b"
     r"|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+)
+# The java inventory prints one argv element per `ARG` line: the value of a
+# bare secret option (--password, --db-token) is on the next line, and keys
+# are masked as broadly as java.redact_args masks them in the summary ("key"
+# included, -X options exempt), so detail=full output and stored jobs match it.
+ARG_KEY = (
+    r"(?:password|passwd|pwd|secret|token|key|credential"
+    r"|(?<![a-z0-9])pass(?![a-z0-9])|requirepass|masterauth)"
+)
+ARG_SECRET_VALUE = re.compile(
+    r"(?im)^(ARG[ \t]+(?!-(?-i:X))[^\s=]*" + ARG_KEY + r"[^\s=]*=)[^\n]+"
+)
+ARG_SECRET_NEXT = re.compile(
+    r"(?im)^(ARG[ \t]+(?:--|-(?!(?-i:[DX])))[^\s=:]*"
+    + ARG_KEY
+    + r"[^\s=:]*[ \t]*\nARG[ \t]+)(?!-)[^\n]+"
+)
+# Client passwords on a command line (cron, unit and ps lines carry them as
+# is), also as the first option (mysql -pSECRET db): the mysql/mariadb
+# clients' -pSECRET (attached: "-p x" prompts and selects database x; mysqld
+# and mysql-proxy take no password), redis-cli -a SECRET, sshpass -p SECRET
+# (among sshpass's own options only: the -p of the ssh it runs is a port),
+# mongo/mongosh and the mongo tools -p SECRET, docker/podman login -p SECRET.
+# Their --password SECRET is FLAG_SECRETS' case. The mongo and docker option
+# is looked for in the same command only (not past ";" or "|", for docker not
+# past "&" either).
+CLIENT_PASSWORDS = re.compile(
+    r"((?<![\w.-])(?:mysql|mariadb)"
+    r"(?:[-_]?(?:dump|admin|import|show|check|slap|binlog|pump|upgrade)|sh)?"
+    r"(?:[ \t][^\n]*?)??[ \t]-p"
+    r"|(?<![\w.-])redis-cli(?:[ \t][^\n]*?)??[ \t]-a[ \t]+"
+    r"|(?<![\w.-])sshpass(?:[ \t]+-(?:[ehvV]|[dfP][ \t]*\S+))*[ \t]+-p[ \t]*"
+    r"|(?<![\w.-])mongo(?:sh|dump|restore|export|import|stat|top|files)?"
+    r"(?:[ \t][^\n;|]*?)??[ \t]-p[ \t]*"
+    r"|(?<![\w.-])(?:docker|podman)[ \t]+login(?:[ \t][^\n;&|]*?)??[ \t]-p[ \t]*)"
+    r"(?=[^\s-])(?:'[^'\n]*'|\"[^\"\n]*\"|\S+)"
+)
+# curl -u / --user (and -U / --proxy-user) user:SECRET: the user stays, the
+# password goes, up to the closing quote when the value is quoted.
+CURL_USER = re.compile(
+    r"((?<![\w.-])curl(?:[ \t][^\n;|]*?)??[ \t]"
+    r"(?:-[uU][ \t]*|--(?:proxy-)?user[ \t]+)(?:(')|(\"))?[^\s'\":]*:)"
+    r"(?(2)[^'\n]+|(?(3)[^\"\n]+|[^\s'\"]+))"
+)
+# Personal data in log text, masked as the log MCP masks it (138****8000,
+# 110101********1234). A mobile number counts only where a machine counter
+# cannot stand: after a path, quote, bracket or delimiter, next to non-ASCII
+# text, after +86, or as the value of a phone-named key. Bare whitespace- or
+# "="-delimited numbers stay (byte counters, CPUUsageNSec, µs timestamps).
+PHONE = re.compile(
+    r"(?:(?<=[/\"'(\[<>,;&#|])|(?<=[^\x00-\x7f])|(?<=\+86)|(?<=\+86[ -]))"
+    r"(1[3-9][0-9])[0-9]{4}([0-9]{4})(?![0-9A-Za-z])"
+)
+# "tel" is a key word only where a part of the name begins (after a
+# non-letter, or as the camelCase hump of userTel) and when it stands alone
+# (tel, tel_no, telNo, telephone, telphone): intel_*, hotel* and telemetry_*
+# hold counters, not phone numbers.
+PHONE_KEY = re.compile(
+    r"((?:(?i:phone|mobile|msisdn)|手机|电话"
+    r"|(?:(?<![A-Za-z0-9])|(?<=[a-z0-9])(?=T))"
+    r"(?:[Tt]el(?:e?phone)?(?![a-z])|TEL(?:E?PHONE)?(?![A-Za-z])))"
+    r"[\w.-]*[\"']?[ \t]*[:=][ \t]*[\"']?)"
+    r"(1[3-9][0-9])[0-9]{4}([0-9]{4})(?![0-9A-Za-z])"
+)
+# 18-digit resident ID numbers: region, birth date (19xx/20xx), sequence, check.
+ID_CARD = re.compile(
+    r"(?<![0-9A-Za-z])([1-9][0-9]{5})(?:18|19|20)[0-9]{2}(?:0[1-9]|1[0-2])"
+    r"(?:0[1-9]|[12][0-9]|3[01])([0-9]{3}[0-9Xx])(?![0-9A-Za-z])"
 )
 
 
@@ -209,7 +295,14 @@ def redact_output(text: str) -> str:
     text = URL_CREDENTIALS.sub(r"\1[REDACTED]@", text)
     text = BARE_SECRETS.sub("[REDACTED]", text)
     text = REDACTION.sub(lambda m: m.group(1) + m.group(2) + "[REDACTED]", text)
-    return FLAG_SECRETS.sub(lambda m: m.group(1) + m.group(2) + "[REDACTED]", text)
+    text = FLAG_SECRETS.sub(lambda m: m.group(1) + m.group(2) + "[REDACTED]", text)
+    text = ARG_SECRET_VALUE.sub(r"\1[REDACTED]", text)
+    text = ARG_SECRET_NEXT.sub(r"\1[REDACTED]", text)
+    text = CLIENT_PASSWORDS.sub(r"\1[REDACTED]", text)
+    text = CURL_USER.sub(r"\1[REDACTED]", text)
+    text = ID_CARD.sub(r"\1********\2", text)
+    text = PHONE_KEY.sub(r"\1\2****\3", text)
+    return PHONE.sub(r"\1****\2", text)
 
 
 class SSHDiagnosticError(RuntimeError):
@@ -377,7 +470,8 @@ def private_key(credential_id: int):
     raise SSHDiagnosticError("私钥格式或口令无效；支持 Ed25519/RSA/ECDSA")
 
 
-def client_connect(target: dict, key, *, sock=None):
+def client_connect(target: dict, key, *, sock=None, timeout=6):
+    """Each handshake stage (TCP, banner, auth, channel) waits up to ``timeout``."""
     expected = store.validate_hostkey(target.get("host_key", ""))
     key_type, encoded = expected.split()
     public_key = paramiko.PKey.from_type_string(key_type, base64.b64decode(encoded))
@@ -397,10 +491,10 @@ def client_connect(target: dict, key, *, sock=None):
             pkey=key,
             allow_agent=False,
             look_for_keys=False,
-            timeout=6,
-            banner_timeout=6,
-            auth_timeout=6,
-            channel_timeout=6,
+            timeout=timeout,
+            banner_timeout=timeout,
+            auth_timeout=timeout,
+            channel_timeout=timeout,
             sock=sock,
         )
         return client
@@ -409,23 +503,36 @@ def client_connect(target: dict, key, *, sock=None):
         raise
 
 
-def _route(host: dict):
+def _route(host: dict, timeout=6):
+    """(jump client, tunnel) through the host's jump host, or (None, None);
+    each stage of the jump (TCP, banner, auth, channel) waits up to ``timeout``."""
     proxy = store.get_proxy(host.get("proxy_id"))
     jump = None
     tunnel = None
     if proxy:
-        jump = client_connect(proxy, private_key(proxy["credential_id"]))
+        jump = client_connect(
+            proxy, private_key(proxy["credential_id"]), timeout=timeout
+        )
         try:
             tunnel = jump.get_transport().open_channel(
                 "direct-tcpip",
                 (host["address"], int(host["port"])),
                 ("127.0.0.1", 0),
-                timeout=6,
+                timeout=timeout,
             )
         except Exception:
             jump.close()
             raise
     return jump, tunnel
+
+
+def time_budget(action, options):
+    """Seconds the caller allows for slot wait plus run (collect's
+    ``timeout_seconds``), or None; validated before any waiting."""
+    spec = extensions.spec_for(action)
+    if spec is None or not options:
+        return None
+    return extensions.validate_options(spec, options).get("timeout_seconds")
 
 
 def execute(
@@ -443,7 +550,13 @@ def execute(
     preflight=lambda: None,
 ) -> dict:
     global _BACKGROUND_ACTIVE
-    deadline = time.monotonic() + (180 if background else INLINE_WAIT_SECONDS)
+    started = time.monotonic()
+    budget = time_budget(action, options)
+    deadline = started + (180 if background else INLINE_WAIT_SECONDS)
+    if budget:
+        # A caller's bound covers the whole call: at most half of it goes to
+        # waiting for the slot, the run gets what is left (_execute_inner).
+        deadline = min(deadline, started + budget / 2)
     with _SLOTS:
         while (
             len(_ACTIVE_HOSTS) >= 4
@@ -472,6 +585,7 @@ def execute(
             expected_revision=expected_revision,
             symptom=symptom,
             options=options,
+            finish_by=started + budget if budget else None,
         )
     finally:
         with _SLOTS:
@@ -491,7 +605,9 @@ def _execute_inner(
     expected_revision=None,
     symptom=None,
     options=None,
+    finish_by=None,
 ) -> dict:
+    """One SSH run; ``finish_by`` (monotonic) is the caller's end of the call."""
     host = store.get_host(host_id)
     if cancelled():
         raise SSHDiagnosticError("任务已取消")
@@ -521,11 +637,20 @@ def _execute_inner(
     began = time.monotonic()
     jump = client = chan = None
     try:
-        jump, tunnel = _route(host)
-        client = client_connect(host, private_key(host["credential_id"]), sock=tunnel)
+        # Within a caller's bound the handshake stages share what is left,
+        # the jump host's connect and channel included.
+        stage = (
+            6
+            if finish_by is None
+            else max(1.0, min(6.0, (finish_by - time.monotonic()) / 5))
+        )
+        jump, tunnel = _route(host, timeout=stage)
+        client = client_connect(
+            host, private_key(host["credential_id"]), sock=tunnel, timeout=stage
+        )
         if cancelled() or store.get_host(host_id)["revision"] != host["revision"]:
             raise SSHDiagnosticError("任务已取消或主机配置已变更")
-        chan = client.get_transport().open_session(timeout=6)
+        chan = client.get_transport().open_session(timeout=stage)
         chan.settimeout(6)
         chan.exec_command(command)
         stdout, stderr = bytearray(), bytearray()
@@ -538,7 +663,10 @@ def _execute_inner(
         else:
             output_limit, seconds = 32768, 20
         deadline = time.monotonic() + seconds
-        truncated = timed_out = False
+        bounded = finish_by is not None and finish_by - 1 < deadline
+        if bounded:
+            deadline = finish_by - 1
+        truncated = timed_out = stderr_truncated = False
         while True:
             if cancelled():
                 raise SSHDiagnosticError("任务已取消")
@@ -547,21 +675,27 @@ def _execute_inner(
                 # overloaded machine the partial ps/journal output is the evidence.
                 if not stdout:
                     raise SSHDiagnosticError(
-                        f"SSH 诊断执行超时（本动作上限 {seconds} 秒）"
+                        "SSH 诊断执行超时（已用完调用方给定的 timeout_seconds）"
+                        if bounded
+                        else f"SSH 诊断执行超时（本动作上限 {seconds} 秒）"
                         if spec is not None
                         else "SSH 诊断执行超时（单项 20 秒 / 组合 60 秒）"
                     )
                 timed_out = True
                 break
-            for ready, recv, dest, limit in (
-                (chan.recv_ready, chan.recv, stdout, output_limit),
-                (chan.recv_stderr_ready, chan.recv_stderr, stderr, 2048),
-            ):
-                if ready():
-                    room = max(1, limit - len(dest) + 1)
-                    dest.extend(recv(min(4096, room)))
-                    if len(dest) > limit:
-                        truncated = True
+            if chan.recv_ready():
+                room = max(1, output_limit - len(stdout) + 1)
+                stdout.extend(chan.recv(min(4096, room)))
+                if len(stdout) > output_limit:
+                    truncated = True
+            if chan.recv_stderr_ready():
+                # Read on past the limit (a full stderr pipe would stall the
+                # remote script, and permission noise from du/df is common);
+                # only stdout over its limit ends the read as truncated.
+                chunk = chan.recv_stderr(65536)
+                if len(stderr) + len(chunk) > STDERR_LIMIT:
+                    stderr_truncated = True
+                stderr.extend(chunk[: max(0, STDERR_LIMIT - len(stderr))])
             if truncated:
                 break
             if (
@@ -573,7 +707,7 @@ def _execute_inner(
             time.sleep(0.03)
         code = None if truncated or timed_out else chan.recv_exit_status()
         output = redact_output(stdout[:output_limit].decode("utf-8", "replace"))
-        error = redact_output(stderr[:2048].decode("utf-8", "replace"))
+        error = redact_output(stderr[:STDERR_LIMIT].decode("utf-8", "replace"))
         if host.get("mode") == "gateway" and not output.startswith(
             "AIOPS_GATEWAY_V1\n"
         ):
@@ -625,6 +759,9 @@ def _execute_inner(
         }
         if error and not stderr_fatal:
             result["warnings"] = error.splitlines()[:5]
+        if stderr_truncated:
+            # Only the first STDERR_LIMIT bytes of stderr are kept.
+            result["stderr_truncated"] = True
         if spec is not None:
             result["request_options"] = options
             result["risk"] = spec.risk
@@ -662,6 +799,13 @@ def _execute_inner(
                     options=options,
                 )
             )
+            # As for triage: the script itself ends with printf (exit 0), so a
+            # failed or unfinished step is what makes a collection partial.
+            if action == "collect" and any(
+                step.get("status") != "success"
+                for step in result["summary"].get("steps") or ()
+            ):
+                result["status"] = "partial"
         return result
     except paramiko.BadHostKeyException:
         raise SSHDiagnosticError("SSH 主机公钥与已登记公钥不一致，已拒绝连接") from None

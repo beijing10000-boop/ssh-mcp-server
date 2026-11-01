@@ -25,6 +25,7 @@ from . import (
     WINDOW_PARAMS,
     ActionSpec,
     Param,
+    has_section,
     quote,
     register,
     resolve_window,
@@ -78,11 +79,13 @@ ACCESS_READ_BUDGET = 24
 # ---------------------------------------------------------------------------
 
 # nginx -T (or raw config files) -> only the directives the parser needs.
+# At most 10 test lines + 180 directive lines + 7 END lines: the shell keeps the
+# first 200, so the COUNT and CONFIG_TRUNCATED lines always survive.
 CONFIG_AWK = r"""
 function emit(line_) {
     if (line_ in seen) return
     seen[line_] = 1
-    if (shown < 190) print substr(line_, 1, 300)
+    if (shown < 180) print substr(line_, 1, 300)
     shown++
 }
 {
@@ -105,8 +108,8 @@ inlf {
     next
 }
 inup {
-    if ($0 ~ /^(server|keepalive)[ \t]/ && shown < 190) {
-        print substr($0, 1, 300)
+    if ($0 ~ /^(server|keepalive)[ \t]/) {
+        if (shown < 180) print substr($0, 1, 300)
         shown++
     }
     if (index($0, "}")) inup = 0
@@ -115,10 +118,8 @@ inup {
 /^upstream[ \t]/ {
     name = $2
     sub(/[{].*$/, "", name)
-    if (shown < 190) {
-        print "UPSTREAM " substr(name, 1, 100)
-        shown++
-    }
+    if (shown < 180) print "UPSTREAM " substr(name, 1, 100)
+    shown++
     ups++
     inup = 1
     if (index($0, "}")) inup = 0
@@ -146,7 +147,7 @@ END {
     print "COUNT upstream " ups + 0
     print "COUNT config_files " files + 0
     print "COUNT input_lines " NR
-    if (shown > 190) print "CONFIG_TRUNCATED " shown
+    if (shown > 180) print "CONFIG_TRUNCATED " shown
 }
 """
 
@@ -291,6 +292,18 @@ function tkey(ts_) {
         return substr(ts_, 1, 4) substr(ts_, 6, 2) substr(ts_, 9, 2) substr(ts_, 12, 2) substr(ts_, 15, 2) substr(ts_, 18, 2)
     return ""
 }
+# UTC offset (+HHMM) a tkey() stamp carries: CLF "+0800", ISO "+08:00" or "Z".
+function tzof(ts_,    off_) {
+    if (substr(ts_, 3, 1) == "/") off_ = substr(ts_, 22, 5)
+    else {
+        off_ = substr(ts_, 20)
+        sub(/^[.][0-9]+/, "", off_)
+        if (substr(off_, 1, 1) == "Z") return "+0000"
+        sub(/:/, "", off_)
+        off_ = substr(off_, 1, 5)
+    }
+    return (off_ ~ /^[+-][0-9][0-9][0-9][0-9]$/) ? off_ : ""
+}
 function jv(src_, name_,    at_, rest_, cut_, acc_) {
     at_ = index(src_, "\"" name_ "\":")
     if (at_ == 0) return ""
@@ -368,7 +381,8 @@ substr($0, 1, 1) == "\001" { next }
     } else {
         n = split($0, q, "\"")
         b = index(q[1], "[")
-        if (b) k = tkey(substr(q[1], b + 1, 25))
+        t = b ? substr(q[1], b + 1, 26) : ""
+        k = tkey(t)
         split(q[3], sb, " ")
         st = sb[1]
         ip = $1
@@ -406,6 +420,7 @@ substr($0, 1, 1) == "\001" { next }
         bad++
         next
     }
+    lt = t
     if (!(nf in ff)) ff[nf] = k
     fl[nf] = k
     if (k < skey || k > ukey) {
@@ -480,6 +495,10 @@ END {
         if (fl[i] > last) last = fl[i]
     }
     print "FIRST", (first == "" ? "-" : first), "LAST", (last == "" ? "-" : last)
+    # Window keys are host local time; a log written in another zone (nginx in
+    # a UTC container, JSON @timestamp in Z) is compared shifted by the gap.
+    lo = tzof(lt)
+    if (lo != "" && tz != "" && lo != tz) print "TZ_MISMATCH", lo, tz
 }
 """
 )
@@ -509,6 +528,45 @@ opt() {
 }
 """
 
+# The running master ("nginx: master process BIN -p P -c C"), after _DISCOVER:
+# without a discovered binary the master's own is used (how=" running"); when it
+# is the discovered one, its absolute -p/-c (mpfx/mconf, else empty) drive
+# nginx -T and the relative paths, so both actions follow the serving instance.
+# ps reads every /proc/<pid>/cmdline, which stalls on a process stuck in D
+# state: bounded like every other command that may hang.
+_MASTER = (
+    r"""
+margs=''
+if command -v ps >/dev/null 2>&1; then
+  margs=$( { """
+    + timed(3, "ps -eo args=")
+    + r"""; } 2>/dev/null | awk '$1 ~ /^(nginx|openresty|tengine):$/ && $2 == "master" {print; exit}')
+fi
+mbin=$(printf '%s\n' "$margs" | awk '{print $4}')
+mpfx=$(printf '%s\n' "$margs" | awk '{for (i = 5; i < NF; i++) if ($i == "-p") {print $(i + 1); exit}}')
+mconf=$(printf '%s\n' "$margs" | awk '{for (i = 5; i < NF; i++) if ($i == "-c") {print $(i + 1); exit}}')
+how=''
+if [ -z "$NGX" ]; then
+  case "$mbin" in
+    /*) if [ -f "$mbin" ] && [ -x "$mbin" ]; then NGX=$mbin; how=' running'; fi ;;
+  esac
+fi
+msame=''
+if [ -n "$NGX" ] && [ -n "$mbin" ] && { [ "$NGX" = "$mbin" ] || [ "${NGX##*/}" = "$mbin" ]; }; then
+  msame=1
+  case "$mpfx" in /*) ;; *) mpfx='' ;; esac
+  case "$mconf" in
+    /*) ;;
+    ?*) if [ -n "$mpfx" ]; then mconf=${mpfx%/}/$mconf; fi ;;
+  esac
+  case "$mconf" in /*) ;; *) mconf='' ;; esac
+else
+  mpfx=''
+  mconf=''
+fi
+"""
+)
+
 NGINX_TEMPLATE = (
     r"""
 minutes=__MINUTES__
@@ -523,48 +581,40 @@ since=$((now - minutes * 60))
 skey=$(date -d "@$since" '+%Y/%m/%d %H:%M:%S' 2>/dev/null)
 ukey=$(date -d "@$now" '+%Y/%m/%d %H:%M:%S' 2>/dev/null)
 procs=''
-margs=''
 if command -v ps >/dev/null 2>&1; then
+  # Masters first, so the 40-row cap never drops them. No well-formed row at
+  # all means ps rejected the columns (BusyBox, old procps); a listing without
+  # PID 1 shows only the processes of the account (/proc mounted hidepid).
   procs=$(ps -e -o pid= -o ppid= -o user= -o etimes= -o rss= -o pcpu= -o comm= -o args= 2>/dev/null | awk '
+    NF >= 8 && $1 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ {
+      rows++
+      if ($1 == 1) init = 1
+    }
     $7 == "nginx" || $7 == "openresty" || $7 == "tengine" || $8 ~ /^(nginx|openresty|tengine):$/ {
       a = $8
       for (i = 9; i <= NF; i++) a = a " " $i
-      print $1, $2, $3, $4, $5, $6, $7, substr(a, 1, 120)
+      r = $1 " " $2 " " $3 " " $4 " " $5 " " $6 " " $7 " " substr(a, 1, 120)
+      if (index(a, "master process")) mr[++nm] = r
+      else if (no < 40) other[++no] = r
+    }
+    END {
+      if (!rows) print "CAPABILITY_MISSING:ps-columns"
+      else if (!init) print "PS_LIMITED"
+      for (i = 1; i <= nm; i++) print mr[i]
+      for (i = 1; i <= no; i++) print other[i]
     }' | head -n 40)
-  margs=$(ps -eo args= 2>/dev/null | awk '$1 ~ /^(nginx|openresty|tengine):$/ && $2 == "master" {print; exit}')
 fi
-mbin=$(printf '%s\n' "$margs" | awk '{print $4}')
-mpfx=$(printf '%s\n' "$margs" | awk '{for (i = 5; i < NF; i++) if ($i == "-p") {print $(i + 1); exit}}')
-mconf=$(printf '%s\n' "$margs" | awk '{for (i = 5; i < NF; i++) if ($i == "-c") {print $(i + 1); exit}}')
 """
     + _DISCOVER
+    + _MASTER
     + r"""
-how=''
-if [ -z "$NGX" ]; then
-  case "$mbin" in
-    /*) if [ -f "$mbin" ] && [ -x "$mbin" ]; then NGX=$mbin; how=' running'; fi ;;
-  esac
-fi
 printf '[AIOPS_BIN]\n'
 if [ -n "$NGX" ]; then printf 'BIN %s%s\n' "$NGX" "$how"; else printf 'CAPABILITY_MISSING:nginx\n'; fi
 set --
-if [ -n "$NGX" ] && [ -n "$mbin" ] && { [ "$NGX" = "$mbin" ] || [ "${NGX##*/}" = "$mbin" ]; }; then
-  case "$mpfx" in
-    /*) set -- -p "$mpfx"; printf 'PREFIX_ARG %s\n' "$mpfx" ;;
-    *) mpfx='' ;;
-  esac
-  case "$mconf" in
-    /*) ;;
-    ?*) if [ -n "$mpfx" ]; then mconf=${mpfx%/}/$mconf; fi ;;
-  esac
-  case "$mconf" in
-    /*) set -- "$@" -c "$mconf"; printf 'CONF_ARG %s\n' "$mconf" ;;
-    *) mconf='' ;;
-  esac
-else
+if [ -n "$mpfx" ]; then set -- -p "$mpfx"; printf 'PREFIX_ARG %s\n' "$mpfx"; fi
+if [ -n "$mconf" ]; then set -- "$@" -c "$mconf"; printf 'CONF_ARG %s\n' "$mconf"; fi
+if [ -z "$msame" ]; then
   case "$mbin" in /*) printf 'MASTER_BIN %s\n' "$mbin" ;; esac
-  mpfx=''
-  mconf=''
 fi
 printf '[AIOPS_VERSION]\n'
 ver=''
@@ -742,8 +792,11 @@ if [ "${#skey}" -ne 14 ] || [ "${#ukey}" -ne 14 ]; then
   printf 'CAPABILITY_MISSING:date\n'
   exit 69
 fi
+tz=$(date +%z 2>/dev/null)
+case "$tz" in [+-][0-9][0-9][0-9][0-9]) ;; *) tz='' ;; esac
 """
     + _DISCOVER
+    + _MASTER
     + r"""
 ver=''
 if [ -n "$NGX" ]; then ver=$(__TIMED_V__); fi
@@ -752,12 +805,14 @@ if [ -n "$NGX" ]; then ver=$(__TIMED_V__); fi
     + r"""
 pfx=$(opt prefix)
 [ -n "$pfx" ] || pfx=/usr/local/nginx
+if [ -n "$mpfx" ]; then pfx=$mpfx; fi
 pfx=${pfx%/}
 confp=$(opt conf-path)
 if [ -z "$confp" ]; then
   if [ -n "$ver" ]; then confp=conf/nginx.conf; else confp=$dconf; fi
 fi
 case "$confp" in /*) ;; *) confp=$pfx/$confp ;; esac
+if [ -n "$mconf" ]; then confp=$mconf; fi
 bacc=$(opt http-log-path)
 case "$bacc" in ''|/*) ;; *) bacc=$pfx/$bacc ;; esac
 ALOG_AWK='__ALOG_AWK__'
@@ -766,6 +821,9 @@ loaded=''
 alogs_load() {
   if [ -n "$loaded" ]; then return 0; fi
   loaded=1
+  set --
+  if [ -n "$mpfx" ]; then set -- -p "$mpfx"; fi
+  if [ -n "$mconf" ]; then set -- "$@" -c "$mconf"; fi
   if [ -n "$NGX" ]; then
     alogs=$(__TIMED_T__ | awk -v pfx="$pfx" "$ALOG_AWK" | head -n 20)
   fi
@@ -842,7 +900,12 @@ printf '%s\n' "$plan" | while read -r k lim sz f; do
       ;;
   esac
 done
-if ! printf '%s\n' "$plan" | grep -q '^C '; then printf 'NO_FILE\n'; fi
+# No readable access log: nothing can be counted, so stop as a host limit
+# instead of reporting an empty window.
+if ! printf '%s\n' "$plan" | grep -q '^C '; then
+  printf 'NO_FILE\nCAPABILITY_MISSING:nginx-access-log\n'
+  exit 69
+fi
 filt() {
   if [ -n "$kw" ]; then grep -a -F -- "$kw"; else cat; fi
 }
@@ -871,8 +934,8 @@ agg=$(printf '%s\n' "$plan" | while read -r k lim sz f; do
       if [ $((t1 - t0)) -ge "$left" ]; then printf '\001AIOPS_SLOW %s\n' "$f"; fi
       ;;
   esac
-done | awk -v skey="$skey" -v ukey="$ukey" -v sel="$sel" -v topn="$topn" -v bucket="$bucket" '__ACCESS_AWK__')
-printf '%s\n' "$agg" | grep -E '^(RANGE|FIRST|SKIPPED|READ_TIMEOUT) '
+done | awk -v skey="$skey" -v ukey="$ukey" -v sel="$sel" -v topn="$topn" -v bucket="$bucket" -v tz="$tz" '__ACCESS_AWK__')
+printf '%s\n' "$agg" | grep -E '^(RANGE|FIRST|SKIPPED|READ_TIMEOUT|TZ_MISMATCH) '
 printf '[AIOPS_TOTALS]\n'
 printf '%s\n' "$agg" | grep -E '^(LINES|TOTAL|CLASS|SELECTED) '
 printf '[AIOPS_CODES]\n'
@@ -976,7 +1039,7 @@ def access_script(options: dict) -> str:
             "BUDGET": str(int(ACCESS_READ_BUDGET)),
             "ALLOWED": _patterns(),
             "TIMED_V": timed(3, '"$NGX" -V 2>&1'),
-            "TIMED_T": timed(8, '"$NGX" -T 2>/dev/null'),
+            "TIMED_T": timed(8, '"$NGX" -T "$@" 2>/dev/null'),
             "TIMED_CAT": timed(2, 'cat -- "$@" 2>/dev/null'),
             "ALOG_AWK": ALOG_AWK,
             "ACCESS_AWK": ACCESS_AWK,
@@ -992,7 +1055,10 @@ _SECRET_VALUE = re.compile(
     r"(?i)([\w.-]*(?:password|passwd|secret|token|key|credential)[\w.-]*)"
     r"(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s;,&\"']+)"
 )
-_URL_CREDENTIALS = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^\s/@:]*:[^\s/@]+@")
+# A Basic/Bearer credential standing alone, as "$http_authorization" leaves it
+# in an access-log field (masked as the log MCP masks it): redact_output only
+# sees one behind a secret-named key ("Authorization: Basic ...").
+_AUTH_SCHEME = re.compile(r"(?i)\b(basic|bearer)([ \t]+)[A-Za-z0-9._~+/=-]{12,}")
 UPSTREAM_KINDS = (
     "timed_out",
     "connect_failed",
@@ -1004,9 +1070,20 @@ UPSTREAM_KINDS = (
 ERROR_LEVELS = ("error", "crit", "alert", "emerg")
 
 
-def _redact(value: str) -> str:
-    value = _URL_CREDENTIALS.sub(r"\1[REDACTED]@", value)
-    return _SECRET_VALUE.sub(lambda m: m[1] + m[2] + "[REDACTED]", value)
+def redact_log(value: str) -> str:
+    """Second redaction layer for nginx evidence lines (syslog has its own,
+    syslog.redact_line, without the broad key rule).
+
+    The shared rules (secrets, pwd/pass, session cookies, Authorization, phone
+    and ID-card numbers) are the executor's redact_output, which already ran
+    over the whole output; it runs again so the parsers are safe on any text,
+    followed by the nginx key rule and bare Basic/Bearer credentials.
+    """
+    from ..diagnostics import redact_output  # diagnostics imports extensions
+
+    value = redact_output(value)
+    value = _SECRET_VALUE.sub(lambda m: m[1] + m[2] + "[REDACTED]", value)
+    return _AUTH_SCHEME.sub(r"\1\2[REDACTED]", value)
 
 
 def _int(value):
@@ -1043,7 +1120,7 @@ def _top(counter: dict, limit: int = 10) -> list[dict]:
 def _merge_top(counter: dict, line: str, tag: str) -> None:
     match = re.match(re.escape(tag) + r" (\d+) (.+)$", line)
     if match:
-        value = _redact(match[2])[:200]
+        value = redact_log(match[2])[:200]
         counter[value] = counter.get(value, 0) + int(match[1])
 
 
@@ -1051,6 +1128,12 @@ def _key_time(key) -> str | None:
     if not isinstance(key, str) or not re.fullmatch(r"\d{14}", key):
         return None
     return f"{key[0:4]}-{key[4:6]}-{key[6:8]} {key[8:10]}:{key[10:12]}:{key[12:14]}"
+
+
+def _offset_seconds(offset: str) -> int:
+    """'+0800' -> 28800; callers pass offsets already matched as [+-]HHMM."""
+    seconds = int(offset[1:3]) * 3600 + int(offset[3:5]) * 60
+    return -seconds if offset[0] == "-" else seconds
 
 
 def _slash_time(value) -> str | None:
@@ -1084,7 +1167,7 @@ def _config(text: str) -> dict:
         "source": source,
         "test": test,
         "test_messages": [
-            _redact(line)[:300]
+            redact_log(line)[:300]
             for line in tests
             if "[emerg]" in line or "[alert]" in line or "[warn]" in line
         ][:8],
@@ -1139,7 +1222,7 @@ def _config(text: str) -> dict:
             config["truncated"] = True
             continue
         if name == "server" and upstream is not None:
-            _add_unique(upstream["servers"], _redact(_arg(line, "server"))[:160], 50)
+            _add_unique(upstream["servers"], redact_log(_arg(line, "server"))[:160], 50)
             continue
         if name == "keepalive" and upstream is not None:
             upstream["keepalive"] = _int(_arg(line, "keepalive"))
@@ -1150,11 +1233,11 @@ def _config(text: str) -> dict:
             key = "access_logs" if name == "access_log" else "error_logs"
             # Files only: off, stderr, syslog: and memory: are not readable logs.
             if path != "off" and not path.startswith(("stderr", "syslog:", "memory:")):
-                _add_unique(config[key], _redact(path)[:200], 20)
+                _add_unique(config[key], redact_log(path)[:200], 20)
         elif name == "log_format" and len(words) >= 3:
             fmt = _arg(line, "log_format")[len(words[1]) :].strip()
             if len(config["log_formats"]) < 10:
-                config["log_formats"][words[1][:60]] = _redact(fmt)[:300]
+                config["log_formats"][words[1][:60]] = redact_log(fmt)[:300]
         elif name == "listen":
             _add_unique(config["listen"], _arg(line, "listen")[:80], 40)
         elif name == "worker_processes" and config["worker_processes"] is None:
@@ -1188,7 +1271,7 @@ def _processes(text: str) -> list[dict]:
                 "elapsed_seconds": _int(fields[3]),
                 "rss_KiB": _int(fields[4]),
                 "cpu_percent": observations.number(fields[5]),
-                "command": _redact(args)[:120],
+                "command": redact_log(args)[:120],
             }
         )
     return rows[:40]
@@ -1354,7 +1437,7 @@ def _errors(text: str) -> dict:
         elif tag == "SAMPLE":
             match = re.match(r"SAMPLE (\d+) (.*)$", line)
             if match:
-                samples.append(_redact(match[2])[:240])
+                samples.append(redact_log(match[2])[:240])
     errors["top_upstreams"] = _top(tops["TOP_UPSTREAM"])
     errors["top_clients"] = _top(tops["TOP_CLIENT"])
     errors["top_requests"] = _top(tops["TOP_REQUEST"])
@@ -1363,7 +1446,25 @@ def _errors(text: str) -> dict:
     errors["samples"] = sorted(samples, key=lambda line: line[:19])[-20:]
     starts = [f["coverage_from"] for f in errors["files"] if f["coverage_from"]]
     errors["coverage_from"] = max(starts) if starts else None
+    if not any(f["lines_read"] is not None for f in errors["files"]):
+        errors["lines_in_window"] = None  # no error.log read: unknown, not zero
     return errors
+
+
+def _process_listing(text: str) -> str | None:
+    """ok, limited (PID 1 not visible), failed (ps gave no usable row) or
+    missing (no ps); None without a process section."""
+    if not has_section(text, "PROCESS"):
+        return None
+    body = observations.section(text, "PROCESS")
+    for marker, state in (
+        ("CAPABILITY_MISSING:ps", "missing"),
+        ("CAPABILITY_MISSING:ps-columns", "failed"),
+        ("PS_LIMITED", "limited"),
+    ):
+        if re.search(r"(?m)^" + re.escape(marker) + r"$", body):
+            return state
+    return "ok"
 
 
 def parse_nginx(text, summary, findings, options) -> None:
@@ -1404,7 +1505,13 @@ def parse_nginx(text, summary, findings, options) -> None:
     systemd = _systemd(text)
     listening, established, listen_source = _listening(text)
     errors = _errors(text)
-    workers = sum(1 for row in processes if row["role"] == "worker")
+    listing = _process_listing(text)
+    # Without a usable listing the worker count is unknown, not zero.
+    workers = (
+        sum(1 for row in processes if row["role"] == "worker")
+        if listing == "ok" or processes
+        else None
+    )
     masters = [row for row in processes if row["role"] == "master"]
     summary.update(
         {
@@ -1415,6 +1522,7 @@ def parse_nginx(text, summary, findings, options) -> None:
             "config": config,
             "processes": processes,
             "worker_count": workers,
+            "process_listing": listing,
             "systemd": systemd,
             "listening": listening,
             "listen_source": listen_source,
@@ -1433,7 +1541,17 @@ def parse_nginx(text, summary, findings, options) -> None:
         "单次快照：进程、端口与 systemd 为采集瞬间状态；配置来自 nginx -T，"
         "失败或无权限时回退读取主配置与 conf.d/sites-enabled（include 的其他目录不在其中）；"
         f"error.log 只读每个文件尾部 20 MB、最多 2 个，按主机本地时间统计最近 {minutes} 分钟；"
-        "无匹配不代表未发生故障"
+        + (
+            "本次未读取到任何 error.log，错误统计为空不代表没有错误；"
+            if errors["lines_in_window"] is None
+            else ""
+        )
+        + (
+            "进程列表不可用或不完整（process_listing），不据此判断 Nginx 是否在运行；"
+            if listing in ("missing", "failed", "limited")
+            else ""
+        )
+        + "无匹配不代表未发生故障"
     )
     observations.metric(summary, findings, "nginx_worker_count", workers)
     if established:
@@ -1481,16 +1599,18 @@ def parse_nginx(text, summary, findings, options) -> None:
             }
         )
     active_unit = any(unit.get("active") == "active" for unit in systemd)
-    # Without a process listing (ps missing, section absent) nothing is known.
-    process_text = observations.section(text, "PROCESS")
-    listed = "[AIOPS_PROCESS]" in text and "CAPABILITY_MISSING:ps" not in process_text
-    if binary and not masters and listed:
-        if active_unit:
+    # Without a process listing (ps missing or failed, section absent) nothing
+    # is known; a listing restricted to the account's own processes proves no
+    # absence either.
+    if binary and not masters and listing in ("ok", "limited"):
+        if active_unit or listing == "limited":
             findings.append(
                 {
                     "level": "info",
                     "metric": "nginx_process_not_visible",
-                    "value": "systemd active，但进程列表中没有 master",
+                    "value": "systemd active，但进程列表中没有 master"
+                    if listing == "ok"
+                    else "进程列表受限（看不到 PID 1），其中没有 master",
                     "threshold": "可见 master 进程",
                     "hint": "可能是 /proc 以 hidepid 挂载或进程在容器内；以 systemd 状态与监听端口为准",
                 }
@@ -1516,6 +1636,22 @@ def parse_nginx(text, summary, findings, options) -> None:
                 hint="systemd 自动重启过该单元（经验阈值 ≥1 即关注）；结合 Result、error.log 与 journal 查看重启原因",
             )
     _error_findings(summary, findings, errors)
+    if errors["lines_in_window"] is None and (binary or processes):
+        findings.append(
+            {
+                "level": "info",
+                "metric": "error_log_not_read",
+                "value": [f["path"] for f in errors["files"]]
+                or (
+                    "未找到 error.log 文件"
+                    if errors["window"]["since"] is not None
+                    else "未计算出时间窗口，未读取 error.log"
+                ),
+                "threshold": "至少读取 1 个 error.log",
+                "hint": "没有读取到任何 error.log（error_log 指向 syslog/stderr、文件不存在或无读权限）："
+                "errors 中的空计数不代表没有错误，可改用 ssh_diagnose_syslog 或日志平台查看",
+            }
+        )
 
 
 def _error_findings(summary, findings, errors) -> None:
@@ -1637,8 +1773,13 @@ def _access_files(text: str) -> dict:
         "first": None,
         "last": None,
         "no_file": False,
+        "tz_mismatch": None,
     }
     for line in _lines(text, "FILES"):
+        match = re.match(r"TZ_MISMATCH ([+-]\d{4}) ([+-]\d{4})$", line)
+        if match:
+            result["tz_mismatch"] = {"log_offset": match[1], "host_offset": match[2]}
+            continue
         match = re.match(r"WINDOW (\d+) (\d+) (\d{14}) (\d{14})$", line)
         if match:
             result["window"] = {
@@ -1696,7 +1837,7 @@ def _counted(text: str, tag: str, limit: int) -> list[dict]:
     for line in _lines(text, tag):
         match = re.match(re.escape(tag) + r" (\d+) (.+)$", line)
         if match and len(rows) < limit:
-            rows.append({"value": _redact(match[2])[:200], "count": int(match[1])})
+            rows.append({"value": redact_log(match[2])[:200], "count": int(match[1])})
     rows.sort(key=lambda row: -row["count"])
     return rows
 
@@ -1793,6 +1934,30 @@ def parse_access(text, summary, findings, options) -> None:
             }
         )
         return
+    if files["no_file"]:
+        # Nothing was read: zero requests would read as "no traffic".
+        summary["coverage"] = "未找到可读的访问日志，没有读取任何请求，不能据此判断流量"
+        findings.append(
+            {
+                "level": "warning",
+                "metric": "access_log_not_found",
+                "value": {
+                    "missing": files["missing"][:5],
+                    "no_access": files["no_access"][:5],
+                },
+                "threshold": "至少 1 个可读的访问日志",
+                "hint": "未找到可读的访问日志（文件不存在、无读权限，或 access_log 写入 syslog/自定义路径）："
+                "本次没有读取任何请求，不能据此判断窗口内有无流量或错误；"
+                "用 path 指定 nginx 配置中的 access_log，或改查日志平台",
+            }
+        )
+        return
+    tz = files["tz_mismatch"]
+    if tz:
+        tz["shift_seconds"] = _offset_seconds(tz["log_offset"]) - _offset_seconds(
+            tz["host_offset"]
+        )
+        summary["tz_mismatch"] = tz
     totals = {"requests": 0, "by_class": {}, "selected": 0}
     lines_read = unparsed = None
     for line in _lines(text, "TOTALS"):
@@ -1843,7 +2008,7 @@ def parse_access(text, summary, findings, options) -> None:
     for line in _lines(text, "SAMPLES"):
         match = re.match(r"SAMPLE (\d+) (.*)$", line)
         if match:
-            samples.append(_redact(match[2])[:240])
+            samples.append(redact_log(match[2])[:240])
     timing = _timing(text)
     summary.update(
         {
@@ -1864,7 +2029,9 @@ def parse_access(text, summary, findings, options) -> None:
     summary["coverage"] = (
         "只读每个访问日志尾部约 30 MB"
         + ("，并读取了未压缩轮转文件尾部 10 MB" if rotated else "，未读取轮转文件")
-        + "；按主机本地时间筛选窗口，status 只影响 TOP 与样本，"
+        + "；按主机本地时间筛选窗口"
+        + ("（日志时区与主机不同，窗口错位，见 tz_mismatch）" if tz else "")
+        + "，status 只影响 TOP 与样本，"
         "总量、状态码、分钟趋势与耗时统计覆盖窗口内全部请求（keyword 先行过滤）；"
         "无法识别的日志格式计入 unparsed_lines"
     )
@@ -1890,8 +2057,22 @@ def parse_access(text, summary, findings, options) -> None:
                 + (
                     "读到的行均无法识别为 combined/JSON 访问日志"
                     if lines_read and unparsed == lines_read
+                    else "日志时区与主机不同，窗口可能整体错位（见 log_timezone_mismatch）"
+                    if tz
                     else "该日志在窗口内可能确实没有流量"
                 ),
+            }
+        )
+    if tz:
+        findings.append(
+            {
+                "level": "warning",
+                "metric": "log_timezone_mismatch",
+                "value": tz,
+                "threshold": "日志时区与主机一致",
+                "hint": f"访问日志时间带 {tz['log_offset']} 时区，窗口却按主机本地时间（{tz['host_offset']}）筛选："
+                "统计与分钟趋势落在错位的时段（容器内 nginx 常用 UTC）；把 since/until 各加上 shift_seconds 后重查"
+                "（until 不能晚于当前时间），或以日志平台为准",
             }
         )
     if lines_read and unparsed and unparsed * 2 > lines_read:

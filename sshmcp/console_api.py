@@ -153,54 +153,99 @@ class EnableIn(BaseModel):
 
 
 class AccessIn(BaseModel):
+    """Bulk SSH binding; a field left out keeps each host's current value.
+
+    `proxy_id: null` given explicitly means a direct connection.
+    """
+
     model_config = ConfigDict(extra="forbid")
     host_ids: list[StrictInt] = Field(min_length=1, max_length=1000)
-    credential_id: StrictInt = Field(ge=1)
-    username: str = Field(min_length=1, max_length=32)
-    port: StrictInt = Field(default=22, ge=1, le=65535)
+    credential_id: StrictInt | None = Field(default=None, ge=1)
+    username: str | None = Field(default=None, min_length=1, max_length=32)
+    port: StrictInt | None = Field(default=None, ge=1, le=65535)
     proxy_id: StrictInt | None = Field(default=None, ge=1)
 
 
 @router.post("/hosts/bulk-access")
 def bind_access(body: AccessIn, actor=Depends(admin)):
     try:
-        username = store.username(body.username)
+        changes = {
+            key: getattr(body, key)
+            for key in ("credential_id", "username", "port")
+            if getattr(body, key) is not None
+        }
+        if "proxy_id" in body.model_fields_set:
+            changes["proxy_id"] = body.proxy_id
+        if not changes:
+            raise ValueError("请至少修改一项：SSH 凭据、用户名、端口或跳板")
+        if "username" in changes:
+            changes["username"] = store.username(changes["username"])
         ids = sorted(set(body.host_ids))
+        updated, cleared, skipped = 0, [], []
         with store.db() as c:
             c.execute("BEGIN IMMEDIATE")
-            if not c.execute(
-                "SELECT 1 FROM credentials WHERE id=?", (body.credential_id,)
-            ).fetchone():
+            if (
+                "credential_id" in changes
+                and not c.execute(
+                    "SELECT 1 FROM credentials WHERE id=?", (changes["credential_id"],)
+                ).fetchone()
+            ):
                 raise ValueError("SSH 凭据不存在")
             if (
-                body.proxy_id
+                changes.get("proxy_id")
                 and not c.execute(
-                    "SELECT 1 FROM proxies WHERE id=?", (body.proxy_id,)
+                    "SELECT 1 FROM proxies WHERE id=?", (changes["proxy_id"],)
                 ).fetchone()
             ):
                 raise ValueError("跳板不存在")
             for ident in ids:
                 row = c.execute("SELECT * FROM hosts WHERE id=?", (ident,)).fetchone()
-                if not row or row["asset_type"] != "linux":
-                    raise ValueError("所选资产包含不存在或非 Linux 的主机")
-                moved = row["port"] != body.port or row["proxy_id"] != body.proxy_id
+                if not row:
+                    raise ValueError("所选资产包含不存在的主机")
+                if row["asset_type"] != "linux":
+                    # Applied to the selected Linux hosts only; others are listed.
+                    skipped.append(
+                        {
+                            "host_id": ident,
+                            "name": row["name"],
+                            "reason": "非 Linux 资产，未修改",
+                        }
+                    )
+                    continue
+                diff = {k: v for k, v in changes.items() if row[k] != v}
+                if not diff:
+                    continue
+                # Only a real endpoint change invalidates the pinned host key.
+                moved = "port" in diff or "proxy_id" in diff
                 c.execute(
-                    "UPDATE hosts SET credential_id=?,username=?,port=?,proxy_id=?,host_key=CASE WHEN ? THEN '' ELSE host_key END,last_status='untested',revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                    (
-                        body.credential_id,
-                        username,
-                        body.port,
-                        body.proxy_id,
-                        moved,
-                        ident,
-                    ),
+                    "UPDATE hosts SET "
+                    + ",".join(k + "=?" for k in diff)
+                    + ",host_key=CASE WHEN ? THEN '' ELSE host_key END,last_status='untested',revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (*diff.values(), moved, ident),
                 )
                 if moved:
                     c.execute(
                         "DELETE FROM host_key_candidates WHERE host_id=?", (ident,)
                     )
-        store.audit(actor, "hosts_bind_access", str(len(ids)), "success")
-        return {"count": len(ids)}
+                    if row["host_key"]:
+                        cleared.append({"host_id": ident, "name": row["name"]})
+                updated += 1
+            if len(skipped) == len(ids):
+                raise ValueError("所选资产中没有 Linux 主机，未做任何修改")
+        count = len(ids) - len(skipped)
+        store.audit(
+            actor,
+            "hosts_bind_access",
+            str(count),
+            "success",
+            f"updated={updated};key_cleared={len(cleared)};skipped={len(skipped)}",
+        )
+        return {
+            "count": count,
+            "updated": updated,
+            "key_cleared": cleared,
+            "skipped": skipped,
+        }
     except Exception as exc:
         fail(exc)
 
