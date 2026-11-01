@@ -386,10 +386,13 @@ JVM_EFFECTS = (".attach_pid", ".java_pid", "Attach Listener", "SIGQUIT", "runuse
 def test_jvm_side_effects_are_written_down():
     tool = mcp_tools.mcp._tool_manager._tools["ssh_diagnose_jvm"].description
     notes = "".join(next(e for e in catalog.entries() if e["id"] == "jvm")["notes"])
+    docs = (ROOT / "docs" / "MCP.md").read_text(encoding="utf-8")
     for effect in JVM_EFFECTS:
         assert effect in tool, effect
         assert effect in notes, effect
-    assert "hsperfdata" in notes and "安全点" in notes
+        assert effect in docs, effect
+    for text in (notes, docs):
+        assert "hsperfdata" in text and "安全点" in text
 
 
 # ------------------------------- SSH-NGX-06: request_time via the log_format --
