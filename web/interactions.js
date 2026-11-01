@@ -380,6 +380,9 @@ document.addEventListener("click", async (e) => {
     return;
   e.preventDefault();
   e.stopImmediatePropagation();
+  // One request per click, as in app.js: a double click on 只重试失败项 or a
+  // readiness badge must not submit twice.
+  b.disabled = true;
   try {
     if (a === "remove-target") {
       state.targets.delete(Number(id));
@@ -407,5 +410,7 @@ document.addEventListener("click", async (e) => {
     }
   } catch (ex) {
     notice(ex.message, true);
+  } finally {
+    b.disabled = false;
   }
 });

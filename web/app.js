@@ -127,24 +127,44 @@ async function api(path, method = "GET", body) {
   });
   const payload = await result.json().catch(() => ({}));
   if (result.status === 401) {
+    // Signed in before: the session ended (8 h) or admin rights were removed.
+    const expired = !!currentUser;
     csrfToken = "";
     currentUser = null;
+    clearTimeout(timer);
+    for (const dialog of document.querySelectorAll("dialog[open]"))
+      dialog.close();
     $("#app").hidden = true;
     $("#login").hidden = false;
+    if (expired) {
+      const message = $("#login-error");
+      message.textContent = "会话已过期或权限已变更，请重新登录。";
+      message.className = "error";
+      message.hidden = false;
+    }
     throw Object.assign(new Error("身份验证失效，请重新登录"), { status: 401 });
   }
   if (!result.ok) {
     const info = payload.detail;
-    throw new Error(
-      typeof info === "string"
-        ? info
-        : Array.isArray(info)
-          ? info.map((e) => e.msg).join("; ")
-          : "请求失败（HTTP " + result.status + "）",
+    throw Object.assign(
+      new Error(
+        typeof info === "string"
+          ? info
+          : Array.isArray(info)
+            ? info.map((e) => e.msg).join("; ")
+            : "请求失败（HTTP " + result.status + "）",
+      ),
+      { status: result.status },
     );
   }
   return payload;
 }
+// A record that retention cleanup removed (404) is gone, not a page error.
+const unlessGone = (request) =>
+  request.catch((e) => {
+    if (e.status === 404) return null;
+    throw e;
+  });
 function notice(text, failure = false) {
   if (failure && $("#editor").open) {
     const e = $("#editor-feedback");
@@ -405,19 +425,31 @@ async function pageProxies() {
 async function pageKeys() {
   const batches = await api("/host-keys/batches");
   if (!state.batchId && batches.length) state.batchId = batches[0].id;
+  const load = (id) =>
+    unlessGone(api("/host-keys/batches/" + encodeURIComponent(id)));
   let intro =
     '<p class="intro">① 选择目标并批量扫描 SSH 握手公钥 → ② 按服务器实际密钥算法取得可信指纹 → ③ 独立核对后确认保存 → ④ 返回主机资产进行连接测试。扫描本身不会自动信任服务器。</p>';
   let records = "",
-    detail = null;
-  if (state.batchId) {
-    detail = await api(
-      "/host-keys/batches/" + encodeURIComponent(state.batchId),
+    detail = state.batchId ? await load(state.batchId) : null;
+  if (state.batchId && !detail) {
+    // Removed after scan_days (a bookmark or a long-open tab): show the latest.
+    const gone = state.batchId;
+    state.batchId = batches.find((x) => x.id !== gone)?.id || null;
+    state.manifest = "";
+    history.replaceState(
+      null,
+      "",
+      "#keys" + (state.batchId ? "/" + state.batchId : ""),
     );
+    notice("该公钥扫描批次已过期被清理，已改为显示最新批次。", true);
+    detail = state.batchId ? await load(state.batchId) : null;
+  }
+  state.keyDetail = detail;
+  if (detail) {
     const batch = detail.batch;
     intro +=
       `<div class="progress-heading">${badge(batch.status)}<strong>${batch.completed} / ${batch.total} 台</strong></div>` +
       `<progress value="${batch.completed}" max="${batch.total}" aria-label="公钥获取进度"></progress>`;
-    state.keyDetail = detail;
     records = detail.items
       .map((r) => {
         const statusName =
@@ -734,37 +766,6 @@ async function pageClients() {
   );
 }
 
-// Recommended scope for the AI Ops Platform pre-collection: no JVM attach,
-// no triage, directory scan or per-peer sampling.
-const recommendedClientActions = [
-  "connection",
-  "health",
-  "capabilities",
-  "cpu",
-  "memory",
-  "disk",
-  "network",
-  "system",
-  "processes",
-  "memory_processes",
-  "pressure",
-  "io",
-  "sockets",
-  "tcp_states",
-  "service",
-  "logs",
-  "log_errors",
-  "oom",
-  "kernel",
-  "failed_services",
-  "service_inventory",
-  "syslog",
-  "nginx",
-  "nginx_access",
-  "java",
-  "service_detail",
-  "service_map",
-];
 function costlyActions(actions) {
   const names = state.tools
     .filter((t) => actions.includes(t.id) && ["medium", "high"].includes(t.risk))
@@ -1151,18 +1152,23 @@ async function pageFeishu() {
       '</div><div class="modal-actions"><button type="submit" class="btn primary">保存管理员名单</button></div></form>',
   );
 }
+// [setting, record kind, unit hint] of the retention form.
+const retentionFields = [
+  ["audit_days", "审计记录", "天，最少 7"],
+  ["diagnostic_days", "诊断结果", "天"],
+  ["scan_days", "公钥扫描历史", "天"],
+  ["zabbix_days", "资产发现预览", "天"],
+];
 async function pageRetention() {
   const r = await api("/settings/retention");
+  state.retention = r;
   return panel(
     "历史数据保留",
     '<p class="help">每小时清理到期记录；有删除时每天最多执行一次 VACUUM。运行中的任务、凭据和已核验公钥保留。修改天数会影响下一次清理。</p><form id="retention-form"><div class="fields">' +
-      [
-        ["audit_days", "审计记录（天，最少 7）"],
-        ["diagnostic_days", "诊断结果（天）"],
-        ["scan_days", "公钥扫描历史（天）"],
-        ["zabbix_days", "资产发现预览（天）"],
-      ]
-        .map(([k, v]) => field(k, v, r[k], "number"))
+      retentionFields
+        .map(([k, name, unit]) =>
+          field(k, `${name}（${unit}）`, r[k], "number"),
+        )
         .join("") +
       `</div><p class="muted">最近清理：${date(r.last_cleanup)} · 最近压缩：${date(r.last_vacuum)}</p>` +
       '<div class="modal-actions"><button class="btn primary" type="submit">保存保留策略</button></div></form>',
@@ -1436,7 +1442,7 @@ $("#editor-form").addEventListener("submit", async (e) => {
   try {
     const result = await state.editor(e.target);
     closeModal();
-    notice(result?.notice || "保存成功");
+    notice(result?.notice || "保存成功", !!result?.warn);
     await render();
     if (result?.token) {
       openModal(
@@ -1539,6 +1545,23 @@ function hostBody(form) {
       Number(x.value),
     ),
   };
+}
+// Result of a bulk SSH binding, naming the hosts that need attention.
+function bindingNotice(r) {
+  const names = (items) =>
+    items
+      .slice(0, 10)
+      .map((h) => h.name)
+      .join("、") + (items.length > 10 ? ` 等 ${items.length} 台` : "");
+  return (
+    `已处理 ${r.count} 台 Linux 主机，其中 ${r.updated} 台有变更。` +
+    (r.key_cleared.length
+      ? `端口或跳板已变化，清空了 ${r.key_cleared.length} 台的已核验公钥，需要重新核验：${names(r.key_cleared)}。`
+      : "") +
+    (r.skipped.length
+      ? `跳过 ${r.skipped.length} 台非 Linux 资产：${names(r.skipped)}。`
+      : "")
+  );
 }
 function keyEditor() {
   return (
@@ -1714,17 +1737,37 @@ $("#content").addEventListener("submit", async (e) => {
   }
   if (e.target.id === "retention-form") {
     e.preventDefault();
+    const button = e.target.querySelector("button[type=submit]");
+    const body = Object.fromEntries(
+      [...new FormData(e.target).entries()].map(([k, v]) => [k, Number(v)]),
+    );
+    // A shorter period permanently deletes history at the next hourly cleanup.
+    const shorter = retentionFields.filter(
+      ([k]) => body[k] < (state.retention?.[k] ?? 0),
+    );
+    if (
+      shorter.length &&
+      !(await askConfirmation(
+        "缩短保留天数后，下一次每小时清理将永久删除：" +
+          shorter
+            .map(
+              ([k, name]) =>
+                `${body[k]} 天前的${name}（原保留 ${state.retention[k]} 天）`,
+            )
+            .join("；") +
+          "。删除后无法恢复，确认保存？",
+      ))
+    )
+      return;
+    button.disabled = true;
     try {
-      await api(
-        "/settings/retention",
-        "PUT",
-        Object.fromEntries(
-          [...new FormData(e.target).entries()].map(([k, v]) => [k, Number(v)]),
-        ),
-      );
+      await api("/settings/retention", "PUT", body);
+      state.retention = { ...state.retention, ...body };
       notice("保留策略已保存");
     } catch (ex) {
       notice(ex.message, true);
+    } finally {
+      button.disabled = false;
     }
     return;
   }
@@ -1858,7 +1901,9 @@ document.addEventListener("click", async (e) => {
     }
     if (action === "retry-job") {
       const r = await api("/jobs/" + id + "/retry", "POST");
-      go("job/" + r.job_ids[0]);
+      // The host may no longer be ready: show why instead of opening nothing.
+      if (r.total) go("job/" + r.job_ids[0]);
+      else notice(r.skipped.map((x) => x.reason).join("；"), true);
       return;
     }
     if (action === "clear-selected") {
@@ -1893,30 +1938,54 @@ document.addEventListener("click", async (e) => {
     if (action === "bind-selected") {
       if (!state.selected.size) throw Error("请先选择需要绑定的 Linux 主机");
       if (!state.credentials.length) throw Error("请先在 SSH 凭据页面添加私钥");
+      // Every field starts at 保持不变 and only chosen ones are sent, so hosts
+      // on other ports, users or jump hosts keep them (and their pinned keys).
       openModal(
         "批量绑定 SSH 访问",
-        field(
-          "credential_id",
-          "SSH 凭据",
-          state.credentials[0]?.id,
-          "text",
-          state.credentials.map((c) => [c.id, c.name]),
-        ) +
-          field("username", "SSH 用户名", "root") +
-          field("port", "SSH 端口", 22, "number") +
-          field("proxy_id", "跳板", "", "text", [
+        field("credential_id", "SSH 凭据", "", "text", [
+          ["", "保持不变"],
+          ...state.credentials.map((c) => [c.id, c.name]),
+        ]) +
+          field(
+            "username",
+            "SSH 用户名",
+            "",
+            "text",
+            null,
+            false,
+            "留空保持各主机当前用户名",
+          ) +
+          field(
+            "port",
+            "SSH 端口",
+            "",
+            "number",
+            null,
+            false,
+            "留空保持各主机当前端口",
+          ) +
+          field("proxy_id", "跳板", "keep", "text", [
+            ["keep", "保持不变"],
             ["", "直连"],
             ...state.proxies.map((p) => [p.id, p.name]),
           ]) +
-          '<p class="notice wide">应用到所选全部 Linux 主机。端口或跳板发生变化时，需要重新核验公钥；凭据变更后需要重新测试 SSH。</p>',
-        (form) =>
-          api("/hosts/bulk-access", "POST", {
-            host_ids: [...state.selected],
-            credential_id: Number(getForm(form, "credential_id")),
-            username: getForm(form, "username"),
-            port: Number(getForm(form, "port")),
-            proxy_id: numberOrNull(getForm(form, "proxy_id")),
-          }),
+          '<p class="notice wide">只修改所选的项，其余保持各主机当前值；非 Linux 资产会被跳过并列出。端口或跳板实际变化的主机会清空已核验公钥，需要重新核验；凭据或用户名变化后需要重新测试 SSH。</p>',
+        async (form) => {
+          const body = { host_ids: [...state.selected] };
+          const credential = getForm(form, "credential_id"),
+            username = getForm(form, "username").trim(),
+            port = getForm(form, "port"),
+            proxy = getForm(form, "proxy_id");
+          if (credential) body.credential_id = Number(credential);
+          if (username) body.username = username;
+          if (port) body.port = Number(port);
+          if (proxy !== "keep") body.proxy_id = numberOrNull(proxy);
+          if (Object.keys(body).length === 1)
+            throw Error("请至少修改一项：SSH 凭据、用户名、端口或跳板");
+          const r = await api("/hosts/bulk-access", "POST", body);
+          // Cleared keys need follow-up: shown as an alert, and for longer.
+          return { notice: bindingNotice(r), warn: r.key_cleared.length > 0 };
+        },
       );
       return;
     }
@@ -2038,8 +2107,8 @@ document.addEventListener("click", async (e) => {
       const boxes = [
         ...document.querySelectorAll("#editor-fields [name=client_action]"),
       ];
-      for (const box of boxes)
-        box.checked = recommendedClientActions.includes(box.value);
+      // The recommended scope is defined by the server (GET /tools).
+      for (const box of boxes) box.checked = !!toolById(box.value)?.recommended;
       const hint = $("#client-action-hint");
       if (hint)
         hint.textContent = `已按推荐勾选 ${boxes.filter((box) => box.checked).length} 项（不含 jvm、triage、directory、peer_*），可继续手动调整。`;
