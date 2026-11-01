@@ -2,7 +2,9 @@
 
 from concurrent.futures import ThreadPoolExecutor
 import json
+import logging
 import re
+import sqlite3
 import time
 import uuid
 
@@ -13,7 +15,10 @@ from . import access, diagnostics, store, observations
 from .auth import admin, admins
 
 router = APIRouter(prefix="/api/v1/jobs")
+log = logging.getLogger(__name__)
 POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ssh-diagnostics")
+# Writes of a claimed job's result; each already waits busy_timeout for a lock.
+SAVE_ATTEMPTS = 3
 
 
 class RunIn(BaseModel):
@@ -124,7 +129,7 @@ def create(
     for ident in jobs:
         if background:
             try:
-                POOL.submit(work, ident, True)
+                POOL.submit(_background, ident)
             except RuntimeError:
                 with store.db() as c:
                     c.execute(
@@ -220,6 +225,14 @@ def authorize(job, request=None):
                     raise PermissionError("主机已不在 MCP 客户端授权范围内")
 
 
+def _background(ident):
+    """Pool entry point: nothing reads the future, so a crash is logged here."""
+    try:
+        work(ident, True)
+    except Exception:
+        log.exception("Diagnostic job %s failed outside its result handling", ident)
+
+
 def work(ident, background=False):
     with store.db() as c:
         c.execute("BEGIN IMMEDIATE")
@@ -231,9 +244,12 @@ def work(ident, background=False):
         job = dict(
             c.execute("SELECT * FROM diagnostic_jobs WHERE id=?", (ident,)).fetchone()
         )
-    request = json.loads(store.unseal(job["request"]))
-    error = ""
+    # From here on the job is running: every path below must end it.
+    request, error = None, ""
     try:
+        # A request sealed with another master.key fails this job like any
+        # other error instead of leaving it running until the next restart.
+        request = json.loads(store.unseal(job["request"]))
         authorize(job)
         result = diagnostics.execute(
             job["host_id"],
@@ -284,6 +300,24 @@ def work(ident, background=False):
             "error": error,
             "error_code": error_code(exc, error),
         }
+    for attempt in range(1, SAVE_ATTEMPTS + 1):
+        try:
+            _save(ident, job, request, status, error, result)
+            return
+        except Exception as exc:
+            log.warning(
+                "Diagnostic job %s: result not saved (%s, attempt %d)",
+                ident,
+                type(exc).__name__,
+                attempt,
+            )
+            # Only a locked or busy database can succeed on another attempt.
+            if not isinstance(exc, sqlite3.OperationalError):
+                break
+    _abandon(ident, job, request)
+
+
+def _save(ident, job, request, status, error, result):
     with store.db() as c:
         c.execute("BEGIN IMMEDIATE")
         if c.execute(
@@ -312,6 +346,42 @@ def work(ident, background=False):
                 ("job=" + ident + ";" + audit_detail(request)).rstrip(";")[:240],
             ),
         )
+
+
+def _abandon(ident, job, request):
+    """Fail a running job whose result cannot be stored.
+
+    Left running, it would count against the queue and look active (neither
+    cancellable nor retryable) until the next restart.
+    """
+    error = "诊断结果保存失败，请重新提交"
+    result = {
+        "host_id": job["host_id"],
+        "action": job["action"],
+        "status": "failed",
+        "error": error,
+        "error_code": "failed",
+        "job_id": ident,
+    }
+    try:
+        with store.db() as c:
+            c.execute(
+                "UPDATE diagnostic_jobs SET status='failed',error=?,result=?,completed_at=CURRENT_TIMESTAMP "
+                "WHERE id=? AND status='running'",
+                (error, store.seal(json.dumps(result, ensure_ascii=False)), ident),
+            )
+            c.execute(
+                "INSERT INTO audit(actor,action,target,outcome,detail) VALUES (?,?,?,?,?)",
+                (
+                    job["actor"],
+                    job["action"],
+                    str(job["host_id"]),
+                    "failed",
+                    ("job=" + ident + ";" + audit_detail(request)).rstrip(";")[:240],
+                ),
+            )
+    except Exception as exc:
+        log.error("Diagnostic job %s is left running: %s", ident, type(exc).__name__)
 
 
 def run_inline(

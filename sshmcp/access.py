@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 
 from . import store
 from .auth import admin
-from .catalog import TITLES, entries
+from .catalog import RECOMMENDED, TITLES, entries
 
 router = APIRouter(prefix="/api/v1")
 principal = ContextVar("mcp_principal", default=None)
@@ -97,9 +97,10 @@ class LegacyIn(BaseModel):
     enabled: StrictBool
 
 
-# v0.6.0 extension actions and the already-granted actions that imply them.
+# Implied extension actions and the already-granted actions that imply them.
 # A client allowed to read service logs may read system/Nginx logs and Java
 # command lines too; `jvm` attaches to a JVM and is granted explicitly only.
+# A later release adds its own implied actions here.
 EXTENDS = {
     "nginx": ("logs",),
     "nginx_access": ("logs",),
@@ -108,44 +109,76 @@ EXTENDS = {
     "service_detail": ("logs",),
     "service_map": ("sockets", "service"),
 }
-# Stored in mcp_clients.actions_extended once a client has been considered.
+# mcp_clients.actions_extended records, per action, the implied actions a
+# client has been considered for, so each is granted at most once and one an
+# administrator removes is never granted again: "" (none), a JSON list of
+# action ids, or EXTENDS_RELEASE for exactly the v0.6.0 set. That set keeps
+# the old single marker, which a release before per-action records reads too.
 EXTENDS_RELEASE = "v0.6.0"
+EXTENDS_V060 = frozenset(
+    ("nginx", "nginx_access", "syslog", "java", "service_detail", "service_map")
+)
+
+
+def _considered(marker):
+    """Implied actions a stored actions_extended value already covers."""
+    if marker == EXTENDS_RELEASE:
+        return set(EXTENDS_V060)
+    try:
+        value = json.loads(marker or "[]")
+    except ValueError:
+        value = None
+    if not isinstance(value, list):
+        # A marker this release cannot read never widens a client's scope.
+        return set(EXTENDS)
+    return {action for action in value if isinstance(action, str)}
+
+
+def _marker(considered):
+    if considered == EXTENDS_V060:
+        return EXTENDS_RELEASE
+    return json.dumps(sorted(considered))
 
 
 def extend_client_actions():
     """Grant implied extension actions to each client once, with an audit row.
 
-    Every enabled client considered here is marked, whether or not anything
-    was added, so actions an administrator later removes or leaves out stay
-    that way across restarts. Clients extended before the marker existed are
-    recognised by the audit row written at the time.
+    Every enabled client is marked with each implied action it was considered
+    for, whether or not anything was added, so actions an administrator later
+    removes or leaves out stay that way across restarts and later releases;
+    an action added to EXTENDS later is considered once on its own. Clients
+    extended before the marker existed are recognised by the audit row
+    written at the time.
     """
     changed = []
     with store.db() as c:
         c.execute("BEGIN IMMEDIATE")
         c.execute(
-            "UPDATE mcp_clients SET actions_extended=? WHERE actions_extended!=? "
+            "UPDATE mcp_clients SET actions_extended=? WHERE actions_extended='' "
             "AND id IN (SELECT target FROM audit WHERE actor='platform' "
             "AND action='mcp_client_actions_extended' AND detail LIKE ?)",
-            (EXTENDS_RELEASE, EXTENDS_RELEASE, EXTENDS_RELEASE + ":%"),
+            (EXTENDS_RELEASE, EXTENDS_RELEASE + ":%"),
         )
         for row in c.execute(
-            "SELECT id,actions FROM mcp_clients WHERE enabled=1 AND actions_extended!=?",
-            (EXTENDS_RELEASE,),
+            "SELECT id,actions,actions_extended FROM mcp_clients WHERE enabled=1"
         ).fetchall():
+            considered = _considered(row["actions_extended"])
+            pending = set(EXTENDS) - considered
+            if not pending:
+                continue
             actions = json.loads(row["actions"])
             added = sorted(
                 action
-                for action, parents in EXTENDS.items()
+                for action in pending
                 if action in TITLES
                 and action not in actions
-                and any(parent in actions for parent in parents)
+                and any(parent in actions for parent in EXTENDS[action])
             )
             c.execute(
                 "UPDATE mcp_clients SET actions=?,actions_extended=? WHERE id=?",
                 (
                     json.dumps(sorted(set(actions) | set(added))),
-                    EXTENDS_RELEASE,
+                    _marker(considered | pending),
                     row["id"],
                 ),
             )
@@ -170,7 +203,8 @@ def _require_groups(c, group_ids):
 
 @router.get("/tools")
 def tools(actor=Depends(admin)):
-    return entries()
+    # `recommended` drives 「按 AI Ops Platform 推荐勾选」 in the console.
+    return [{**entry, "recommended": entry["id"] in RECOMMENDED} for entry in entries()]
 
 
 @router.get("/mcp/clients")
@@ -219,7 +253,7 @@ def create(body: ClientIn, actor=Depends(admin)):
                 json.dumps(sorted(set(body.actions))),
                 int(body.all_hosts),
                 int(time.time()) + body.valid_days * 86400,
-                EXTENDS_RELEASE,
+                _marker(set(EXTENDS)),
             ),
         )
     store.audit(actor, "mcp_client_create", ident, "success")

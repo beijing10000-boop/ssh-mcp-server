@@ -112,6 +112,51 @@ QUESTIONS = {
     "security_status": "SELinux、AppArmor 与各防火墙服务状态如何？",
 }
 
+# The scope 「按 AI Ops Platform 推荐勾选」 selects (GET /api/v1/tools marks it
+# `recommended`): every action the platform's managed Skills prefetch or name,
+# plus connection for its 诊断测试. Left to an administrator's decision:
+# triage, directory and peer_* (heavier or broader collection) and jvm
+# (attaches to a JVM). collect is authorized per step, never on its own.
+RECOMMENDED = frozenset(
+    {
+        "connection",
+        "health",
+        "capabilities",
+        "cpu",
+        "memory",
+        "processes",
+        "memory_processes",
+        "disk",
+        "io",
+        "network",
+        "sockets",
+        "system",
+        "service",
+        "failed_services",
+        "logs",
+        "kernel",
+        "containers",
+        "pressure",
+        "resource_limits",
+        "mount_health",
+        "block_devices",
+        "time_sync",
+        "tcp_states",
+        "service_inventory",
+        "timers",
+        "log_errors",
+        "oom",
+        "container_stats",
+        "security_status",
+        "nginx",
+        "nginx_access",
+        "syslog",
+        "java",
+        "service_detail",
+        "service_map",
+    }
+)
+
 
 # MCP tool per action; all others are named ssh_diagnose_<action>. Clients filter
 # their tool list by `tool` so they never offer an action this token cannot run.

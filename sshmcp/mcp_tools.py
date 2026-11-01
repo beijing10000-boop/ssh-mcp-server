@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import re
 from typing import Annotated, Literal
 from functools import wraps
@@ -492,13 +493,19 @@ def _run(
 
 ERROR_CODES = (
     ("繁忙", "busy"),
+    # jobs.create's queue limit: a later retry can succeed, the input is fine.
+    ("待执行任务已达上限", "busy"),
     ("超时", "timeout"),
     ("已变更", "revision_changed"),
     ("取消", "cancelled"),
+    # jobs.create's readiness check (disabled, unpinned or unbound host); it
+    # mentions 公钥, so it is matched first. resolve reports it as not_ready too.
+    ("未启用、未核验公钥或未绑定凭据", "not_ready"),
     ("公钥", "host_unverified"),
     ("网关", "unsupported"),
     ("尚未就绪", "not_ready"),
     ("不支持 Linux", "not_linux"),
+    ("资产不是 Linux", "not_linux"),
 )
 
 
@@ -939,8 +946,14 @@ def _owned_job(job_id):
     who = access.identity()
     if job["actor"] != "mcp:" + who["id"]:
         raise PermissionError("只能访问当前客户端提交的诊断任务")
-    access.enforce(job["host_id"], job["action"])
+    _enforce_job(job["host_id"], job["action"], job["request"])
     return job
+
+
+def _enforce_job(host_id, action, request):
+    """A collection job is authorized per step, like ssh_collect itself."""
+    for step in jobs.required_actions(action, request):
+        access.enforce(host_id, step)
 
 
 def _job_error(exc):
@@ -1055,8 +1068,11 @@ def ssh_get_diagnostic_batch(batch_id: str, page: int = 1, page_size: int = 25) 
     batch = jobs.batch_detail(batch_id, page, page_size, actor="mcp:" + who["id"])
     with store.db() as c:
         targets = c.execute(
-            "SELECT host_id,action FROM diagnostic_jobs WHERE batch_id=?", (batch_id,)
+            "SELECT host_id,action,request FROM diagnostic_jobs WHERE batch_id=?",
+            (batch_id,),
         ).fetchall()
-    for host in targets:
-        access.enforce(host["host_id"], host["action"])
+    for row in targets:
+        _enforce_job(
+            row["host_id"], row["action"], json.loads(store.unseal(row["request"]))
+        )
     return batch
