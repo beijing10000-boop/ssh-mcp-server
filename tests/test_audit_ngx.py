@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 
 import pytest
 
@@ -52,9 +53,22 @@ def awk(program, text, **variables):
     args = ["awk"]
     for key, value in variables.items():
         args += ["-v", f"{key}={value}"]
-    result = subprocess.run(
-        args + [program], input=text, capture_output=True, text=True, check=True
-    )
+    # From a file: MSYS awk on Windows garbles a command-line program longer
+    # than about 8 KB (ACCESS_AWK is longer); on Linux both are the same.
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".awk", delete=False, encoding="utf-8", newline="\n"
+    ) as fh:
+        fh.write(program)
+    try:
+        result = subprocess.run(
+            args + ["-f", fh.name],
+            input=text,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    finally:
+        os.unlink(fh.name)
     return result.stdout.splitlines()
 
 

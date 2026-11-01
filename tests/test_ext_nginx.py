@@ -859,6 +859,7 @@ MINUTE 202610292355 1 1
 MINUTE 202610292358 1 0
 [AIOPS_TIMING]
 REQ 44 6.168 60.001 12 12 4
+REQ_SOURCE 32 11 1 0
 UPS 28 9.034 60.000 8 8
 NOUPSTREAM 16
 [AIOPS_SAMPLES]
@@ -1098,10 +1099,18 @@ def test_scripts_are_read_only_bounded_and_portable():
                 r"\bmatch\(\s*[\w$]+\s*,\s*/(?:[^/\\\n]|\\.)*/\s*([,)])", program
             )
             assert calls == [")"] * program.count("match(")
+            # Scalars only (length(array) is not POSIX): ALOG_AWK measures the
+            # config text and format strings, ACCESS_AWK a picked value.
             assert set(re.findall(r"length\(([^)]*)\)", program)) <= {
                 "$3",
                 "name_",
                 "k",
+                "s",
+                "v",
+                "f",
+                "px",
+                "sx",
+                "v_",
             }
 
 
@@ -1425,6 +1434,15 @@ def test_access_parser_reads_the_real_script_output():
             "over_3s": 8,
         },
         "no_upstream": 16,
+        # The `main` log_format places request_time in the combined lines,
+        # JSON lines name it, and the one line with an extra quoted field
+        # (not in the format) is guessed.
+        "request_time_source": {
+            "log_format": 32,
+            "field_name": 11,
+            "heuristic": 1,
+            "not_in_log_format": 0,
+        },
     }
     assert len(s["samples"]) == 10 and "abc123" not in json.dumps(report)
     assert "token=[REDACTED]" in s["samples"][-1]
@@ -1524,7 +1542,11 @@ def test_parsers_never_raise_on_garbage_or_truncation(action):
 
 
 @needs_awk
-def test_access_awk_handles_json_spacing_labels_and_upstream_lists():
+def test_access_awk_handles_json_spacing_labels_and_upstream_lists(tmp_path):
+    # From a file: MSYS awk on Windows garbles a command-line program longer
+    # than about 8 KB (this one is); on Linux both are the same.
+    program = tmp_path / "access.awk"
+    program.write_bytes(nginx.ACCESS_AWK.encode())
     lines = [
         '{"time_local": "29/Oct/2026:23:40:00 +0000", "status": 503, '
         '"request_time": 1.5, "upstream_response_time": "1.400", '
@@ -1552,7 +1574,8 @@ def test_access_awk_handles_json_spacing_labels_and_upstream_lists():
             "topn=10",
             "-v",
             "bucket=10",
-            nginx.ACCESS_AWK,
+            "-f",
+            str(program),
         ],
         input="\n".join(lines) + "\n",
         capture_output=True,

@@ -264,15 +264,154 @@ END {
 """
 )
 
-# access_log paths from an nginx -T dump or raw config files.
+# access_log paths from an nginx -T dump or raw config files, one line each:
+# "PATH U" when the log_format is unknown, or "PATH K SEGMENTS RT UT" where
+# SEGMENTS is the number of '"'-separated segments of a line in that format
+# and RT / UT locate $request_time / $upstream_response_time (layout()):
+# "SEG BEFORE AFTER PREFIX SUFFIX". SEG 0: not in the format; -1: not
+# locatable. BEFORE / AFTER count the space-separated tokens around the
+# variable in its segment, -1 when one of them may hold spaces itself
+# ($time_local, $request, headers, upstream lists); PREFIX / SUFFIX are the
+# lengths of literal text glued to it ("rt=$request_time" -> 3).
+# Single quotes never appear here (the program sits in '...'): sprintf("%c", 39).
 ALOG_AWK = r"""
-$1 == "access_log" && NF >= 2 {
-    p = $2
-    sub(/;$/, "", p)
-    gsub(/"/, "", p)
-    if (p == "" || p == "off" || p ~ /^(syslog|memory):/ || index(p, "$")) next
+function args(s,    n, i, c, q, cur, have, len) {
+    n = 0; q = ""; cur = ""; have = 0; len = length(s)
+    for (i = 1; i <= len; i++) {
+        c = substr(s, i, 1)
+        if (c == "\\" && i < len) {
+            i++
+            c = substr(s, i, 1)
+            if (c == "t") c = "\t"
+            else if (c == "n") c = "\n"
+            else if (c == "r") c = "\r"
+            else if (c != "\"" && c != sq && c != "\\") c = "\\" c
+            cur = cur c; have = 1
+            continue
+        }
+        if (q != "") {
+            if (c == q) q = ""
+            else cur = cur c
+            continue
+        }
+        if (c == "\"" || c == sq) { q = c; have = 1; continue }
+        if (c == "#" && !have) {
+            while (i < len && substr(s, i + 1, 1) != "\n") i++
+            continue
+        }
+        if (c == " " || c == "\t" || c == "\n" || c == "\r" || c == ";") {
+            if (have) { arg[++n] = cur; cur = ""; have = 0 }
+            if (c == ";") return n
+            continue
+        }
+        cur = cur c; have = 1
+    }
+    return -1
+}
+function plain(t,    v) {
+    while (match(t, /[$][{]?[A-Za-z0-9_]+/)) {
+        v = substr(t, RSTART + 1, RLENGTH - 1)
+        sub(/^[{]/, "", v)
+        if (!(v in one)) return 0
+        t = substr(t, RSTART + RLENGTH)
+    }
+    return 1
+}
+function layout(f, v,    p, w, s, k, i, c, q, a, b, pre, post, px, sx, nb, na, tb, ta, j) {
+    w = length(v) + 3
+    p = index(f, "${" v "}")
+    if (!p) {
+        w = length(v) + 1
+        s = f
+        k = 0
+        while ((i = index(s, "$" v)) > 0) {
+            c = substr(s, i + w, 1)
+            if (c !~ /^[A-Za-z0-9_]$/) { p = k + i; break }
+            k += i + w - 1
+            s = substr(s, i + w)
+        }
+    }
+    if (!p) return "0 0 0 0 0"
+    q = 0
+    a = 1
+    for (i = 1; i < p; i++) if (substr(f, i, 1) == "\"") { q++; a = i + 1 }
+    b = length(f)
+    for (i = p + w; i <= length(f); i++) if (substr(f, i, 1) == "\"") { b = i - 1; break }
+    pre = substr(f, a, p - a)
+    post = substr(f, p + w, b - p - w + 1)
+    px = ""
+    if (match(pre, /[^ \t]+$/)) { px = substr(pre, RSTART); pre = substr(pre, 1, RSTART - 1) }
+    sx = ""
+    if (match(post, /^[^ \t]+/)) { sx = substr(post, 1, RLENGTH); post = substr(post, RLENGTH + 1) }
+    if (index(px sx, "$")) return "-1 0 0 0 0"
+    nb = split(pre, tb, " ")
+    na = split(post, ta, " ")
+    for (j = 1; j <= nb; j++) if (!plain(tb[j])) { nb = -1; break }
+    for (j = 1; j <= na; j++) if (!plain(ta[j])) { na = -1; break }
+    if (nb < 0 && na < 0) return "-1 0 0 0 0"
+    return (q + 1) " " nb " " na " " length(px) " " length(sx)
+}
+function addfmt(n,    i, f) {
+    if (n < 2) return
+    i = 2
+    fesc[arg[1]] = "default"
+    if (arg[2] ~ /^escape=/) { fesc[arg[1]] = substr(arg[2], 8); i = 3 }
+    f = ""
+    for (; i <= n; i++) f = f arg[i]
+    fmt[arg[1]] = f
+}
+function addlog(n,    p, f) {
+    p = arg[1]
+    if (n < 1 || p == "" || p == "off" || p ~ /^(syslog|memory):/ || index(p, "$") || p ~ /[ \t]/) return
     if (substr(p, 1, 1) != "/") p = pfx "/" p
-    if (!seen[p]++) print p
+    if (p in seen) return
+    seen[p] = 1
+    f = "combined"
+    if (n >= 2 && arg[2] !~ /^(buffer|gzip|flush|if)(=|$)/) f = arg[2]
+    np++
+    lp[np] = p
+    ln[np] = f
+}
+function directive(    n) {
+    if ((n = args(text)) < 0) return 0
+    if (kind == "log_format") addfmt(n)
+    else addlog(n)
+    return 1
+}
+BEGIN {
+    sq = sprintf("%c", 39)
+    names = "remote_addr remote_port remote_user server_addr server_port server_name host"
+    names = names " hostname status body_bytes_sent bytes_sent request_length request_time"
+    names = names " msec time_iso8601 connection connection_requests pipe scheme https"
+    names = names " request_method request_uri uri document_uri args query_string"
+    names = names " server_protocol pid gzip_ratio request_id ssl_protocol ssl_cipher"
+    names = names " upstream_cache_status"
+    count = split(names, single, " ")
+    for (i = 1; i <= count; i++) one[single[i]] = 1
+}
+pending {
+    text = text "\n" $0
+    if (directive() || ++pending > 50) pending = 0
+    next
+}
+{
+    t = $0
+    sub(/^[ \t]+/, "", t)
+}
+t ~ /^(log_format|access_log)[ \t]/ {
+    kind = substr(t, 1, 10)
+    text = substr(t, 11)
+    if (!directive()) pending = 1
+}
+END {
+    fmt["combined"] = "$remote_addr - $remote_user [$time_local] \"$request\" $status $body_bytes_sent \"$http_referer\" \"$http_user_agent\""
+    fesc["combined"] = "default"
+    for (i = 1; i <= np; i++) {
+        f = ln[i]
+        if (!(f in fmt) || fesc[f] != "default") { print lp[i], "U"; continue }
+        c = fmt[f]
+        print lp[i], "K", gsub(/"/, "", c) + 1, layout(fmt[f], "request_time"), layout(fmt[f], "upstream_response_time")
+    }
 }
 """
 
@@ -332,6 +471,26 @@ function lastnum(src_,    cnt_, parts_, idx_, val_) {
     for (idx_ = 1; idx_ <= cnt_; idx_++) if (parts_[idx_] ~ /^[0-9]+[.]?[0-9]*$/) val_ = parts_[idx_]
     return val_
 }
+# The value at a log_format position (layout() of ALOG_AWK) in the line split
+# at double quotes into q[1..nq]: segment s_, counted from its start (b_
+# tokens before) or its end (a_ tokens after), less p_ / x_ literal characters
+# around it. A value that may span tokens (multi_: upstream lists) needs both.
+function pick(s_, b_, a_, p_, x_, multi_,    cnt_, tok_, lo_, hi_, v_, i_) {
+    if (s_ < 1 || s_ > nq) return ""
+    cnt_ = split(q[s_], tok_, " ")
+    if (b_ >= 0 && (!multi_ || a_ >= 0)) {
+        lo_ = b_ + 1
+        hi_ = multi_ ? cnt_ - a_ : lo_
+    } else if (a_ >= 0 && !multi_) {
+        lo_ = cnt_ - a_
+        hi_ = lo_
+    } else return ""
+    if (lo_ < 1 || hi_ > cnt_ || lo_ > hi_) return ""
+    v_ = tok_[lo_]
+    for (i_ = lo_ + 1; i_ <= hi_; i_++) v_ = v_ " " tok_[i_]
+    if (length(v_) <= p_ + x_) return ""
+    return substr(v_, p_ + 1, length(v_) - p_ - x_)
+}
 BEGIN {
     split("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec", mn, " ")
     for (i = 1; i <= 12; i++) mon[mn[i]] = sprintf("%02d", i)
@@ -341,6 +500,18 @@ BEGIN {
 substr($0, 1, 8) == "\001AIOPS_F" {
     nf++
     fp[nf] = substr($0, 10)
+    lk = 0
+    next
+}
+# After a file marker: "K SEGMENTS RT(5) UT(5)" when the log_format of the
+# file is known (ALOG_AWK), "U" when not; unknown formats keep the guess.
+substr($0, 1, 8) == "\001AIOPS_L" {
+    lk = (split(substr($0, 10), lv, " ") == 12 && lv[1] == "K")
+    if (lk) {
+        lq = lv[2] + 0
+        rseg = lv[3] + 0; rbef = lv[4] + 0; raft = lv[5] + 0; rpre = lv[6] + 0; rsuf = lv[7] + 0
+        useg = lv[8] + 0; ubef = lv[9] + 0; uaft = lv[10] + 0; upre = lv[11] + 0; usuf = lv[12] + 0
+    }
     next
 }
 substr($0, 1, 11) == "\001AIOPS_SKIP" { print "SKIPPED", substr($0, 13); next }
@@ -352,6 +523,7 @@ substr($0, 1, 1) == "\001" { next }
     st = ""
     rt = ""
     ut = ""
+    how = ""
     nou = 0
     ip = "-"
     uri = "-"
@@ -364,6 +536,7 @@ substr($0, 1, 1) == "\001" { next }
         k = tkey(t)
         st = jv($0, "status")
         rt = jv($0, "request_time")
+        if (rt != "") how = "k"
         if (index($0, "\"upstream_response_time\":")) {
             ut = lastnum(jv($0, "upstream_response_time"))
             if (ut == "") nou = 1
@@ -380,6 +553,7 @@ substr($0, 1, 1) == "\001" { next }
         if (ua == "") ua = jv($0, "user_agent")
     } else {
         n = split($0, q, "\"")
+        nq = n
         b = index(q[1], "[")
         t = b ? substr(q[1], b + 1, 26) : ""
         k = tkey(t)
@@ -389,30 +563,53 @@ substr($0, 1, 1) == "\001" { next }
         m = split(q[2], rq, " ")
         uri = (m >= 2) ? rq[2] : q[2]
         if (n >= 6) ua = q[6]
-        rest = ""
-        for (i = 7; i <= n; i++) rest = rest " " q[i]
-        if (match(rest, /[ \t](rt|request_time)=[0-9]+[.][0-9]+/)) {
-            v = substr(rest, RSTART, RLENGTH)
-            sub(/^[ \t]*[a-z_]+=/, "", v)
-            rt = v
-            if (match(rest, /(urt|upstream_response_time)=[ \t]*[0-9.,: -]+/)) {
-                v = substr(rest, RSTART, RLENGTH)
-                sub(/^[a-z_]+=/, "", v)
-                ut = lastnum(v)
-                if (ut == "") nou = 1
+        if (lk && n == lq && rseg >= 0) {
+            # The log_format of the file is known and the line has its shape.
+            if (rseg == 0) how = "n"
+            else {
+                v = pick(rseg, rbef, raft, rpre, rsuf, 0)
+                if (v ~ /^[0-9]+[.][0-9]+$/) {
+                    rt = v
+                    how = "f"
+                }
+            }
+            if (useg > 0) {
+                v = pick(useg, ubef, uaft, upre, usuf, 1)
+                if (v != "") {
+                    ut = lastnum(v)
+                    if (ut == "") nou = 1
+                }
             }
         } else {
-            m = split(rest, tok, " ")
-            for (i = 1; i <= m; i++) {
-                if (tok[i] !~ /^[0-9]+[.][0-9]+$/) continue
-                rt = tok[i]
-                if (i < m && tok[i + 1] == "-") nou = 1
-                else {
-                    v = ""
-                    for (j = i + 1; j <= m && tok[j] ~ /^([0-9]+[.][0-9]+,?|:|-,?)$/; j++) v = v " " tok[j]
+            rest = ""
+            for (i = 7; i <= n; i++) rest = rest " " q[i]
+            if (match(rest, /[ \t](rt|request_time)=[0-9]+[.][0-9]+/)) {
+                v = substr(rest, RSTART, RLENGTH)
+                sub(/^[ \t]*[a-z_]+=/, "", v)
+                rt = v
+                how = "k"
+                if (match(rest, /(urt|upstream_response_time)=[ \t]*[0-9.,: -]+/)) {
+                    v = substr(rest, RSTART, RLENGTH)
+                    sub(/^[a-z_]+=/, "", v)
                     ut = lastnum(v)
+                    if (ut == "") nou = 1
                 }
-                break
+            } else {
+                # Unknown format (or a line not in it): the first decimal
+                # number after the user agent, marked as a guess.
+                m = split(rest, tok, " ")
+                for (i = 1; i <= m; i++) {
+                    if (tok[i] !~ /^[0-9]+[.][0-9]+$/) continue
+                    rt = tok[i]
+                    how = "g"
+                    if (i < m && tok[i + 1] == "-") nou = 1
+                    else {
+                        v = ""
+                        for (j = i + 1; j <= m && tok[j] ~ /^([0-9]+[.][0-9]+,?|:|-,?)$/; j++) v = v " " tok[j]
+                        ut = lastnum(v)
+                    }
+                    break
+                }
             }
         }
     }
@@ -444,7 +641,10 @@ substr($0, 1, 1) == "\001" { next }
         if (v > 1) r1++
         if (v > 3) r3++
         if (v > 10) r10++
-    }
+        if (how == "f") rsf++
+        else if (how == "g") rsg++
+        else rsk++
+    } else if (how == "n") rsn++
     if (ut != "") {
         v = ut + 0
         uc++
@@ -482,6 +682,10 @@ END {
     for (s in mreq) print "MINUTE", s, mreq[s], m5[s] + 0
     if (rc) printf "REQ %d %.3f %.3f %d %d %d\n", rc, rs / rc, rmax, r1, r3, r10
     else print "UNAVAILABLE request_time"
+    # Where the request_time values came from: the log_format, a named field
+    # (JSON key, rt=), a positional guess; then requests whose known log_format
+    # has no $request_time.
+    print "REQ_SOURCE", rsf + 0, rsk + 0, rsg + 0, rsn + 0
     if (uc) printf "UPS %d %.3f %.3f %d %d\n", uc, us / uc, umax, u1, u3
     else print "UNAVAILABLE upstream_time"
     print "NOUPSTREAM", nn + 0
@@ -817,6 +1021,7 @@ bacc=$(opt http-log-path)
 case "$bacc" in ''|/*) ;; *) bacc=$pfx/$bacc ;; esac
 ALOG_AWK='__ALOG_AWK__'
 alogs=''
+aconf=''
 loaded=''
 alogs_load() {
   if [ -n "$loaded" ]; then return 0; fi
@@ -825,15 +1030,20 @@ alogs_load() {
   if [ -n "$mpfx" ]; then set -- -p "$mpfx"; fi
   if [ -n "$mconf" ]; then set -- "$@" -c "$mconf"; fi
   if [ -n "$NGX" ]; then
-    alogs=$(__TIMED_T__ | awk -v pfx="$pfx" "$ALOG_AWK" | head -n 20)
+    aconf=$(__TIMED_T__ | awk -v pfx="$pfx" "$ALOG_AWK" | head -n 20)
   fi
-  if [ -z "$alogs" ] && [ -r "$confp" ]; then
+  if [ -z "$aconf" ] && [ -r "$confp" ]; then
     cdir=${confp%/*}
     ddir=${dconf%/*}
     set -- "$confp" "$cdir"/conf.d/*.conf "$cdir"/sites-enabled/* "$cdir"/vhost/*.conf "$cdir"/vhosts/*.conf
     if [ "$cdir" != "$ddir" ]; then set -- "$@" "$ddir"/conf.d/*.conf "$ddir"/sites-enabled/*; fi
-    alogs=$(__TIMED_CAT__ | awk -v pfx="$pfx" "$ALOG_AWK" | head -n 20)
+    aconf=$(__TIMED_CAT__ | awk -v pfx="$pfx" "$ALOG_AWK" | head -n 20)
   fi
+  alogs=$(printf '%s\n' "$aconf" | awk 'NF {print $1}')
+}
+# The marker line with the log_format layout of an access_log path (ALOG_AWK).
+layout() {
+  printf '%s\n' "$aconf" | awk -v f="$1" '$1 == f && m == "" {$1 = ""; m = substr($0, 2)} END {if (m == "") m = "U"; printf "\001AIOPS_L %s\n", m}'
 }
 okdir() {
   case "$1" in
@@ -858,6 +1068,8 @@ if [ -n "$p" ]; then
     fi
   fi
   files=$p
+  # The configured log_format of the file locates request_time (layout).
+  alogs_load
 else
   alogs_load
   printf '%s\n' "$alogs" | head -n 10 | awk 'NF {print "CANDIDATE " $0}'
@@ -924,7 +1136,7 @@ t0=$(date +%s)
 end=$((t0 + __BUDGET__))
 agg=$(printf '%s\n' "$plan" | while read -r k lim sz f; do
   case "$k" in
-    B) printf '\001AIOPS_F %s\n' "$f" ;;
+    B) printf '\001AIOPS_F %s\n' "$f"; layout "$f" ;;
     R|C)
       t0=$(date +%s)
       left=$((end - t0))
@@ -950,7 +1162,7 @@ printf '[AIOPS_MINUTES]\n'
 printf 'BUCKET %s\n' "$bucket"
 printf '%s\n' "$agg" | grep '^MINUTE ' | sort -k2,2 | tail -n 120
 printf '[AIOPS_TIMING]\n'
-printf '%s\n' "$agg" | grep -E '^(REQ|UPS|NOUPSTREAM|UNAVAILABLE) '
+printf '%s\n' "$agg" | grep -E '^(REQ|REQ_SOURCE|UPS|NOUPSTREAM|UNAVAILABLE) '
 printf '[AIOPS_SAMPLES]\n'
 printf '%s\n' "$agg" | grep '^SAMPLE ' | sort -k2,2n | tail -n 10 | cut -c1-260
 exit 0
@@ -1842,11 +2054,27 @@ def _counted(text: str, tag: str, limit: int) -> list[dict]:
     return rows
 
 
+REQUEST_TIME_SOURCES = ("log_format", "field_name", "heuristic", "not_in_log_format")
+
+
 def _timing(text: str) -> dict:
-    timing = {"request_time": None, "upstream_time": None, "no_upstream": None}
+    timing = {
+        "request_time": None,
+        "upstream_time": None,
+        "no_upstream": None,
+        "request_time_source": None,
+    }
     for line in _lines(text, "TIMING"):
         fields = line.split()
-        if fields[:1] == ["REQ"] and len(fields) == 7:
+        if fields[:1] == ["REQ_SOURCE"] and len(fields) == 5:
+            counts = [_int(v) for v in fields[1:]]
+            if None not in counts:
+                # Requests in the window by how request_time was found: the
+                # access log's configured log_format, a named field (JSON key,
+                # rt=), a positional guess (format unknown or the line not in
+                # it), or none (the known format has no $request_time).
+                timing["request_time_source"] = dict(zip(REQUEST_TIME_SOURCES, counts))
+        elif fields[:1] == ["REQ"] and len(fields) == 7:
             values = [observations.number(v) for v in fields[1:]]
             if None not in values:
                 timing["request_time"] = {
@@ -2026,6 +2254,8 @@ def parse_access(text, summary, findings, options) -> None:
         }
     )
     rotated = any(f["rotated"] for f in files["files"])
+    sources = timing["request_time_source"] or {}
+    guessed = sources.get("heuristic") or 0
     summary["coverage"] = (
         "只读每个访问日志尾部约 30 MB"
         + ("，并读取了未压缩轮转文件尾部 10 MB" if rotated else "，未读取轮转文件")
@@ -2034,6 +2264,13 @@ def parse_access(text, summary, findings, options) -> None:
         + "，status 只影响 TOP 与样本，"
         "总量、状态码、分钟趋势与耗时统计覆盖窗口内全部请求（keyword 先行过滤）；"
         "无法识别的日志格式计入 unparsed_lines"
+        + (
+            f"；{guessed} 条请求的 request_time 是按位置推测的（未取得该日志的 log_format，"
+            "或该行与 log_format 不符），可能误读 $gzip_ratio、$msec 等其他数值字段，"
+            "见 timing.request_time_source"
+            if guessed
+            else ""
+        )
     )
     requests = totals["requests"]
     classes = totals["by_class"]
@@ -2136,7 +2373,12 @@ def parse_access(text, summary, findings, options) -> None:
             request_time["count"],
             5,
             None,
-            "request_time 超过 3 秒的请求占比 ≥5%（经验阈值）：对照 upstream_time 判断慢在后端还是客户端/网络",
+            "request_time 超过 3 秒的请求占比 ≥5%（经验阈值）：对照 upstream_time 判断慢在后端还是客户端/网络"
+            + (
+                "；部分耗时是按位置推测的（见 timing.request_time_source），先核对 log_format"
+                if guessed
+                else ""
+            ),
         )
     upstream_time = timing["upstream_time"]
     if upstream_time and upstream_time["max"] >= 10:
@@ -2248,6 +2490,8 @@ register(
         notes=(
             "只读取每个访问日志尾部约 30 MB（窗口跨轮转时另读未压缩轮转文件尾部 10 MB），超大日志可能覆盖不到整个窗口。",
             "path 只接受 nginx 配置中的 access_log、标准 Nginx 日志目录，或 /data|/opt|/home|/srv|/app 下的 */logs/*access*.log；符号链接按真实路径再校验。",
+            "request_time 与 upstream_response_time 按 nginx -T（或配置文件）中该日志的 log_format 定位；"
+            "格式未知或某行与格式不符时退回按位置推测，timing.request_time_source 按来源计数。",
         ),
     )
 )

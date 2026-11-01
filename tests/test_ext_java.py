@@ -925,9 +925,19 @@ def test_catalog_lists_java_tools_with_their_risk():
     assert [p["name"] for p in jvm["params"]] == ["pid", "probes"]
     assert jvm["params"][0]["required"] and jvm["params"][0]["maximum"] == 4194304
     assert jvm["params"][1]["choices"] == ["heap_info", "vm_flags", "gc_stat", "gc_log"]
-    assert jvm["notes"] == [
-        "jcmd 会让 JVM 短暂进入安全点，生产高峰期谨慎使用；GC 计数是进程启动以来的累计值。"
-    ]
+    # The probe's side effects on the target are spelled out (SSH-DIAG-15).
+    notes = "".join(jvm["notes"])
+    for effect in (
+        ".attach_pid<PID>",
+        "SIGQUIT",
+        "Attach Listener",
+        ".java_pid<PID>",
+        "安全点",
+        "runuser",
+        "hsperfdata",
+        "GC 计数是进程启动以来的累计值",
+    ):
+        assert effect in notes, effect
     spec = extensions.spec_for("jvm")
     assert (spec.timeout, spec.output_limit) == (30, 32768)
     spec = extensions.spec_for("java")

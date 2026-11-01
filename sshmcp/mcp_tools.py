@@ -561,7 +561,7 @@ def ssh_diagnose_block_devices(
 @mcp.tool(annotations=READ_ONLY)
 @offload
 def ssh_diagnose_time_sync(host_id: int, expected_revision: int | None = None) -> dict:
-    """读取系统时间、NTP 同步状态及可用的 chrony 跟踪信息。"""
+    """读取系统时间与 NTP 同步状态：timedatectl show（systemd 239 起），不可用时（如 EL7）回退 timedatectl status，再回退 chronyc tracking、ntpstat；summary.sync_source 写明同步状态的来源，取不到时为 null。另附可用的 chrony 跟踪信息。"""
     return _run(host_id, "time_sync", expected_revision=expected_revision)
 
 
@@ -692,7 +692,7 @@ def ssh_diagnose_nginx_access(
     top: Annotated[int, Field(ge=5, le=30, description="TOP 条数")] = 10,
     expected_revision: Revision = None,
 ) -> dict:
-    """在远端用 awk 聚合 Nginx 访问日志：时间窗口（minutes，或 since/until Unix 秒，最长 24 小时）内的请求总数、状态码分布（2xx/3xx/4xx/5xx 与具体码）、错误请求 TOP URL / 客户端 IP / User-Agent、每分钟请求与 5xx 趋势、request_time 与 upstream_response_time 统计（日志格式含这些字段时）。只读取文件尾部有限字节，不返回整份日志；窗口被轮转文件切断时说明覆盖范围。"""
+    """在远端用 awk 聚合 Nginx 访问日志：时间窗口（minutes，或 since/until Unix 秒，最长 24 小时）内的请求总数、状态码分布（2xx/3xx/4xx/5xx 与具体码）、错误请求 TOP URL / 客户端 IP / User-Agent、每分钟请求与 5xx 趋势、request_time 与 upstream_response_time 统计（日志格式含这些字段时；按该日志在 nginx 配置中的 log_format 定位，格式未知时按位置推测并在 timing.request_time_source 标明）。只读取文件尾部有限字节，不返回整份日志；窗口被轮转文件切断时说明覆盖范围。"""
     return _run(
         host_id,
         "nginx_access",
@@ -774,7 +774,7 @@ def ssh_diagnose_jvm(
     ] = None,
     expected_revision: Revision = None,
 ) -> dict:
-    """对指定 Java 进程执行有界 JVM 探针：heap_info（jcmd GC.heap_info，各代用量）、vm_flags（jcmd VM.flags，生效的堆与 GC 参数）、gc_stat（jstat -gc，GC 次数与累计耗时）、gc_log（GC 日志尾部 40 行）。jcmd 会短暂进入安全点，属中等开销，生产高峰期谨慎使用；缺少 jcmd/jstat 或无法以 JVM 所属用户附加时返回能力缺失。不捕获 SIGQUIT（-Xrs、jsvc 父进程）或禁用 attach 的进程跳过 jcmd，以免终止进程；GC 日志只在文件属主与 JVM 用户一致时读取。"""
+    """对指定 Java 进程执行有界 JVM 探针：heap_info（jcmd GC.heap_info，各代用量）、vm_flags（jcmd VM.flags，生效的堆与 GC 参数）、gc_stat（jstat -gc，GC 次数与累计耗时）、gc_log（GC 日志尾部 40 行）。副作用：heap_info/vm_flags 用 jcmd 附加到 JVM——在其工作目录或 /tmp 创建 .attach_pid<PID> 并发送 SIGQUIT（结束后删除），JVM 随之常驻 Attach Listener 线程并在其 /tmp 留下 .java_pid<PID> 套接字直到退出；命令在 JVM 内执行，可能短暂进入安全点或持有堆锁，属中等开销，生产高峰期谨慎使用；root 经 runuser 切换为 JVM 属主执行。gc_stat 只读 hsperfdata 计数、gc_log 只读日志尾部，二者不附加。不触发 GC、不生成堆转储、不改参数。缺少 jcmd/jstat 或无法以 JVM 所属用户附加时返回能力缺失。不捕获 SIGQUIT（-Xrs、jsvc 父进程）或禁用 attach 的进程跳过 jcmd，以免终止进程；GC 日志只在文件属主与 JVM 用户一致时读取。"""
     return _run(
         host_id,
         "jvm",
