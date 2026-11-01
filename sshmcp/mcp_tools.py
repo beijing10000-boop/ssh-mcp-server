@@ -824,15 +824,28 @@ def ssh_collect(
     minutes: Annotated[
         int, Field(ge=1, le=120, description="日志类步骤的回溯窗口（分钟）")
     ] = 30,
+    timeout_seconds: Annotated[
+        int | None,
+        Field(
+            ge=10,
+            le=120,
+            description="总时长上限（秒），含排队与执行；超时的步骤单独标记，已完成的步骤照常返回",
+        ),
+    ] = None,
     expected_revision: Revision = None,
 ) -> dict:
-    """在一次 SSH 会话内顺序执行 1–6 个固定诊断（如 cpu、processes、pressure），每个步骤单独返回 exit_code、summary 与 findings，并合并为带 source_action 的总 findings；比逐个调用更快，且不会因同主机互斥而排队。每个步骤都需要本客户端已获得该动作的授权。"""
+    """在一次 SSH 会话内顺序执行 1–6 个固定诊断（如 cpu、processes、pressure），每个步骤单独返回 exit_code、summary 与 findings，并合并为带 source_action 的总 findings；只建一次会话，比逐个调用更快（同主机的其他诊断仍按主机串行）。调用方有超时限制时传 timeout_seconds（略小于自身超时），服务端会在此之前返回已完成的步骤。每个步骤都需要本客户端已获得该动作的授权。"""
     steps = list(dict.fromkeys(actions or []))
     return _run(
         host_id,
         "collect",
         expected_revision=expected_revision,
-        options=_options(actions=steps, service=service, minutes=minutes),
+        options=_options(
+            actions=steps,
+            service=service,
+            minutes=minutes,
+            timeout_seconds=timeout_seconds,
+        ),
         enforce=tuple(steps) or ("collect",),
     )
 

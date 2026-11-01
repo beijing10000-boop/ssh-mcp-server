@@ -8,6 +8,10 @@ caller gets the same summary/findings per step plus merged findings.
 
 Authorization is per step: the MCP tool enforces every requested action for
 the client before anything runs, and background re-checks do the same.
+
+``timeout_seconds`` bounds the whole call (slot wait plus run, see
+``diagnostics.execute``) and gives every step its own timeout; without it a
+collection runs as before, up to 120 s after up to 30 s of waiting.
 """
 
 from __future__ import annotations
@@ -56,6 +60,16 @@ def actions_of(options: dict) -> list[str]:
     return list(options.get("actions") or [])
 
 
+def step_seconds(options: dict) -> int | None:
+    """Per-step timeout under ``timeout_seconds`` (an equal share, 5–20 s),
+    None without it: steps then run unbounded inside the session, as before."""
+    budget = options.get("timeout_seconds")
+    if isinstance(budget, bool) or not isinstance(budget, int):
+        return None
+    steps = max(1, len(actions_of(options)))
+    return max(5, min(STEP_SECONDS, (budget - 5) // steps))
+
+
 def script(options: dict) -> str:
     from .. import diagnostics, triage
 
@@ -70,6 +84,7 @@ def script(options: dict) -> str:
         service,
         int(options.get("minutes") or 30),
         diagnostics.command_for,
+        step_seconds=step_seconds(options),
     )
 
 
@@ -77,7 +92,7 @@ def parse(text: str, summary: dict, findings: list, options: dict) -> None:
     from .. import triage
 
     actions = actions_of(options)
-    result = triage.parse_many(text, actions)
+    result = triage.parse_many(text, actions, step_seconds=step_seconds(options))
     summary.update(
         {
             "steps": result["steps"],
@@ -120,6 +135,14 @@ register(
                 minimum=1,
                 maximum=120,
             ),
+            Param(
+                "timeout_seconds",
+                "int",
+                "本次调用的总时长上限（秒，10–120），含同主机排队与执行；给出时每步另有单步超时，"
+                "超时的步骤标为 partial，其余步骤照常返回；缺省不限（排队最多 30 秒 + 执行最多 120 秒）",
+                minimum=10,
+                maximum=120,
+            ),
         ),
         script=script,
         parse=parse,
@@ -128,6 +151,9 @@ register(
         timeout=STEP_SECONDS * MAX_ACTIONS,
         output_limit=STEP_OUTPUT * MAX_ACTIONS,
         estimated_seconds=60,
-        notes=("每个步骤单独授权；步骤数越多总耗时越长，上限 120 秒。",),
+        notes=(
+            "每个步骤单独授权；步骤数越多总耗时越长，上限 120 秒（另有最多 30 秒同主机排队）；"
+            "给出 timeout_seconds 时排队与执行合计不超过该值。",
+        ),
     )
 )

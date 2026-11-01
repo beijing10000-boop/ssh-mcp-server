@@ -1,6 +1,7 @@
 """Scenario templates and ad-hoc action lists executed sequentially in one SSH channel."""
 
 import re
+import shlex
 from . import observations
 
 SCENARIOS = {
@@ -20,18 +21,32 @@ def actions(symptom):
     return SCENARIOS[symptom]
 
 
-def command_many(steps, service, minutes, command_for):
-    """Wrap each fixed action so its output and exit code stay separable."""
+def command_many(steps, service, minutes, command_for, step_seconds=None):
+    """Wrap each fixed action so its output and exit code stay separable.
+
+    With ``step_seconds`` each step runs in its own ``sh`` under ``timeout``
+    (when the host has it): a stuck step ends with 124 and the next one runs.
+    """
     if not steps or len(set(steps)) != len(steps):
         raise ValueError("采集步骤不能为空或重复")
     parts = []
+    if step_seconds:
+        parts.append(
+            "aiops_step() { if command -v timeout >/dev/null 2>&1; then "
+            'timeout -k 1 "$1" sh -c "$2"; else sh -c "$2"; fi; }'
+        )
     for action in steps:
         # command_for remains the sole validator and fixed-command source.
         script = command_for(
             action, service if action in {"service", "logs"} else None, minutes
         )
+        body = (
+            f"aiops_step {int(step_seconds)} {shlex.quote(script)}"
+            if step_seconds
+            else f"( {script} )"
+        )
         parts.append(
-            f"printf '\\n__SSHMCP_BEGIN_{action}__\\n'; ( {script} ); code=$?; printf '\\n__SSHMCP_END_{action}__:%s\\n' \"$code\""
+            f"printf '\\n__SSHMCP_BEGIN_{action}__\\n'; {body}; code=$?; printf '\\n__SSHMCP_END_{action}__:%s\\n' \"$code\""
         )
     return "; ".join(parts)
 
@@ -42,7 +57,7 @@ def command(symptom, service, minutes, command_for):
     return command_many(actions(symptom), service, minutes, command_for)
 
 
-def parse_many(text, steps, truncated=False):
+def parse_many(text, steps, truncated=False, step_seconds=None):
     results = []
     findings = []
     for action in steps:
@@ -69,6 +84,10 @@ def parse_many(text, steps, truncated=False):
                 "output": output[:STEP_LIMIT],
                 "truncated": len(output) > STEP_LIMIT,
             }
+            if step_seconds and code in (124, 137):
+                # Ended by the per-step timeout (TERM, or KILL a second later).
+                result["timed_out"] = True
+                result["error"] = f"该步骤超过 {step_seconds} 秒被终止，输出可能不完整"
             result.update(
                 observations.analyze(
                     action,

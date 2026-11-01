@@ -131,8 +131,12 @@ JAVA_COVERAGE = (
     "生效值用 ssh_diagnose_jvm 的 vm_flags 确认；非 root 时其他用户进程的 fd、cwd、exe 不可读；"
     "CPU 为进程生命周期平均值"
 )
-# Second-layer redaction: keys naming a secret ("key" deliberately broad).
-SECRET_KEY = re.compile(r"(?i)password|passwd|pwd|secret|token|key|credential")
+# Second-layer redaction: keys naming a secret ("key" deliberately broad;
+# "pass" as a whole part of the name, as in -Dredis.pass or DB_PASS).
+SECRET_KEY = re.compile(
+    r"(?i)password|passwd|pwd|secret|token|key|credential"
+    r"|(?<![a-z0-9])pass(?![a-z0-9])|requirepass|masterauth"
+)
 # java/jsvc options whose value is the next argv element.
 VALUE_OPTIONS = frozenset(
     {
@@ -734,6 +738,10 @@ printf '%s\n' "$out" | awk 'NR <= 6 { print substr($0, 1, 300) }'
     # The path comes from the target's own argv, so it is resolved in the
     # JVM's mount namespace (/proc/<pid>/root) and read only when the JVM's
     # uid owns the file: a fake "java" with -Xloggc:/etc/shadow gets nothing.
+    # Neither the file nor any directory above it may be a symlink: [ -f ],
+    # stat and tail follow links, and an absolute link inside a container
+    # resolves against our root, i.e. to the host's files. Only lines shaped
+    # like GC log records are printed (defence in depth).
     # %p is the PID; other placeholders (%t, rotation suffixes) fall back to
     # the newest file with the same name prefix.
     "gc_log": r"""printf '[AIOPS_GC_LOG]\n'
@@ -752,11 +760,16 @@ gn=$( { tmo2 ls -t "$rt$gd"; } 2>/dev/null | awk -v p="$pre" 'index($0, p) == 1 
 if [ -n "$gn" ] && [ -f "$rt$gd/$gn" ] && [ -r "$rt$gd/$gn" ]; then gl="$gd/$gn"; fi
 fi
 fi
+gq=$gl; k=0
+while [ -n "$gq" ]; do
+if [ -L "$rt$gq" ] || [ "$k" -ge 64 ]; then gl=''; break; fi
+gq=${gq%/*}; k=$((k + 1))
+done
 if [ -z "$gl" ]; then printf 'GC_LOG_UNREADABLE\n'
 elif [ "$(stat -c %u "$rt$gl" 2>/dev/null)" != "$ouid" ]; then printf 'GC_LOG_FOREIGN_OWNER\n'
 else
 printf 'FILE %.290s\n' "$gl"
-{ tmo3 tail -n 40 "$rt$gl"; } 2>/dev/null | cut -c1-300
+{ tmo3 tail -n 40 "$rt$gl"; } 2>/dev/null | awk '/^[[]/ || /^[ \t]+[[]/ || /^GC[(][0-9]/ || /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9]/ || /^[0-9]+[.,][0-9]+: / || /^ *([{]?Heap|garbage-first heap|region size|Metaspace|class space|PSYoungGen|ParOldGen|PSOldGen|eden space|from space|to +space|object space|par new generation|def new generation|tenured generation|concurrent mark-sweep generation|[}]$)/ || /^(Total time for which|Application time:|Java HotSpot|OpenJDK|Memory: |CommandLine flags: )/ { print substr($0, 1, 300) }'
 fi
 ;;
 *) printf 'GC_LOG_UNREADABLE\n';;
@@ -783,7 +796,8 @@ def jvm_script(options: dict) -> str:
 
 
 JVM_COVERAGE = (
-    "单个 JVM 的 jcmd/jstat 单次快照与 GC 日志尾部 40 行；GC 次数与耗时是进程启动以来的累计值，"
+    "单个 JVM 的 jcmd/jstat 单次快照与 GC 日志尾部 40 行（只保留 GC 记录格式的行，日志文件或其目录是符号链接时不读取）；"
+    "GC 次数与耗时是进程启动以来的累计值，"
     "堆使用率包含尚未回收的年轻代对象，不能单独据此判断内存泄漏"
 )
 SIZE = r"([0-9]{1,15}(?:\.[0-9]{1,6})?)([BKMGT]?)"

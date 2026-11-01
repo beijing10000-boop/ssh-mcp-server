@@ -352,7 +352,10 @@ LOG_PATTERNS = (
     ),
     (
         "kernel",
-        r"(?i)segfault|soft lockup|hung_task|hung task|nmi watchdog|general protection|call trace|bug:",
+        # "BUG: " in capitals as a word ("kernel BUG at ..."), so Python's
+        # default "DEBUG:root:..." log format is not taken for a kernel bug.
+        r"(?i)segfault|soft lockup|hung_task|hung task|nmi watchdog|general protection|call trace"
+        r"|\bkernel bug\b|(?-i:\bBUG: )",
     ),
     (
         "auth",
@@ -571,12 +574,13 @@ def health(text, summary, findings):
     for line in section_text(text, "高 CPU 进程").splitlines():
         fields = line.split()
         if len(fields) >= 4 and fields[0].isdigit():
+            # comm may hold spaces ("PM2 v5.3.0: God"): %CPU and %MEM are last.
             top.append(
                 {
                     "pid": int(fields[0]),
-                    "name": fields[1],
-                    "cpu_percent": number(fields[2]),
-                    "memory_percent": number(fields[3]),
+                    "name": " ".join(fields[1:-2]),
+                    "cpu_percent": number(fields[-2]),
+                    "memory_percent": number(fields[-1]),
                 }
             )
     if top:
@@ -622,16 +626,19 @@ def processes(text, summary, findings):
     for line in text.splitlines():
         fields = line.split()
         if len(fields) >= 8 and fields[0].isdigit() and fields[1].isdigit():
+            # comm (between ppid and %CPU, also on gateway hosts) may hold
+            # spaces ("PM2 v5.3.0: God"): the five columns after it are the
+            # last five fields.
             rows.append(
                 {
                     "pid": int(fields[0]),
                     "ppid": int(fields[1]),
-                    "name": fields[2],
-                    "cpu_percent": number(fields[3]),
-                    "memory_percent": number(fields[4]),
-                    "rss_KiB": number(fields[5]),
-                    "elapsed": fields[6],
-                    "state": fields[7],
+                    "name": " ".join(fields[2:-5]),
+                    "cpu_percent": number(fields[-5]),
+                    "memory_percent": number(fields[-4]),
+                    "rss_KiB": number(fields[-3]),
+                    "elapsed": fields[-2],
+                    "state": fields[-1],
                 }
             )
     # Join optional, sanitized APP_IDENTITY records to the matching RSS snapshot.

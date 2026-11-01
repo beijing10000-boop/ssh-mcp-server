@@ -62,10 +62,21 @@ HISTORY_KINDS = {
     "reload",
     "other",
 }
-SECRET_NAME = re.compile(r"(?i)password|passwd|secret|token|key|credential")
+# "pass" counts as a whole part of a name (DB_PASS, RABBITMQ_DEFAULT_PASS),
+# not inside bypass; requirepass / masterauth are redis options.
+SECRET_NAME = re.compile(
+    r"(?i)password|passwd|secret|token|key|credential"
+    r"|(?<![a-z0-9])pass(?![a-z0-9])|requirepass|masterauth"
+)
 SECRET_ARG = re.compile(
-    r"(?i)((?:^|\s)-{0,2}[\w.-]*(?:password|passwd|secret|token|key|credential)"
+    r"(?i)((?:^|\s)-{0,2}[\w.-]*(?:password|passwd|secret|token|key|credential"
+    r"|(?<![a-z0-9])pass(?![a-z0-9])|requirepass|masterauth)"
     r"[\w.-]*=)(\"[^\"]*\"|'[^']*'|\S+)"
+)
+# Records that the OOM killer ended a process (systemd's own, the kernel's);
+# "out of memory" in the service's own log is usually a failed allocation.
+OOM_KILLER = re.compile(
+    r"(?i)oom-kill|oom killer|oom_reaper|killed process \d+|memory cgroup out of memory"
 )
 STAMP = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:?\d{2}|Z)?"
@@ -114,8 +125,15 @@ index($0, "users:((") {
         }
 }"""
 # PID 1 lifecycle records of the unit: kind per line, the newest 40 lines and
-# counters over all of them (one canonical line per failure / restart).
-HISTORY_AWK = """{
+# counters over all of them (one canonical line per failure / restart). An
+# `AIOPS_RC n` line carries journalctl's exit code: when it is not 0 (124:
+# timed out) the counters are unknown, so only HCOUNT_INCOMPLETE is printed
+# and awk exits 1.
+HISTORY_AWK = """/^AIOPS_RC [0-9]+$/ {
+    jrc = $2
+    next
+}
+{
     k = ""
     if ($0 ~ /[Ss]tart request repeated too quickly|start-limit/)
         k = "start_limit"
@@ -157,6 +175,10 @@ END {
         s = 1
     for (i = s; i <= total; i++)
         print "H", kind[i % 40], buf[i % 40]
+    if (jrc != "" && jrc != 0) {
+        print "HCOUNT_INCOMPLETE", jrc
+        exit 1
+    }
     print "HCOUNT starts", sc + 0
     print "HCOUNT failures", fc + 0
     print "HCOUNT restarts", rc + 0
@@ -284,8 +306,13 @@ def detail_script(options: dict) -> str:
         "portawk='" + PORT_AWK + "'",
         "hist='" + HISTORY_AWK + "'",
         "printf '[AIOPS_SHOW]\\n'",
-        "show=$(" + show + " 2>/dev/null)",
+        "show=$(" + show + " 2>/dev/null); src=$?",
         "printf '%s\\n' \"$show\" | cut -c1-300",
+        # No properties (timeout, D-Bus failure) is an unknown state, not a
+        # healthy one: marked, and the run exits 1 so the result is partial.
+        "rc=0",
+        'if [ "$src" != 0 ] || [ -z "$show" ]; then '
+        "printf 'SHOW_FAILED %s\\n' \"$src\"; rc=1; fi",
         # The canonical Id (aliases resolved) for journal matches; only the
         # unit-name alphabet passes, anything else falls back to the request.
         "id=$(printf '%s\\n' \"$show\" | sed -n 's/^Id=//p' | head -n 1)",
@@ -342,8 +369,10 @@ def detail_script(options: dict) -> str:
         + ' 2>/dev/null | awk -v n=80 -v b=8000 -v w=240 "$tailawk"',
         "printf '[AIOPS_HISTORY]\\n'",
         # PID 1's own records about the unit (and its core dumps): complete
-        # for 24 h even when the service itself logs heavily.
-        timed(
+        # for 24 h even when the service itself logs heavily. The exit code
+        # rides along: a timed-out or failed read gives no counts (and rc=1).
+        "{ "
+        + timed(
             4,
             "journalctl --no-pager -q -o short-iso --since @"
             + day
@@ -351,9 +380,9 @@ def detail_script(options: dict) -> str:
             + u
             + ' _PID=1 "UNIT=$id" + "COREDUMP_UNIT=$id"',
         )
-        + ' 2>/dev/null | awk "$hist"',
+        + ' 2>/dev/null; printf \'\\nAIOPS_RC %s\\n\' "$?"; } | awk "$hist" || rc=1',
         "else printf 'JOURNAL=missing\\n'; fi",
-        "exit 0",
+        'exit "$rc"',
     ]
     return "\n".join(parts) + "\n"
 
@@ -620,6 +649,10 @@ def parse_detail(text: str, summary: dict, findings: list, options: dict) -> Non
             history_text,
         )
     }
+    # Missing is not zero: an account outside the journal groups sees no PID 1
+    # records at all, and a timed-out or failed read is incomplete.
+    if access != "available" or re.search(r"(?m)^HCOUNT_INCOMPLETE\b", history_text):
+        hcounts = {}
     counts = {
         "restarts_24h": hcounts.get("restarts"),
         "failures_24h": hcounts.get("failures"),
@@ -645,6 +678,17 @@ def parse_detail(text: str, summary: dict, findings: list, options: dict) -> Non
         }
     )
     _detail_findings(summary, findings, unit, counts, hcounts, matched, history, since)
+    if has_section(text, "SHOW") and unit["load"] is None and unit["active"] is None:
+        failed = re.search(r"(?m)^SHOW_FAILED (\d{1,3})$", section(text, "SHOW"))
+        _finding(
+            findings,
+            "warning",
+            "unit_state_unknown",
+            {"systemctl_show_exit": int(failed[1]) if failed else None},
+            "systemctl show 返回单元属性",
+            "systemctl show 没有返回单元属性（超时、D-Bus 或权限失败）：单元状态未知，"
+            "不能视为已停止或正常；稍后重试，或用 ssh_diagnose_service / ssh_diagnose_failed_services 核对",
+        )
     if access == "limited":
         findings.append(
             {
@@ -663,9 +707,11 @@ def _detail_coverage(text, access, options) -> str:
     minutes = options.get("minutes") if isinstance(options.get("minutes"), int) else 30
     journal = {
         "available": f"最近 {minutes} 分钟单元日志（最多 80 行）与近 24 小时 PID 1 生命周期记录（最多 40 行）",
-        "limited": "单元日志受账号权限限制，只含本账号可见部分",
+        "limited": "单元日志受账号权限限制，只含本账号可见部分；近 24 小时重启与失败次数未知",
         "missing": "主机没有 journalctl，无单元日志与重启记录",
     }.get(access, "单元日志未采集")
+    if re.search(r"(?m)^HCOUNT_INCOMPLETE\b", section(text, "HISTORY")):
+        journal += "；近 24 小时 PID 1 记录读取超时或失败，重启与失败次数未知"
     return (
         "systemctl show/cat 当前状态与单元文件、cgroup 进程与监听端口快照；"
         + journal
@@ -719,18 +765,32 @@ def _detail_findings(summary, findings, unit, counts, hcounts, matched, history,
             "active",
             "单元未运行且上次正常结束：确认是否按设计停用（unit_file 为 disabled/static）或被人工停止",
         )
-    restarts = max(unit["restarts"] or 0, counts["restarts_24h"] or 0)
-    if restarts >= 3:
+    # NRestarts counts since the last manual start, possibly months ago: a
+    # loop needs ≥3 restarts in the 24 h records or, when those are unknown,
+    # NRestarts ≥3 with a restart pending or a start inside the window.
+    restarts, recent = unit["restarts"] or 0, counts["restarts_24h"]
+    started = unit["started_epoch"]
+    looping = (recent or 0) >= 3 or (
+        recent is None
+        and restarts >= 3
+        and (
+            unit["sub"] == "auto-restart"
+            or (since is not None and started is not None and since <= started)
+        )
+    )
+    if looping or restarts >= 3:
         _finding(
             findings,
-            "critical",
+            "critical" if looping else "info",
             "restart_loop",
             {"NRestarts": unit["restarts"], "restarts_24h": counts["restarts_24h"]},
             3,
             "服务反复被 systemd 自动重启（经验阈值 ≥3 次）；查看 history 中每次退出的原因与 exit_status，"
-            "修复根因前不要单纯拉长 RestartSec",
+            "修复根因前不要单纯拉长 RestartSec"
+            if looping
+            else "NRestarts 是自上次手动启动以来的累计自动重启次数（可能跨越数周）；"
+            "近 24 小时的重启记录不足 3 次或无法读取，不能据此判定正在反复重启；结合 history 与 recent_restart 核查",
         )
-    started = unit["started_epoch"]
     if since is not None and started is not None and since <= started:
         _finding(
             findings,
@@ -749,7 +809,11 @@ def _detail_findings(summary, findings, unit, counts, hcounts, matched, history,
             0,
             "主进程上次以非零状态码退出；结合 journal 中退出前的错误行定位原因",
         )
-    oom_lines = matched.get("oom") or [h for h in history if h["kind"] == "oom"]
+    # Only systemd's records (Result, PID 1 history) and kernel-style lines
+    # prove the OOM killer; the service's own "out of memory" is a clue.
+    oom_lines = [
+        line for line in matched.get("oom", []) if OOM_KILLER.search(line)
+    ] or [h for h in history if h["kind"] == "oom"]
     if result == "oom-kill" or hcounts.get("oom") or oom_lines:
         _finding(
             findings,
@@ -758,6 +822,16 @@ def _detail_findings(summary, findings, unit, counts, hcounts, matched, history,
             result if result == "oom-kill" else len(oom_lines) or hcounts.get("oom"),
             "无 OOM",
             "该服务的进程被 OOM killer 终止：核查 memory_max（MemoryMax）、应用内存增长与主机可用内存",
+        )
+    elif matched.get("oom"):
+        _finding(
+            findings,
+            "warning",
+            "oom_log_clue",
+            len(matched["oom"]),
+            "日志中无内存不足字样",
+            "服务自身日志出现 out of memory 等字样：多为应用内存分配失败（如 MySQL/PostgreSQL），"
+            "不等于被内核 OOM killer 终止；结合 Result、history 与 ssh_diagnose_oom 的内核记录确认",
         )
     if result == "timeout":
         _finding(
