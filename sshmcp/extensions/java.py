@@ -131,8 +131,12 @@ JAVA_COVERAGE = (
     "生效值用 ssh_diagnose_jvm 的 vm_flags 确认；非 root 时其他用户进程的 fd、cwd、exe 不可读；"
     "CPU 为进程生命周期平均值"
 )
-# Second-layer redaction: keys naming a secret ("key" deliberately broad).
-SECRET_KEY = re.compile(r"(?i)password|passwd|pwd|secret|token|key|credential")
+# Second-layer redaction: keys naming a secret ("key" deliberately broad;
+# "pass" as a whole part of the name, as in -Dredis.pass or DB_PASS).
+SECRET_KEY = re.compile(
+    r"(?i)password|passwd|pwd|secret|token|key|credential"
+    r"|(?<![a-z0-9])pass(?![a-z0-9])|requirepass|masterauth"
+)
 # java/jsvc options whose value is the next argv element.
 VALUE_OPTIONS = frozenset(
     {
@@ -734,11 +738,23 @@ printf '%s\n' "$out" | awk 'NR <= 6 { print substr($0, 1, 300) }'
     # The path comes from the target's own argv, so it is resolved in the
     # JVM's mount namespace (/proc/<pid>/root) and read only when the JVM's
     # uid owns the file: a fake "java" with -Xloggc:/etc/shadow gets nothing.
-    # %p is the PID; other placeholders (%t, rotation suffixes) fall back to
-    # the newest file with the same name prefix.
+    # A JVM with a root of its own (a container) may have no symlink anywhere
+    # in the path: an absolute link there resolves against our root, i.e. to
+    # the host's files (GC_LOG_SYMLINK). A JVM sharing our root (the same
+    # device and inode for /proc/<pid>/root/ and /) may: /opt/tomcat ->
+    # apache-tomcat-9, current -> releases/..., EL7's tomcat logs ->
+    # /var/log/tomcat. Either way the file is opened once and the open
+    # descriptor must be a regular file owned by the JVM's uid (in a container
+    # also the inode the path itself names, not a link swapped in after the
+    # loop) before tail reads that descriptor. Only the FILE line printed
+    # after those checks and lines shaped like GC log records come out
+    # (defence in depth). %p is the PID; other placeholders (%t, rotation
+    # suffixes) fall back to the newest file with the same name prefix.
     "gc_log": r"""printf '[AIOPS_GC_LOG]\n'
-gl=''; rt=''
+gl=''; rt=''; same=''; sym=''
 if [ -d "/proc/$pid/root/" ]; then rt="/proc/$pid/root"; fi
+r1=$(stat -L -c %d:%i "/proc/$pid/root/" 2>/dev/null)
+if [ -n "$r1" ] && [ "$r1" = "$(stat -L -c %d:%i / 2>/dev/null)" ]; then same=1; fi
 case "$gclog" in
 '') printf 'GC_LOG_NOT_CONFIGURED\n';;
 /*)
@@ -752,11 +768,20 @@ gn=$( { tmo2 ls -t "$rt$gd"; } 2>/dev/null | awk -v p="$pre" 'index($0, p) == 1 
 if [ -n "$gn" ] && [ -f "$rt$gd/$gn" ] && [ -r "$rt$gd/$gn" ]; then gl="$gd/$gn"; fi
 fi
 fi
-if [ -z "$gl" ]; then printf 'GC_LOG_UNREADABLE\n'
-elif [ "$(stat -c %u "$rt$gl" 2>/dev/null)" != "$ouid" ]; then printf 'GC_LOG_FOREIGN_OWNER\n'
+gq=$gl; k=0
+while [ -z "$same" ] && [ -n "$gq" ]; do
+if [ -L "$rt$gq" ]; then gl=''; sym=1; break; fi
+if [ "$k" -ge 64 ]; then gl=''; break; fi
+gq=${gq%/*}; k=$((k + 1))
+done
+if [ -n "$sym" ]; then printf 'GC_LOG_SYMLINK\n'
+elif [ -z "$gl" ]; then printf 'GC_LOG_UNREADABLE\n'
+elif [ "$(stat -L -c %u "$rt$gl" 2>/dev/null)" != "$ouid" ]; then printf 'GC_LOG_FOREIGN_OWNER\n'
 else
-printf 'FILE %.290s\n' "$gl"
-{ tmo3 tail -n 40 "$rt$gl"; } 2>/dev/null | cut -c1-300
+gt=$( { tmo3 sh -c 'exec 3<"$1" && [ -f /proc/self/fd/3 ] && [ "$(stat -L -c %u /proc/self/fd/3)" = "$2" ] && { [ -n "$4" ] || [ "$(stat -c %d:%i "$1")" = "$(stat -L -c %d:%i /proc/self/fd/3)" ]; } && printf "FILE %.290s\n" "$3" && exec tail -n 40 <&3' sh "$rt$gl" "$ouid" "$gl" "$same"; } 2>/dev/null | awk 'NR == 1 { if (substr($0, 1, 5) == "FILE ") print; next }
+/^[[]/ || /^[ \t]+[[]/ || /^GC[(][0-9]/ || /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9]/ || /^[0-9]+[.,][0-9]+: / || /[0-9] secs[]]/ || /^ *[(](concurrent mode failure|concurrent mode interrupted|promotion failed)/ || /^Desired survivor size [0-9]/ || /^- age +[0-9]+: / || /^Using (G1|Parallel|Serial|Concurrent Mark Sweep|Shenandoah|The Z Garbage Collector|Epsilon)/ || /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9] GC log file / || /^ *([{]?Heap|garbage-first heap|region size|Metaspace|class space|PSYoungGen|ParOldGen|PSOldGen|eden space|from space|to +space|object space|par new generation|def new generation|tenured generation|concurrent mark-sweep generation|[}]$)/ || /^(Total time for which|Application time:|Java HotSpot|OpenJDK|Memory: |CommandLine flags: )/ { print substr($0, 1, 300) }'
+)
+if [ -n "$gt" ]; then printf '%s\n' "$gt"; else printf 'GC_LOG_UNREADABLE\n'; fi
 fi
 ;;
 *) printf 'GC_LOG_UNREADABLE\n';;
@@ -783,7 +808,10 @@ def jvm_script(options: dict) -> str:
 
 
 JVM_COVERAGE = (
-    "单个 JVM 的 jcmd/jstat 单次快照与 GC 日志尾部 40 行；GC 次数与耗时是进程启动以来的累计值，"
+    "单个 JVM 的 jcmd/jstat 单次快照与 GC 日志尾部 40 行（只保留 GC 记录格式的行；"
+    "容器内 JVM 的日志路径含符号链接时不读取（symlink_refused），与本机共用根目录的 JVM 可跟随符号链接，"
+    "最终文件须是 JVM 属主的普通文件）；"
+    "GC 次数与耗时是进程启动以来的累计值，"
     "堆使用率包含尚未回收的年轻代对象，不能单独据此判断内存泄漏"
 )
 SIZE = r"([0-9]{1,15}(?:\.[0-9]{1,6})?)([BKMGT]?)"
@@ -910,15 +938,22 @@ def probe_state(probe, body):
     return "failed"
 
 
+GC_LOG_MARKERS = (
+    ("GC_LOG_NOT_CONFIGURED", "not_configured"),
+    # A symlink in the path of a JVM with a root of its own (a container).
+    ("GC_LOG_SYMLINK", "symlink_refused"),
+    ("GC_LOG_UNREADABLE", "unreadable"),
+    ("GC_LOG_FOREIGN_OWNER", "foreign_owner"),
+)
+
+
 def gc_log_state(body):
     if body is None:
         return "no_output"
-    if "GC_LOG_NOT_CONFIGURED" in body:
-        return "not_configured"
-    if "GC_LOG_UNREADABLE" in body:
-        return "unreadable"
-    if "GC_LOG_FOREIGN_OWNER" in body:
-        return "foreign_owner"
+    # Whole lines only: the log's own lines never stand alone as a marker.
+    for marker, state in GC_LOG_MARKERS:
+        if re.search(r"(?m)^" + marker + r"\s*$", body):
+            return state
     return "ok" if _value(body, "FILE") else "failed"
 
 

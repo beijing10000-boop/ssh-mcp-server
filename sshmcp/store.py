@@ -23,6 +23,19 @@ IDENTITY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,31}$")
 HOSTKEY = re.compile(
     r"^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) [A-Za-z0-9+/=]+(?: .*)?$"
 )
+# Rows only master.key can open (settings only where encrypted=1).
+SEALED_ROWS = {
+    "settings": "SELECT 1 FROM settings WHERE encrypted=1 LIMIT 1",
+    "credentials": "SELECT 1 FROM credentials LIMIT 1",
+    "diagnostic_jobs": "SELECT 1 FROM diagnostic_jobs LIMIT 1",
+    "diagnostic_batches": "SELECT 1 FROM diagnostic_batches LIMIT 1",
+    "zabbix_sync_items": "SELECT 1 FROM zabbix_sync_items LIMIT 1",
+}
+MASTER_KEY_MISSING = (
+    "拒绝启动：{} 不存在，但数据库中已有用它加密的凭据、配置或诊断记录。"
+    "请从与数据库同一时间的备份恢复 master.key 后再启动；"
+    "服务不会生成新的主密钥覆盖，否则这些数据将永久无法解密。"
+)
 
 
 def ensure_secret(filename: str, creator) -> bytes:
@@ -46,8 +59,26 @@ def ensure_secret(filename: str, creator) -> bytes:
     return p.read_bytes().strip()
 
 
+def _sealed_data_exists() -> bool:
+    if not (DATA_DIR / "ssh-mcp.sqlite3").exists():
+        return False
+    with db() as c:
+        tables = {
+            r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        return any(
+            table in tables and c.execute(query).fetchone()
+            for table, query in SEALED_ROWS.items()
+        )
+
+
 def init_db():
     DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # A database restored without its master.key must not get a new key: every
+    # sealed credential, secret and result would become unreadable for good.
+    key = DATA_DIR / "master.key"
+    if not key.exists() and _sealed_data_exists():
+        raise RuntimeError(MASTER_KEY_MISSING.format(key))
     ensure_secret("master.key", Fernet.generate_key)
     _fernet.cache_clear()
     # Bootstrap credential is one-time only; not accepted by normal Web login.
@@ -222,7 +253,7 @@ def init_db():
         _add_columns(
             c, "scan_results", {"algorithm": "TEXT", "previous_fingerprint": "TEXT"}
         )
-        # Release whose implied actions were applied (access.extend_client_actions).
+        # Implied actions already considered (access.extend_client_actions).
         _add_columns(c, "mcp_clients", {"actions_extended": "TEXT NOT NULL DEFAULT ''"})
         c.execute("UPDATE scan_batches SET status='interrupted' WHERE status='running'")
         c.execute(
@@ -264,8 +295,12 @@ def token(name: str) -> str:
 
 @lru_cache(maxsize=8)
 def _fernet(directory: Path) -> Fernet:
-    # `directory` is only the cache key: one cached key per resolved DATA_DIR.
-    return Fernet(ensure_secret("master.key", Fernet.generate_key))
+    # One cached key per resolved DATA_DIR. Only init_db creates master.key,
+    # after checking that no sealed data would be orphaned by a new one.
+    key = directory / "master.key"
+    if not key.exists():
+        raise RuntimeError(f"{key} 不存在：请从与数据库同一时间的备份恢复后重启服务")
+    return Fernet(key.read_bytes().strip())
 
 
 def seal(plaintext: str) -> str:

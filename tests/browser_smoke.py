@@ -383,7 +383,7 @@ try:
         )
         row = page.locator("tr").filter(has_text="浏览器验证客户端")
         row.locator('[data-action="revoke-client"]').click()
-        page.locator('#action-confirm button[value="confirm"]').click()
+        page.locator('dialog.ui-confirm button[value="confirm"]').click()
         row.get_by_text("已撤销", exact=True).wait_for()
         assert (
             page.request.post(

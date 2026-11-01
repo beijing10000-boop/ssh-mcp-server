@@ -597,13 +597,6 @@ button.capability {
 .host-drawer h3 {
   margin-top: 22px;
 }
-#action-confirm {
-  width: min(500px, 92vw);
-}
-#action-confirm-message {
-  line-height: 1.8;
-  white-space: pre-wrap;
-}
 .credential-upload {
   padding: 18px;
   border: 1px dashed var(--line-strong);

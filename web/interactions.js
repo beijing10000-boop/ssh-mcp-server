@@ -1,17 +1,14 @@
 "use strict";
 
-function askConfirmation(message) {
-  const dialog = $("#action-confirm");
-  $("#action-confirm-message").textContent = message;
-  dialog.returnValue = "";
-  dialog.showModal();
-  return new Promise((resolve) =>
-    dialog.addEventListener(
-      "close",
-      () => resolve(dialog.returnValue === "confirm"),
-      { once: true },
-    ),
-  );
+// The shared confirmation (ui-kit): resolves true only on the confirm button.
+// A `danger` question (deletes, revokes, stops access) starts on Cancel.
+function askConfirmation(message, { danger = false, confirmText = "确认执行" } = {}) {
+  return UIKit.confirm({
+    title: "确认操作范围",
+    message,
+    confirmText,
+    danger,
+  });
 }
 function readFilters() {
   const q = new URLSearchParams(location.hash.split("?")[1] || "");
@@ -380,6 +377,9 @@ document.addEventListener("click", async (e) => {
     return;
   e.preventDefault();
   e.stopImmediatePropagation();
+  // One request per click, as in app.js: a double click on 只重试失败项 or a
+  // readiness badge must not submit twice.
+  b.disabled = true;
   try {
     if (a === "remove-target") {
       state.targets.delete(Number(id));
@@ -407,5 +407,7 @@ document.addEventListener("click", async (e) => {
     }
   } catch (ex) {
     notice(ex.message, true);
+  } finally {
+    b.disabled = false;
   }
 });

@@ -336,29 +336,27 @@ def time_sync(text, summary, findings):
 
 LOG_ENTRY_CHARS = 240
 LOG_ENTRY_ROWS = 40
-LOG_PATTERNS = (
-    (
-        "oom",
-        r"(?i)\boom[- ]kill|out of memory|killed process|memory cgroup out of memory",
-    ),
-    (
-        "io_error",
-        r"(?i)i/o error|blk_update_request|ext4-fs error|xfs_|buffer i/o|read-only file system|remounting|medium error",
-    ),
-    ("network", r"(?i)link is down|link down|nic link|carrier lost|no carrier"),
-    (
-        "service",
-        r"(?i)failed to start|failed with result|start request repeated too quickly|main process exited|entered failed state",
-    ),
-    (
-        "kernel",
-        r"(?i)segfault|soft lockup|hung_task|hung task|nmi watchdog|general protection|call trace|bug:",
-    ),
-    (
-        "auth",
-        r"(?i)failed password|authentication failure|invalid user|possible break-in",
-    ),
-)
+# Log line kinds, written once as POSIX EREs over the lower-cased line: the
+# syslog action matches them on the host (awk, whole window) and the parsers
+# re-classify the returned lines with the same expressions (case-insensitive
+# in Python), so both always agree. The syslog kinds pass reads info lines
+# too, so no pattern may match routine info messages: "NIC Link is Up"
+# (link-down lines say "link is down" / "link down"), the boot-time "NMI
+# watchdog: Enabled" (a real one reports a "hard LOCKUP") and "DEBUG: x" or
+# Python's "DEBUG:root:" lines: only "bug: " after a non-letter (the kernel's
+# "BUG: <what>") and "kernel BUG at <file>" count.
+LOG_KINDS = {
+    "oom": "oom[- ]kill|out of memory|killed process",
+    "io_error": "i/o error|blk_update_request|ext4-fs error|xfs_|buffer i/o"
+    "|read-only file system|remounting|medium error",
+    "network": "link is down|link down|carrier lost|no carrier",
+    "service": "failed to start|failed with result|start request repeated too quickly"
+    "|main process exited|entered failed state",
+    "kernel": "segfault|soft lockup|hung_task|hung task|hard lockup"
+    "|general protection|call trace|kernel bug at|[^a-z]bug: ",
+    "auth": "failed password|authentication failure|invalid user|possible break-in",
+}
+LOG_PATTERNS = tuple((kind, "(?i)" + pattern) for kind, pattern in LOG_KINDS.items())
 
 
 def logs(text, summary, findings):
@@ -571,12 +569,13 @@ def health(text, summary, findings):
     for line in section_text(text, "高 CPU 进程").splitlines():
         fields = line.split()
         if len(fields) >= 4 and fields[0].isdigit():
+            # comm may hold spaces ("PM2 v5.3.0: God"): %CPU and %MEM are last.
             top.append(
                 {
                     "pid": int(fields[0]),
-                    "name": fields[1],
-                    "cpu_percent": number(fields[2]),
-                    "memory_percent": number(fields[3]),
+                    "name": " ".join(fields[1:-2]),
+                    "cpu_percent": number(fields[-2]),
+                    "memory_percent": number(fields[-1]),
                 }
             )
     if top:
@@ -622,16 +621,19 @@ def processes(text, summary, findings):
     for line in text.splitlines():
         fields = line.split()
         if len(fields) >= 8 and fields[0].isdigit() and fields[1].isdigit():
+            # comm (between ppid and %CPU, also on gateway hosts) may hold
+            # spaces ("PM2 v5.3.0: God"): the five columns after it are the
+            # last five fields.
             rows.append(
                 {
                     "pid": int(fields[0]),
                     "ppid": int(fields[1]),
-                    "name": fields[2],
-                    "cpu_percent": number(fields[3]),
-                    "memory_percent": number(fields[4]),
-                    "rss_KiB": number(fields[5]),
-                    "elapsed": fields[6],
-                    "state": fields[7],
+                    "name": " ".join(fields[2:-5]),
+                    "cpu_percent": number(fields[-5]),
+                    "memory_percent": number(fields[-4]),
+                    "rss_KiB": number(fields[-3]),
+                    "elapsed": fields[-2],
+                    "state": fields[-1],
                 }
             )
     # Join optional, sanitized APP_IDENTITY records to the matching RSS snapshot.
