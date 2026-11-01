@@ -333,29 +333,29 @@ def test_peer_traffic_reads_single_state_ss_lines_without_a_state_column():
     # SSH-DIAG-02: `ss -t -n -i state established` selects one state, so ss
     # prints no State column; lines start with Recv-Q and Send-Q.
     sample = (
-        "0      0      10.0.0.10:443       172.20.1.3:55000\n"
+        "0      0      10.0.0.10:443       198.51.100.3:55000\n"
         "\t cubic wscale:7,7 rto:204 rtt:0.5/0.25 bytes_sent:1500 bytes_acked:1501 "
         "bytes_received:900 segs_out:10\n"
-        "0      36     10.0.0.10:22        172.20.1.4:61000\n"
+        "0      36     10.0.0.10:22        198.51.100.4:61000\n"
         "\t cubic bytes_sent:300 bytes_received:200\n"
     )
     code, out = awk(peer_awk(), sample)
     assert code == 0
     assert out.splitlines() == [
-        "10.0.0.10:443\t172.20.1.3:55000\t1500\t900",
-        "10.0.0.10:22\t172.20.1.4:61000\t300\t200",
+        "10.0.0.10:443\t198.51.100.3:55000\t1500\t900",
+        "10.0.0.10:22\t198.51.100.4:61000\t300\t200",
     ]
     later = out.replace("\t1500\t900", "\t2500\t1900")
     data = insights.parse_tcp_samples("__SAMPLE_A__\n" + out + "__SAMPLE_B__\n" + later)
     assert data["matched_sockets"] == 2
-    assert data["ranking"][0]["peer_ip"] == "172.20.1.3"
+    assert data["ranking"][0]["peer_ip"] == "198.51.100.3"
     assert data["ranking"][0]["total_bytes"] == 2000
     # An ss that still prints the state keeps working.
     code, out = awk(
         peer_awk(),
-        "ESTAB 0 0 10.0.0.10:443 172.20.1.3:55000\n\t cubic bytes_sent:1 bytes_received:2\n",
+        "ESTAB 0 0 10.0.0.10:443 198.51.100.3:55000\n\t cubic bytes_sent:1 bytes_received:2\n",
     )
-    assert out == "10.0.0.10:443\t172.20.1.3:55000\t1\t2\n"
+    assert out == "10.0.0.10:443\t198.51.100.3:55000\t1\t2\n"
 
 
 def test_process_names_with_spaces_keep_the_numeric_columns():
