@@ -6,7 +6,9 @@ Unknown counts are null, not 0 (SSH-DIAG-12); time_sync works without
 nginx_access finds request_time through the log_format (SSH-NGX-06); MCP
 authentication is a read off the event loop (SSH-CORE-02); SSH tools have a
 pool of their own (SSH-CORE-03); a client that leaves frees its slot
-(SSH-CORE-04); the Origin check follows a trusted proxy (SSH-CORE-10).
+(SSH-CORE-04); the Origin check follows a trusted proxy (SSH-CORE-10); the
+console polls batch counts only (SSH-FE-06) and its 准备状态 is not a button
+(SSH-FE-08).
 
 Parser, API and awk tests run everywhere awk is installed; the script runs
 need /bin/sh (dash on CI). The EL7 run of time_sync is in
@@ -17,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 import asyncio
 import json
 import os
+from pathlib import Path
 import re
 import shutil
 import sqlite3
@@ -37,6 +40,7 @@ from sshmcp.main import app
 from test_console import mcp_call, ready_host
 from test_core import auth as csrf
 
+ROOT = Path(__file__).resolve().parent.parent
 HAS_SH = os.path.exists("/bin/sh")
 needs_sh = pytest.mark.skipif(not HAS_SH, reason="needs /bin/sh")
 
@@ -889,3 +893,38 @@ def test_console_writes_work_through_a_trusted_https_proxy(client, monkeypatch):
     monkeypatch.setenv(auth.TRUSTED_PROXIES_ENV, "172.16.0.0/12")
     created = proxy.post("/api/v1/groups", headers=headers, json={"name": "via-proxy"})
     assert created.status_code == 201, created.text
+
+
+# ---------------------------------- SSH-FE-06: batch progress polls counts --
+
+
+def test_batch_progress_reads_counts_without_results(client, key_pair, monkeypatch):
+    hid = ready_host(client, key_pair)
+    monkeypatch.setattr(jobs.POOL, "submit", lambda *_: None)
+    batch = jobs.create([hid, 999999], {"action": "cpu"}, "ou_123456789")
+    monkeypatch.setattr(
+        jobs, "detail", lambda *_: pytest.fail("a progress poll decrypted a result")
+    )
+    response = client.get(f"/api/v1/jobs/batches/{batch['batch_id']}?counts_only=true")
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["counts"]["queued"] == 1 and data["total"] == 1
+    assert data["completed"] == 0 and data["items"] == []
+    assert [s["host_id"] for s in data["skipped"]] == [999999]
+    script = (ROOT / "web" / "interactions.js").read_text(encoding="utf-8")
+    progress = script.split("async function batchProgress", 1)[1].split("\n}\n", 1)[0]
+    assert "counts_only=true" in progress
+
+
+# --------------------------------- SSH-FE-08: 准备状态 shows, buttons act --
+
+
+def test_readiness_badge_is_not_an_action():
+    script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+    assert "readiness-button" not in script
+    row = next(line for line in script.splitlines() if "readiness-cell" in line)
+    # The badge is plain; the step that changes something is its own button.
+    assert "${badge(h.readiness" in row and "${prepareStep(h)}" in row
+    step = script.split("function prepareStep(h)", 1)[1].split("\n}\n", 1)[0]
+    assert 'data-action="prepare-host"' in step
+    assert "title=" in step and "aria-label=" in step and "下一步：" in step

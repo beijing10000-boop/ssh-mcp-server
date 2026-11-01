@@ -269,6 +269,26 @@ function hostKeyCommand(algorithm) {
         : "*";
   return `ssh-keygen -lf /etc/ssh/ssh_host_${file}_key.pub -E sha256`;
 }
+// 准备状态 only shows the state. A preparation step that changes something
+// (opens an editor, starts a key scan) is a button of its own that names it;
+// testing and diagnosing a host with SSH bound stay in the row's actions.
+const PREPARE_STEPS = {
+  disabled: ["启用资产", "打开编辑对话框，保存后启用该资产"],
+  missing_credential: ["绑定凭据", "打开对话框，为该主机绑定 SSH 凭据"],
+  unverified: [
+    "扫描公钥",
+    "立即发起一次主机公钥扫描：只收集候选指纹，独立核验后才会确认",
+  ],
+};
+function prepareStep(h) {
+  const step = PREPARE_STEPS[h.readiness];
+  if (!step) return "";
+  const [label, effect] = step;
+  return (
+    `<button type="button" class="btn small" data-action="prepare-host" data-id="${h.id}" ` +
+    `title="${esc(effect)}" aria-label="${esc(`下一步：${label}（${h.name}）`)}">${esc("下一步：" + label)}</button>`
+  );
+}
 async function pageHosts() {
   const [data, groups, credentials, proxies] = await Promise.all([
     api("/inventory/hosts?" + hostQuery() + "&page=" + state.hostPage),
@@ -303,7 +323,7 @@ async function pageHosts() {
         `<td><button type="button" class="text-button cell-title" data-action="host-detail" data-id="${h.id}">${esc(h.name)}</button><small>资产 ID ${h.id} · Zabbix Host ID ${esc(h.zabbix_hostid || "未关联")}</small></td>` +
         `<td class="mono">${esc(h.address)}:${h.port}<small>${esc(h.username)}${h.proxy_id ? " · 跳板 " + esc(proxies.find((p) => p.id === h.proxy_id)?.name || h.proxy_id) : " · 直连"}</small></td>` +
         `<td>${esc(h.mode === "gateway" ? "B · 受限强制命令网关" : "A · 标准免 Agent")}</td>` +
-        `<td><button type="button" class="readiness-button" data-action="prepare-host" data-id="${h.id}">${badge(h.readiness || "untested")}</button><small>${esc(groupNames)}</small></td>` +
+        `<td><div class="readiness-cell">${badge(h.readiness || "untested")}${prepareStep(h)}</div><small>${esc(groupNames)}</small></td>` +
         `<td class="date">${date(h.last_test_at)}<small>诊断 ${date(h.last_diagnostic_at)}</small></td>` +
         `<td><div class="actions">${actions}</div></td></tr>`
       );

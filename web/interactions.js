@@ -244,7 +244,10 @@ async function prepareHost(id) {
 }
 async function batchProgress() {
   if (!state.batchFilter) return "";
-  const data = await api("/jobs/batches/" + state.batchFilter);
+  // Polled every 3 s while jobs run: counts only, no decrypted results.
+  const data = await api(
+    "/jobs/batches/" + encodeURIComponent(state.batchFilter) + "?counts_only=true",
+  );
   const counts = Object.entries(data.counts)
     .map(([k, v]) => `<span>${esc(statuses[k])}: <strong>${v}</strong></span>`)
     .join("");
@@ -378,7 +381,7 @@ document.addEventListener("click", async (e) => {
   e.preventDefault();
   e.stopImmediatePropagation();
   // One request per click, as in app.js: a double click on 只重试失败项 or a
-  // readiness badge must not submit twice.
+  // 下一步 button must not submit twice.
   b.disabled = true;
   try {
     if (a === "remove-target") {
