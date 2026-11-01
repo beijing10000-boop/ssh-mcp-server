@@ -1756,6 +1756,7 @@ $("#content").addEventListener("submit", async (e) => {
             )
             .join("；") +
           "。删除后无法恢复，确认保存？",
+        { danger: true, confirmText: "保存并按新期限清理" },
       ))
     )
       return;
@@ -1918,6 +1919,7 @@ document.addEventListener("click", async (e) => {
         !(await askConfirmation(
           `确认${enabled ? "启用" : "停用"}所选 ${state.selected.size} 台主机？` +
             (enabled ? "" : "停用会立即阻止新的诊断。"),
+          { danger: !enabled, confirmText: enabled ? "启用" : "停用" },
         ))
       )
         return;
@@ -2126,6 +2128,7 @@ document.addEventListener("click", async (e) => {
       if (
         !(await askConfirmation(
           `撤销「${c.name}」的令牌？该客户端将无法继续访问 MCP，其他客户端不受影响。`,
+          { danger: true, confirmText: "撤销令牌" },
         ))
       )
         return;
@@ -2139,6 +2142,10 @@ document.addEventListener("click", async (e) => {
           state.legacyEnabled
             ? "停用原始 mcp.token？请先确认 AI 平台已改用新的客户端令牌。"
             : "启用原始令牌会授予全部主机和工具权限，确认启用？",
+          {
+            danger: true,
+            confirmText: state.legacyEnabled ? "停用原始令牌" : "启用原始令牌",
+          },
         ))
       )
         return;
@@ -2178,6 +2185,7 @@ document.addEventListener("click", async (e) => {
       if (
         !(await askConfirmation(
           "删除此分组？主机保留，仅通过该分组授权的 MCP 客户端将失去相应主机访问权限。",
+          { danger: true, confirmText: "删除分组" },
         ))
       )
         return;
