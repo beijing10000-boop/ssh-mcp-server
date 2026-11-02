@@ -174,7 +174,7 @@ v0.9.0修正了以下结果，拿不到数据时给出 null 与说明，调用�
 - **processes / memory_processes / health**：进程名可以含空格（如 `PM2 v5.3.0: God`），数值列不再错位。
 - **日志类的内核分类**（logs、kernel、log_errors、oom）不再把 Python 日志的 `DEBUG:` 当作内核 `BUG:`。
 
-v0.10.0（未发布）的结果变化，同样只增不删：
+v0.10.0 的结果变化，同样只增不删：
 
 - **未知的计数为 null**：经典动作的采集不完整（输出 `CAPABILITY_MISSING:*`、非零退出、致命 stderr、超时或截断，即 `status` 不是 `success`）时，计数类指标为 0 的改为 null（未知）：`failed_service_count`、`observed_log_lines`、`oom_matches`、`observed_rows`、`listening_ports`、`reported_firewall_services`、`processes_uninterruptible`、`unavailable_commands` 的 `summary.metrics[].value`，以及日志类的 `summary.entries_total`。大于 0 的计数照常给出（已看到的证据，是下限）。完整采集的 0 仍是 0。
 - **`ssh_diagnose_service`**：一个单元的属性没有“失败服务数”可数，`failed_service_count` 指标的 value 恒为 null，`summary.failed_services` 为 null（此前恒为 0 和 `[]`）；字段保留，按名读取的客户端不会出错。`failed_services`、`service_inventory` 两个动作不变。
