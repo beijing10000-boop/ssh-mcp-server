@@ -604,6 +604,17 @@ def execute(
         _ACTIVE_HOSTS.add(host_id)
         _BACKGROUND_ACTIVE += int(background)
     try:
+        if budget:
+            # The slot came late (the call queued for a thread, or waited up
+            # to its limit) and too little of the caller's bound is left to
+            # connect and collect: busy, without starting the remote script
+            # only for it to time out.
+            left = started + budget - time.monotonic()
+            if left < max(5.0, budget / 4):
+                raise SSHDiagnosticError(
+                    "SSH 诊断繁忙：取得主机名额时调用方给定的 timeout_seconds 只剩"
+                    f" {max(0, int(left))} 秒，未连接主机，请稍后重试"
+                )
         preflight()
         return _execute_inner(
             host_id,
@@ -678,8 +689,12 @@ def _execute_inner(
         client = client_connect(
             host, private_key(host["credential_id"]), sock=tunnel, timeout=stage
         )
-        if cancelled() or store.get_host(host_id)["revision"] != host["revision"]:
-            raise SSHDiagnosticError("任务已取消或主机配置已变更")
+        # Two errors: a client that left during the handshake is a
+        # cancellation, not a changed host (mcp_tools.ERROR_CODES).
+        if cancelled():
+            raise SSHDiagnosticError("任务已取消")
+        if store.get_host(host_id)["revision"] != host["revision"]:
+            raise SSHDiagnosticError("主机配置已变更，请重新提交诊断")
         chan = client.get_transport().open_session(timeout=stage)
         chan.settimeout(6)
         chan.exec_command(command)

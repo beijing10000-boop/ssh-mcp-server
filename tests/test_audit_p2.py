@@ -693,8 +693,10 @@ def test_light_tools_answer_while_ssh_calls_fill_every_thread(
         return {"status": "success", "summary": {}, "findings": []}
 
     monkeypatch.setattr(jobs, "run_inline", slow)
-    # More waiting SSH calls than asyncio's default pool has threads.
-    calls = min(32, (os.cpu_count() or 1) + 4) + 2
+    # More waiting SSH calls than the SSH pool and asyncio's default pool
+    # have threads.
+    default_pool = min(32, (os.cpu_count() or 1) + 4)
+    calls = max(mcp_tools.INLINE_WORKERS, default_pool) + 2
     with ThreadPoolExecutor(max_workers=calls + 2) as pool:
         try:
             blocked = [
@@ -703,7 +705,7 @@ def test_light_tools_answer_while_ssh_calls_fill_every_thread(
                 )
                 for _ in range(calls)
             ]
-            for _ in range(200):
+            for _ in range(400):
                 if len(entered) >= mcp_tools.INLINE_WORKERS:
                     break
                 time.sleep(0.05)
@@ -1128,3 +1130,141 @@ def test_access_summary_names_guessed_upstream_times():
         "nginx_access", "[AIOPS_TIMING]\nUPS 1 0.1 0.1 0 0\n", options={}
     )
     assert old["summary"]["timing"]["upstream_time_source"] is None
+
+
+# ------- SSH-CORE-03 follow-up: waiters for a busy host do not hold up other
+# ------- hosts; no SSH without time left (review: hol_pool.py, exhausted_budget.py)
+
+
+def test_calls_waiting_for_a_busy_host_do_not_hold_up_other_hosts(monkeypatch):
+    busy_host, idle_host, waiting = 9101, 9102, 12
+    # More waiters than the eight threads the pool had (the review's case).
+    assert waiting < mcp_tools.INLINE_WORKERS
+    release = threading.Event()
+
+    def inner(host_id, action, *args, cancelled, **kwargs):
+        if host_id == busy_host:
+            release.wait(30)
+        return {"status": "success", "host_id": host_id}
+
+    monkeypatch.setattr(diagnostics, "_execute_inner", inner)
+
+    def call(host_id, options=None, action="cpu"):
+        return diagnostics.execute(host_id, action, options=options)
+
+    async def scenario():
+        busy = [
+            asyncio.ensure_future(mcp_tools.run_inline_tool(call, busy_host))
+            for _ in range(waiting)
+        ]
+        await asyncio.sleep(0.5)  # one holds the host, the others wait for it
+        started = time.monotonic()
+        try:
+            # ssh_collect bounded to 20 s, as the AI platform calls it.
+            other = await asyncio.wait_for(
+                mcp_tools.run_inline_tool(
+                    call,
+                    idle_host,
+                    {"actions": ["cpu"], "timeout_seconds": 20},
+                    "collect",
+                ),
+                15,
+            )
+            took = time.monotonic() - started
+        finally:
+            release.set()
+        return other, took, await asyncio.gather(*busy)
+
+    try:
+        other, took, results = asyncio.run(scenario())
+    finally:
+        release.set()
+    assert other["status"] == "success" and took < 5, (other, took)
+    assert [r["status"] for r in results] == ["success"] * waiting
+    assert not {busy_host, idle_host} & diagnostics._ACTIVE_HOSTS
+
+
+@pytest.mark.parametrize(
+    "queued, budget, connects",
+    [
+        # timeout_seconds=20: at least 5 s must be left once the slot is held.
+        (25, 20, False),
+        (16, 20, False),
+        (12, 20, True),
+        (1, 20, True),
+        # timeout_seconds=120: at least a quarter, 30 s.
+        (95, 120, False),
+        (60, 120, True),
+    ],
+)
+def test_a_call_without_time_left_once_it_has_its_slot_does_not_connect(
+    monkeypatch, queued, budget, connects
+):
+    runs = []
+    monkeypatch.setattr(
+        diagnostics,
+        "_execute_inner",
+        lambda *args, **kwargs: (
+            runs.append(kwargs["finish_by"]) or {"status": "success"}
+        ),
+    )
+    # The host is free, but the call queued `queued` seconds for a thread.
+    token = diagnostics.CALL_ACCEPTED_AT.set(time.monotonic() - queued)
+    options = {"actions": ["cpu"], "timeout_seconds": budget}
+    try:
+        if connects:
+            assert diagnostics.execute(9103, "collect", options=options)["status"] == (
+                "success"
+            )
+        else:
+            with pytest.raises(diagnostics.SSHDiagnosticError) as caught:
+                diagnostics.execute(9103, "collect", options=options)
+            message = str(caught.value)
+            assert "未连接主机" in message
+            assert mcp_tools.error_code(caught.value, message) == "busy"
+    finally:
+        diagnostics.CALL_ACCEPTED_AT.reset(token)
+    assert len(runs) == int(connects)
+    assert 9103 not in diagnostics._ACTIVE_HOSTS  # the slot is free again
+
+
+class HandshakeClient:
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize("change", ["client_left", "host_changed"])
+def test_the_handshake_tells_a_client_that_left_from_a_changed_host(
+    client, key_pair, monkeypatch, change
+):
+    hid = ready_host(client, key_pair)
+    gone = threading.Event()
+
+    def connect(*args, **kwargs):
+        if change == "client_left":
+            gone.set()  # the client disconnects while SSH connects
+        else:
+            with store.db() as c:
+                c.execute("UPDATE hosts SET revision=revision+1 WHERE id=?", (hid,))
+        return HandshakeClient()
+
+    monkeypatch.setattr(diagnostics, "client_connect", connect)
+    token = diagnostics.CALLER_GONE.set(gone)
+    try:
+        result = jobs.run_inline(hid, "cpu", "ou_123456789", source="web")
+    finally:
+        diagnostics.CALLER_GONE.reset(token)
+    with store.db() as c:
+        job = c.execute(
+            "SELECT status,error FROM diagnostic_jobs WHERE host_id=?", (hid,)
+        ).fetchone()
+    if change == "client_left":
+        # Was revision_changed: "任务已取消或主机配置已变更" matched 已变更 first.
+        assert (result["status"], result["error_code"]) == ("cancelled", "cancelled")
+        assert tuple(job) == ("cancelled", diagnostics.CALLER_GONE_ERROR)
+    else:
+        assert (result["status"], result["error_code"]) == (
+            "failed",
+            "revision_changed",
+        )
+        assert job["status"] == "failed" and "已变更" in job["error"]

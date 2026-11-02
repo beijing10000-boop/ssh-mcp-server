@@ -43,9 +43,13 @@ READ_ONLY = ToolAnnotations(
 # then run for up to 20-120 s. They get a pool of their own: a burst of them
 # (an AI platform fans several out per host) queues here instead of filling
 # asyncio's default pool, which keeps serving the light tools (resolve,
-# catalog, job status) and MCP authentication. Eight threads cover the four
-# SSH slots plus four calls waiting for one.
-INLINE_WORKERS = 8
+# catalog, job status) and MCP authentication. A call waiting for its slot
+# sleeps in one of these threads, so the pool is sized for waiters: the four
+# SSH slots plus 28 calls waiting for a busy host, after which a call for an
+# idle host would queue behind them. A waiter gives up after 30 s (busy),
+# and a call that queued past its timeout_seconds does not connect
+# (diagnostics.execute).
+INLINE_WORKERS = 32
 INLINE_POOL = ThreadPoolExecutor(
     max_workers=INLINE_WORKERS, thread_name_prefix="ssh-inline"
 )
