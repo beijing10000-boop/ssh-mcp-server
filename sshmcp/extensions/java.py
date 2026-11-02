@@ -1398,8 +1398,17 @@ register(
         timeout=30,
         output_limit=32768,
         estimated_seconds=12,
+        # What the probes touch on the target (docs/MCP.md has the same list).
         notes=(
-            "jcmd 会让 JVM 短暂进入安全点，生产高峰期谨慎使用；GC 计数是进程启动以来的累计值。",
+            "heap_info、vm_flags 用 jcmd 附加（attach）到目标 JVM：先在 JVM 的工作目录（不可写时为 JVM 的 /tmp）"
+            "创建 .attach_pid<PID> 并向 JVM 发送 SIGQUIT，jcmd 结束后删除该文件（被超时终止时可能残留）；"
+            "JVM 随即启动常驻的 Attach Listener 线程，并在其 /tmp 留下 .java_pid<PID> 套接字，二者保留到 JVM 退出。"
+            "不捕获 SIGQUIT（-Xrs、jsvc 父进程）或禁用 attach 的 JVM 跳过 jcmd。",
+            "jcmd 命令在目标 JVM 内执行，可能短暂进入安全点或持有堆锁，生产高峰期谨慎使用；"
+            "不触发 GC、不生成堆转储、不修改参数。root 账号经 runuser 切换为 JVM 属主执行（系统日志可能记录一次 runuser 会话）。",
+            "gc_stat（jstat -gc）只读 JVM 的性能计数文件（/tmp/hsperfdata_<用户>/<PID>），不附加、不发信号；"
+            "gc_log 只读 GC 日志尾部 40 行。jcmd、jstat 自身以 -Xmx64m、-XX:-UsePerfData 启动（不留自己的计数文件），"
+            "每个探针限时 8 秒；GC 计数是进程启动以来的累计值。",
         ),
     )
 )

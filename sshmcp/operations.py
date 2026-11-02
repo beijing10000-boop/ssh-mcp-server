@@ -21,11 +21,30 @@ SCRIPTS = {
         "if ! command -v lsblk >/dev/null 2>&1; then printf 'CAPABILITY_MISSING:lsblk\\n'; exit 69; fi; "
         "lsblk --bytes --output NAME,TYPE,SIZE,RO,ROTA,MOUNTPOINT"
     ),
+    # `timedatectl show` needs systemd >= 239: EL7 (219) falls back to
+    # `timedatectl status`; without timedatectl (or its D-Bus service) chronyc
+    # tracking, then ntpstat, tell whether the clock is synchronised. The parser
+    # names the source (summary.sync_source).
     "time_sync": (
-        "if ! command -v timedatectl >/dev/null 2>&1; then printf 'CAPABILITY_MISSING:timedatectl\\n'; exit 69; fi; "
-        "date -u '+%Y-%m-%dT%H:%M:%SZ'; timedatectl show --property=Timezone,LocalRTC,NTP,NTPSynchronized; "
-        'code=$?; [ "$code" = 0 ] || exit "$code"; '
-        "if command -v chronyc >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then timeout -k 1 5 chronyc tracking; fi"
+        "date -u '+%Y-%m-%dT%H:%M:%SZ'; "
+        't5() { if command -v timeout >/dev/null 2>&1; then timeout -k 1 5 "$@"; else "$@"; fi; }; '
+        "ok=''; err=''; "
+        "if command -v timedatectl >/dev/null 2>&1; then "
+        "if out=$(t5 timedatectl show --property=Timezone,LocalRTC,NTP,NTPSynchronized 2>/dev/null) "
+        '&& [ -n "$out" ]; then printf \'%s\\n\' "$out"; ok=show; '
+        "elif out=$(t5 timedatectl status 2>&1); then "
+        "printf '[AIOPS_TIMEDATECTL_STATUS]\\n%s\\n' \"$out\"; ok=status; "
+        "else err=$out; fi; fi; "
+        "if command -v chronyc >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then "
+        "printf '[AIOPS_CHRONYC]\\n'; timeout -k 1 5 chronyc tracking 2>&1; rc=$?; "
+        'printf \'AIOPS_RC %s\\n\' "$rc"; if [ "$rc" = 0 ]; then ok=${ok:-chronyc}; fi; fi; '
+        'if [ -z "$ok" ] && command -v ntpstat >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then '
+        "printf '[AIOPS_NTPSTAT]\\n'; timeout -k 1 5 ntpstat 2>&1; rc=$?; "
+        "printf 'AIOPS_RC %s\\n' \"$rc\"; "
+        'case "$rc" in 0|1) ok=ntpstat;; esac; fi; '
+        '[ -n "$ok" ] && exit 0; '
+        'if [ -n "$err" ]; then printf \'%s\\n\' "$err" >&2; exit 1; fi; '
+        "printf 'CAPABILITY_MISSING:timedatectl\\n'; exit 69"
     ),
     # No `ss -H` (iproute2 4.11 on EL7 lacks it): awk skips the header line.
     "tcp_states": (

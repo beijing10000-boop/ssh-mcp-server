@@ -1,0 +1,1510 @@
+"""Regressions for the remaining P2 findings of the 2026-11 audit (v0.10.0).
+
+Unknown counts are null, not 0 (SSH-DIAG-12); time_sync works without
+`timedatectl show` (SSH-DIAG-16); unhealthy containers are reported
+(SSH-DIAG-17); the jvm probe's side effects are written down (SSH-DIAG-15);
+nginx_access finds request_time through the log_format (SSH-NGX-06); MCP
+authentication is a read off the event loop (SSH-CORE-02); SSH tools have a
+pool of their own (SSH-CORE-03); a client that leaves frees its slot
+(SSH-CORE-04); the Origin check follows a trusted proxy (SSH-CORE-10); the
+console polls batch counts only (SSH-FE-06) and its 准备状态 is not a button
+(SSH-FE-08).
+
+Parser, API and awk tests run everywhere awk is installed; the script runs
+need /bin/sh (dash on CI). The EL7 run of time_sync is in
+test_audit_followup.py (-k el7). The tests at the end cover the review of
+this branch; its console tests run the web scripts in node (skipped without).
+"""
+
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import sqlite3
+import subprocess
+import tempfile
+import threading
+import time
+
+import anyio
+import pytest
+from fastapi.testclient import TestClient
+from starlette.requests import Request
+
+from sshmcp import access, auth, catalog, diagnostics, jobs, mcp_tools, store
+from sshmcp import observations, operations
+from sshmcp.extensions import nginx
+from sshmcp.main import app
+from test_console import mcp_call, ready_host
+from test_core import auth as csrf
+
+ROOT = Path(__file__).resolve().parent.parent
+HAS_SH = os.path.exists("/bin/sh")
+needs_sh = pytest.mark.skipif(not HAS_SH, reason="needs /bin/sh")
+
+
+def metrics(report):
+    return {m["metric"]: m for m in report["summary"]["metrics"]}
+
+
+def by_metric(report):
+    return {f["metric"]: f for f in report["findings"]}
+
+
+def awk_commands():
+    """Every awk on this machine: the default, POSIX gawk and mawk."""
+    found = [["awk"]] if shutil.which("awk") else []
+    if shutil.which("gawk"):
+        found.append(["gawk", "--posix"])
+    if shutil.which("mawk"):
+        found.append(["mawk"])
+    return found
+
+
+def run_awk(command, program, data, *variables):
+    """The program from a file: MSYS awk on Windows garbles a command-line
+    program longer than about 8 KB (ACCESS_AWK is); on Linux it is the same."""
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".awk", delete=False, encoding="utf-8", newline="\n"
+    ) as fh:
+        fh.write(program)
+    try:
+        args = [arg for name in variables for arg in ("-v", name)]
+        return subprocess.run(
+            [*command, *args, "-f", fh.name], input=data, capture_output=True
+        )
+    finally:
+        os.unlink(fh.name)
+
+
+# ------------------------------------------- SSH-DIAG-12: null, not 0 ------
+
+
+def test_failed_service_count_is_unknown_without_systemctl():
+    for text in (
+        "CAPABILITY_MISSING:systemctl\n",
+        # systemctl ran but could not reach systemd (exit 1).
+        "",
+    ):
+        report = observations.analyze("failed_services", text, status="partial")
+        assert metrics(report)["failed_service_count"]["value"] is None, text
+        assert "failed_service_count" not in by_metric(report)
+        assert by_metric(report)["collection_coverage"]["level"] == "info"
+
+
+def test_log_counts_are_unknown_when_the_journal_is_not_readable():
+    for text in (
+        "CAPABILITY_MISSING:journalctl\n",
+        # An account outside the journal groups sees its own lines only.
+        "CAPABILITY_MISSING:journal-permission\n",
+    ):
+        for action in ("logs", "kernel", "log_errors", "oom"):
+            report = observations.analyze(action, text, status="partial")
+            found = metrics(report)
+            assert found["observed_log_lines"]["value"] is None, (action, text)
+            assert found["oom_matches"]["value"] is None, (action, text)
+            assert report["summary"]["entries_total"] is None
+            assert report["summary"]["entries"] == []
+
+
+def test_counts_seen_in_an_incomplete_run_are_kept():
+    text = (
+        "CAPABILITY_MISSING:journal-permission\n"
+        "2026-11-01T10:00:00+0800 h kernel: Killed process 4242 (java)\n"
+    )
+    report = observations.analyze("oom", text, status="partial")
+    found = metrics(report)
+    # Seen is seen: a lower bound, and still the critical finding.
+    assert found["oom_matches"]["value"] == 1
+    assert found["observed_log_lines"]["value"] == 1
+    assert by_metric(report)["oom_matches"]["level"] == "critical"
+    assert report["summary"]["entries_total"] == 1
+
+
+def test_complete_runs_keep_their_zero_counts():
+    clean = observations.analyze("failed_services", "")
+    assert metrics(clean)["failed_service_count"]["value"] == 0
+    quiet = observations.analyze("logs", "-- No entries --\n")
+    assert metrics(quiet)["observed_log_lines"]["value"] == 0
+    assert quiet["summary"]["entries_total"] == 0
+    timers = observations.analyze("timers", "", status="partial", truncated=True)
+    assert metrics(timers)["observed_rows"]["value"] is None
+
+
+def test_service_action_has_no_failed_service_count():
+    text = (
+        "Id=nginx.service\nLoadState=loaded\nActiveState=failed\nSubState=failed\n"
+        "Result=exit-code\nNRestarts=0\nFragmentPath=/usr/lib/systemd/system/nginx.service\n"
+    )
+    report = observations.analyze("service", text)
+    summary = report["summary"]
+    # Still listed (clients may read it), but null: one unit has no count.
+    assert metrics(report)["failed_service_count"]["value"] is None
+    assert summary["failed_services"] is None
+    assert "failed_service_count" not in by_metric(report)
+    assert by_metric(report)["service_active_state"]["value"] == "failed"
+    # The actions that do list failed services are unchanged.
+    listed = observations.analyze(
+        "failed_services", "nginx.service loaded failed failed Nginx\n"
+    )
+    assert metrics(listed)["failed_service_count"]["value"] == 1
+    assert listed["summary"]["failed_services"] == ["nginx.service"]
+    inventory = observations.analyze(
+        "service_inventory",
+        "nginx.service loaded failed failed Nginx\nsshd.service loaded active running OpenSSH\n",
+    )
+    assert metrics(inventory)["failed_service_count"]["value"] == 1
+
+
+# ------------------------------------- SSH-DIAG-16: time_sync without show --
+
+STATUS_219 = """      Local time: Sun 2026-11-01 12:00:00 CST
+  Universal time: Sun 2026-11-01 04:00:00 UTC
+        RTC time: Sun 2026-11-01 04:00:00
+       Time zone: Asia/Shanghai (CST, +0800)
+     NTP enabled: yes
+NTP synchronized: no
+ RTC in local TZ: no
+      DST active: n/a
+"""
+STATUS_237 = """                      Local time: Tue 2026-11-03 10:00:00 UTC
+                  Universal time: Tue 2026-11-03 10:00:00 UTC
+                        RTC time: Tue 2026-11-03 10:00:01
+                       Time zone: Etc/UTC (UTC, +0000)
+       System clock synchronized: yes
+systemd-timesyncd.service active: yes
+                 RTC in local TZ: no
+"""
+STATUS_239 = """               Local time: Tue 2026-11-03 18:00:00 CST
+           Universal time: Tue 2026-11-03 10:00:00 UTC
+                 RTC time: Tue 2026-11-03 10:00:00
+                Time zone: Asia/Shanghai (CST, +0800)
+System clock synchronized: yes
+              NTP service: inactive
+          RTC in local TZ: no
+"""
+CHRONY = """Reference ID    : C0A80101 (192.0.2.1)
+Stratum         : 3
+Ref time (UTC)  : Sun Nov 01 04:00:00 2026
+System time     : 0.000012345 seconds fast of NTP time
+Last offset     : +0.000001234 seconds
+RMS offset      : 0.000023456 seconds
+Frequency       : 1.234 ppm slow
+Leap status     : {leap}
+"""
+DATE = "2026-11-01T04:00:00Z\n"
+
+
+def time_sync(text, status="success"):
+    report = observations.analyze("time_sync", text, status=status)
+    return report["summary"], by_metric(report)
+
+
+def test_time_sync_reads_timedatectl_status_of_systemd_219():
+    summary, found = time_sync(
+        DATE + "[AIOPS_TIMEDATECTL_STATUS]\n" + STATUS_219 + "[AIOPS_CHRONYC]\n"
+        "506 Cannot talk to daemon\nAIOPS_RC 1\n"
+    )
+    assert summary["sync_source"] == "timedatectl status"
+    assert summary["properties"] == {
+        "Timezone": "Asia/Shanghai",
+        "NTP": "yes",
+        "NTPSynchronized": "no",
+        "LocalRTC": "no",
+    }
+    assert found["NTPSynchronized"]["level"] == "warning"
+    assert "timedatectl status" in found["NTPSynchronized"]["hint"]
+    # chronyc failed (rc 1): no chrony data, the status answer stands.
+    assert "chrony" not in summary
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [
+        (STATUS_237, {"Timezone": "Etc/UTC", "NTPSynchronized": "yes", "NTP": "yes"}),
+        (
+            STATUS_239,
+            {"Timezone": "Asia/Shanghai", "NTPSynchronized": "yes", "NTP": "no"},
+        ),
+    ],
+)
+def test_time_sync_reads_later_status_labels(status, expected):
+    summary, found = time_sync(DATE + "[AIOPS_TIMEDATECTL_STATUS]\n" + status)
+    assert summary["sync_source"] == "timedatectl status"
+    assert {k: summary["properties"][k] for k in expected} == expected
+    assert "NTPSynchronized" not in found
+
+
+def test_time_sync_falls_back_to_chronyc_then_ntpstat():
+    summary, found = time_sync(
+        DATE + "[AIOPS_CHRONYC]\n" + CHRONY.format(leap="Normal") + "AIOPS_RC 0\n"
+    )
+    assert summary["sync_source"] == "chronyc tracking"
+    assert summary["properties"] == {"NTPSynchronized": "yes"}
+    assert summary["chrony"]["stratum"] == 3
+    assert summary["chrony"]["system_time"].startswith("0.000012345 seconds fast")
+    summary, found = time_sync(
+        DATE
+        + "[AIOPS_CHRONYC]\n"
+        + CHRONY.format(leap="Not synchronised")
+        + "AIOPS_RC 0\n"
+    )
+    assert summary["properties"]["NTPSynchronized"] == "no"
+    assert "chronyc tracking" in found["NTPSynchronized"]["hint"]
+    for code, synced in (("0", "yes"), ("1", "no")):
+        summary, _ = time_sync(
+            DATE + "[AIOPS_NTPSTAT]\nsynchronised to NTP server (192.0.2.1) at "
+            f"stratum 3\n   time correct to within 45 ms\nAIOPS_RC {code}\n"
+        )
+        assert summary["sync_source"] == "ntpstat"
+        assert summary["properties"]["NTPSynchronized"] == synced
+        assert summary["ntpstat"]["exit_code"] == int(code)
+    # ntpstat 2: the daemon could not be asked, so nothing is known.
+    summary, found = time_sync(
+        DATE + "[AIOPS_NTPSTAT]\nUnable to talk to NTP daemon. Is it running?\n"
+        "AIOPS_RC 2\n",
+        status="partial",
+    )
+    assert summary["sync_source"] is None and summary["properties"] == {}
+    assert "NTPSynchronized" not in found
+
+
+def test_time_sync_keeps_reading_timedatectl_show():
+    summary, found = time_sync(
+        DATE + "Timezone=UTC\nLocalRTC=no\nNTP=yes\nNTPSynchronized=no\n"
+        "Reference ID    : 00000000 ()\nLeap status     : Not synchronised\n"
+    )
+    assert summary["sync_source"] == "timedatectl show"
+    assert summary["properties"]["NTPSynchronized"] == "no"
+    assert found["NTPSynchronized"]["value"] == "no"
+    # An older stored result (bare chronyc lines) still yields the chrony data.
+    assert summary["chrony"]["leap_status"] == "Not synchronised"
+
+
+def test_time_sync_script_has_its_fallbacks():
+    script = operations.SCRIPTS["time_sync"]
+    assert "timedatectl show" in script and "timedatectl status" in script
+    assert "[AIOPS_TIMEDATECTL_STATUS]" in script
+    assert "chronyc tracking" in script and "ntpstat" in script
+    # Every external command is bounded when the host has timeout(1).
+    assert script.count("timeout -k 1 5") == 3
+    assert "CAPABILITY_MISSING:timedatectl" in script
+    shell = shutil.which("dash") or shutil.which("sh")
+    if shell:
+        subprocess.run(
+            [shell, "-n"],
+            input=diagnostics.command_for("time_sync"),
+            text=True,
+            check=True,
+        )
+
+
+TIMEDATECTL_219 = (
+    'case "$1" in\n'
+    "show) echo 'Unknown operation show' >&2; exit 1;;\n"
+    "status) cat <<'EOF'\n" + STATUS_219 + "EOF\n;;\n"
+    "esac\n"
+)
+NO_BUS = (
+    "echo 'Failed to create bus connection: No such file or directory' >&2; exit 1\n"
+)
+
+
+@needs_sh
+@pytest.mark.parametrize(
+    "tools,code,source,synced",
+    [
+        ({"timedatectl": TIMEDATECTL_219}, 0, "timedatectl status", "no"),
+        (
+            {
+                "timedatectl": NO_BUS,
+                "chronyc": "cat <<'EOF'\n" + CHRONY.format(leap="Normal") + "EOF\n",
+            },
+            0,
+            "chronyc tracking",
+            "yes",
+        ),
+        (
+            {
+                "timedatectl": NO_BUS,
+                "chronyc": "echo '506 Cannot talk to daemon'; exit 1\n",
+                "ntpstat": "printf 'unsynchronised\\n'; exit 1\n",
+            },
+            0,
+            "ntpstat",
+            "no",
+        ),
+        ({"timedatectl": NO_BUS}, 1, None, None),
+        ({}, 69, None, None),
+    ],
+    ids=["el7", "no-bus-chrony", "no-bus-ntpstat", "no-bus", "nothing"],
+)
+def test_time_sync_script_runs_each_fallback(tmp_path, tools, code, source, synced):
+    for name in ("date", "cat", "timeout"):
+        (tmp_path / name).symlink_to(shutil.which(name))
+    for name, body in tools.items():
+        path = tmp_path / name
+        path.write_text("#!/bin/sh\n" + body)
+        path.chmod(0o755)
+    result = subprocess.run(
+        ["/bin/sh", "-c", operations.SCRIPTS["time_sync"]],
+        capture_output=True,
+        text=True,
+        env={"PATH": str(tmp_path), "LC_ALL": "C"},
+        timeout=30,
+    )
+    assert result.returncode == code, result.stdout + result.stderr
+    summary, _ = time_sync(result.stdout, "success" if code == 0 else "partial")
+    assert summary["sync_source"] == source
+    assert summary["properties"].get("NTPSynchronized") == synced
+    if code == 1:  # timedatectl's own error stays visible
+        assert "bus connection" in result.stderr
+
+
+# --------------------------------------- SSH-DIAG-17: unhealthy containers --
+
+
+def test_unhealthy_container_is_a_warning():
+    text = (
+        "a1\tweb\tnginx:1.25\tUp 2 hours (unhealthy)\n"
+        "b2\tapi\tapp:3\tUp 5 minutes (healthy)\n"
+        "c3\tjob\tapp:3\tUp 3 seconds (health: starting)\n"
+    )
+    findings = observations.analyze("containers", text)["findings"]
+    states = [f for f in findings if f["metric"] == "container_state"]
+    assert [f["value"] for f in states] == ["web: Up 2 hours (unhealthy)"]
+    assert states[0]["level"] == "warning" and "健康检查" in states[0]["hint"]
+
+
+# -------------------------------------------- SSH-DIAG-15: jvm side effects --
+
+JVM_EFFECTS = (".attach_pid", ".java_pid", "Attach Listener", "SIGQUIT", "runuser")
+
+
+def test_jvm_side_effects_are_written_down():
+    tool = mcp_tools.mcp._tool_manager._tools["ssh_diagnose_jvm"].description
+    notes = "".join(next(e for e in catalog.entries() if e["id"] == "jvm")["notes"])
+    docs = (ROOT / "docs" / "MCP.md").read_text(encoding="utf-8")
+    for effect in JVM_EFFECTS:
+        assert effect in tool, effect
+        assert effect in notes, effect
+        assert effect in docs, effect
+    for text in (notes, docs):
+        assert "hsperfdata" in text and "安全点" in text
+
+
+# ------------------------------- SSH-NGX-06: request_time via the log_format --
+
+NGINX_DUMP = r"""# configuration file /etc/nginx/nginx.conf:
+http {
+    log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                      '$status $body_bytes_sent "$http_referer" '
+                      '"$http_user_agent" $request_time $upstream_response_time';
+    log_format upfirst '$remote_addr - $remote_user [$time_local] "$request" '
+                       '$status $body_bytes_sent "$http_referer" "$http_user_agent" '
+                       '$upstream_response_time $request_time';
+    # nginx's own example: $gzip_ratio is a decimal, not a duration.
+    log_format compression '$remote_addr - $remote_user [$time_local] '
+                           '"$request" $status $bytes_sent '
+                           '"$http_referer" "$http_user_agent" "$gzip_ratio"';
+    log_format timed "$remote_addr [$time_local] \"$request\" $status $msec rt=${request_time}s";
+    log_format json escape=json '{"time_local":"$time_local","request_time":$request_time}';
+    access_log /var/log/nginx/main.log main;
+    access_log /var/log/nginx/up.log upfirst buffer=32k flush=5s;
+    access_log /var/log/nginx/gz.log compression;
+    access_log /var/log/nginx/timed.log timed;
+    access_log /var/log/nginx/json.log json;
+    access_log /var/log/nginx/default.log;
+    access_log logs/rel.log main;
+    access_log /var/log/nginx/nofmt.log undefined_format;
+    #access_log /var/log/nginx/commented.log main;
+    access_log off;
+    access_log syslog:server=192.0.2.5 main;
+}
+"""
+LAYOUTS = [
+    # "L": the upstream list next to it, walked at its "," and ":" separators.
+    "/var/log/nginx/main.log K 7 7 0 L 0 0 7 1 0 0 0",
+    "/var/log/nginx/up.log K 7 7 L 0 0 0 7 0 1 0 0",
+    "/var/log/nginx/gz.log K 9 0 0 0 0 0 0 0 0 0 0",
+    "/var/log/nginx/timed.log K 3 3 2 0 3 1 0 0 0 0 0",
+    "/var/log/nginx/json.log U",
+    "/var/log/nginx/default.log K 7 0 0 0 0 0 0 0 0 0 0",
+    "/usr/share/nginx/logs/rel.log K 7 7 0 L 0 0 7 1 0 0 0",
+    "/var/log/nginx/nofmt.log U",
+]
+
+
+def test_access_log_layouts_come_from_the_log_format():
+    commands = awk_commands()
+    if not commands:
+        pytest.skip("needs awk")
+    for command in commands:
+        result = run_awk(
+            command, nginx.ALOG_AWK, NGINX_DUMP.encode(), "pfx=/usr/share/nginx"
+        )
+        assert result.returncode == 0, (command, result.stderr)
+        assert result.stdout.decode().splitlines() == LAYOUTS, command
+    # Embedded in single quotes in the script.
+    assert "'" not in nginx.ALOG_AWK
+
+
+def access_awk(lines, command):
+    result = run_awk(
+        command,
+        nginx.ACCESS_AWK,
+        ("\n".join(lines) + "\n").encode(),
+        "skey=20261029233000",
+        "ukey=20261030000000",
+        "sel=all",
+        "topn=10",
+        "bucket=10",
+        "tz=+0000",
+    )
+    assert result.returncode == 0, (command, result.stderr)
+    return result.stdout.decode().splitlines()
+
+
+def marker(path):
+    layout = next(line for line in LAYOUTS if line.startswith(path + " "))
+    return ["\x01AIOPS_F " + path, "\x01AIOPS_L " + layout.split(" ", 1)[1]]
+
+
+CLF = "[29/Oct/2026:23:4{}:00 +0000]"
+
+
+def test_request_time_is_read_at_its_log_format_position():
+    lines = (
+        marker("/var/log/nginx/up.log")
+        # Upstream first, two upstream attempts: the guess took 0.020.
+        + [
+            f'10.0.0.1 - - {CLF.format(0)} "GET /a HTTP/1.1" 200 5 "-" "ua" 0.010, 0.020 0.050'
+        ]
+        + marker("/var/log/nginx/gz.log")
+        # No $request_time in the format: "3.50" is $gzip_ratio.
+        + [f'10.0.0.2 - - {CLF.format(1)} "GET /b HTTP/1.1" 200 5 "-" "ua" "3.50"']
+        + marker("/var/log/nginx/timed.log")
+        # $msec first, then rt=${request_time}s.
+        + [f'10.0.0.3 {CLF.format(2)} "GET /c HTTP/1.1" 200 1793318400.123 rt=0.250s']
+    )
+    for command in awk_commands() or pytest.skip("needs awk"):
+        out = access_awk(lines, command)
+        assert "TOTAL 3" in out, (command, out)
+        assert "REQ 2 0.150 0.250 0 0 0" in out, (command, out)
+        assert "UPS 1 0.020 0.020 0 0" in out, (command, out)
+        assert "REQ_SOURCE 2 0 0 1" in out, (command, out)
+        assert "UPS_SOURCE 1 0 0 2" in out, (command, out)
+
+
+def test_request_time_is_guessed_and_counted_without_a_layout():
+    gz = f'10.0.0.2 - - {CLF.format(1)} "GET /b HTTP/1.1" 200 5 "-" "ua" "3.50"'
+    for command in awk_commands() or pytest.skip("needs awk"):
+        # No marker (older script) or an unknown format: the positional guess.
+        for prefix in ([], ["\x01AIOPS_F /x.log", "\x01AIOPS_L U"]):
+            out = access_awk(prefix + [gz], command)
+            assert "REQ 1 3.500 3.500 1 1 0" in out, (command, out)
+            assert "REQ_SOURCE 0 0 1 0" in out, (command, out)
+        # A line that does not have its format's shape is guessed too.
+        odd = f'10.0.0.4 - - {CLF.format(3)} "GET /d HTTP/1.1" 200 5 "-" "ua" "x" 0.040'
+        out = access_awk(marker("/var/log/nginx/main.log") + [odd], command)
+        assert "REQ_SOURCE 0 0 1 0" in out, (command, out)
+
+
+def test_access_summary_names_the_request_time_source():
+    def report(sources):
+        return observations.analyze(
+            "nginx_access",
+            "[AIOPS_FILES]\nWINDOW 1793316600 1793318400 20261029233000 20261030000000\n"
+            "FILE /var/log/nginx/access.log 10 10\n"
+            "[AIOPS_TOTALS]\nLINES 40 0 0\nTOTAL 40\nCLASS 2xx 40\nSELECTED 40\n"
+            "[AIOPS_TIMING]\nREQ 40 4.000 9.000 30 30 0\n"
+            f"REQ_SOURCE {sources}\nUNAVAILABLE upstream_time\nNOUPSTREAM 0\n",
+            options={},
+        )
+
+    exact = report("40 0 0 0")
+    timing = exact["summary"]["timing"]
+    assert timing["request_time_source"] == {
+        "log_format": 40,
+        "field_name": 0,
+        "heuristic": 0,
+        "not_in_log_format": 0,
+    }
+    assert "推测" not in exact["summary"]["coverage"]
+    guessed = report("0 0 40 0")
+    assert guessed["summary"]["timing"]["request_time_source"]["heuristic"] == 40
+    assert "40 条请求的 request_time 是按位置推测的" in guessed["summary"]["coverage"]
+    assert "log_format" in by_metric(guessed)["slow_requests_over_3s"]["hint"]
+    # Results of older servers have no REQ_SOURCE line.
+    old = observations.analyze(
+        "nginx_access", "[AIOPS_TIMING]\nREQ 1 0.1 0.1 0 0 0\n", options={}
+    )
+    assert old["summary"]["timing"]["request_time_source"] is None
+
+
+@needs_sh
+def test_access_script_reads_the_layout_of_a_given_path(tmp_path, monkeypatch):
+    import test_ext_nginx as fixture
+
+    sh = fixture.install_fixture(tmp_path.resolve())
+    fixture.use_fixture(monkeypatch, sh)
+    options = fixture.options_for(
+        "nginx_access",
+        since=fixture.SINCE,
+        until=fixture.NOW,
+        path=sh["logs"] + "/access.log",
+    )
+    code, out, err = fixture.run_script(nginx.access_script(options), sh)
+    assert code == 0, err
+    sources = re.search(r"(?m)^REQ_SOURCE (\d+) (\d+) (\d+) (\d+)$", out)
+    # nginx -T names the file's format (main) even for an explicit path: its
+    # combined lines are read at their position, JSON lines by key, and the
+    # one line with an extra quoted field is guessed.
+    assert sources and int(sources[1]) > 0 and int(sources[3]) == 1, out
+
+
+# --------------------------------- SSH-CORE-02: authentication is a read ----
+
+
+def new_client(client, name="p2-client", actions=("cpu",)):
+    created = client.post(
+        "/api/v1/mcp/clients",
+        headers=csrf(),
+        json={"name": name, "all_hosts": True, "actions": list(actions)},
+    ).json()
+    return created["id"], created["token"]
+
+
+def last_used(ident):
+    with store.db() as c:
+        return c.execute(
+            "SELECT last_used_at FROM mcp_clients WHERE id=?", (ident,)
+        ).fetchone()[0]
+
+
+def test_mcp_authentication_runs_off_the_event_loop(client, monkeypatch):
+    _, token = new_client(client)
+    seen = []
+    original = access.authenticate
+
+    def observed(authorization):
+        try:
+            asyncio.get_running_loop()
+            seen.append("event loop")
+        except RuntimeError:
+            seen.append("worker thread")
+        return original(authorization)
+
+    monkeypatch.setattr(access, "authenticate", observed)
+    status, result = mcp_call(client, token, "ssh_list_groups")
+    assert status == 200 and seen == ["worker thread"], (seen, result)
+
+
+def test_last_used_is_written_at_most_once_a_minute(client, monkeypatch):
+    ident, token = new_client(client)
+    access._last_used.pop(ident, None)
+    access.authenticate("Bearer " + token)
+    assert last_used(ident) is not None
+    with store.db() as c:
+        c.execute(
+            "UPDATE mcp_clients SET last_used_at='2000-01-01' WHERE id=?", (ident,)
+        )
+    access.authenticate("Bearer " + token)
+    assert last_used(ident) == "2000-01-01"  # not a write per request
+    monkeypatch.setattr(access, "LAST_USED_INTERVAL", 0)
+    access.authenticate("Bearer " + token)
+    assert last_used(ident) != "2000-01-01"
+
+
+def test_a_locked_database_does_not_fail_authentication(client):
+    ident, token = new_client(client)
+    access._last_used.pop(ident, None)
+    holder = sqlite3.connect(str(store.DATA_DIR / "ssh-mcp.sqlite3"), timeout=1)
+    try:
+        holder.execute("BEGIN IMMEDIATE")  # e.g. VACUUM or a 100-host batch
+        started = time.monotonic()
+        who = access.authenticate("Bearer " + token)
+        took = time.monotonic() - started
+    finally:
+        holder.rollback()
+        holder.close()
+    assert who["id"] == ident and took < 5, took
+    assert last_used(ident) is None  # skipped, written at the next interval
+
+
+# ------------------------------ SSH-CORE-03: SSH tools have their own pool --
+
+
+def test_ssh_tools_run_in_their_own_pool(client, key_pair, monkeypatch):
+    hid = ready_host(client, key_pair)
+    threads = {}
+
+    def inline(*args, **kwargs):
+        threads["ssh"] = threading.current_thread().name
+        return {"status": "success", "summary": {}, "findings": []}
+
+    def catalog_entries():
+        threads["catalog"] = threading.current_thread().name
+        return []
+
+    monkeypatch.setattr(jobs, "run_inline", inline)
+    monkeypatch.setattr(mcp_tools, "entries", catalog_entries)
+    token = store.token("mcp.token")
+    assert mcp_call(client, token, "ssh_diagnose_cpu", {"host_id": hid})[0] == 200
+    assert mcp_call(client, token, "ssh_list_tool_catalog")[0] == 200
+    assert threads["ssh"].startswith("ssh-inline"), threads
+    assert not threads["catalog"].startswith("ssh-inline"), threads
+
+
+def test_time_queued_for_a_thread_counts_toward_the_slot_wait(monkeypatch):
+    monkeypatch.setattr(
+        diagnostics, "_execute_inner", lambda *a, **k: pytest.fail("not its turn")
+    )
+    # Accepted 30 s ago, all of it queued for a thread of the pool.
+    token = diagnostics.CALL_ACCEPTED_AT.set(
+        time.monotonic() - diagnostics.INLINE_WAIT_SECONDS
+    )
+    with diagnostics._SLOTS:
+        diagnostics._ACTIVE_HOSTS.add(9)  # the host is busy
+    try:
+        started = time.monotonic()
+        with pytest.raises(diagnostics.SSHDiagnosticError, match="繁忙"):
+            diagnostics.execute(9, "cpu")
+        assert time.monotonic() - started < 3  # not another 30 s
+    finally:
+        diagnostics.CALL_ACCEPTED_AT.reset(token)
+        with diagnostics._SLOTS:
+            diagnostics._ACTIVE_HOSTS.discard(9)
+            diagnostics._SLOTS.notify_all()
+
+
+def test_light_tools_answer_while_ssh_calls_fill_every_thread(
+    client, key_pair, monkeypatch
+):
+    hid = ready_host(client, key_pair)
+    token = store.token("mcp.token")
+    release, entered = threading.Event(), []
+
+    def slow(*args, **kwargs):
+        entered.append(1)
+        release.wait(60)
+        return {"status": "success", "summary": {}, "findings": []}
+
+    monkeypatch.setattr(jobs, "run_inline", slow)
+    # More waiting SSH calls than the SSH pool and asyncio's default pool
+    # have threads.
+    default_pool = min(32, (os.cpu_count() or 1) + 4)
+    calls = max(mcp_tools.INLINE_WORKERS, default_pool) + 2
+    with ThreadPoolExecutor(max_workers=calls + 2) as pool:
+        try:
+            blocked = [
+                pool.submit(
+                    mcp_call, client, token, "ssh_diagnose_cpu", {"host_id": hid}
+                )
+                for _ in range(calls)
+            ]
+            for _ in range(400):
+                if len(entered) >= mcp_tools.INLINE_WORKERS:
+                    break
+                time.sleep(0.05)
+            catalog_call = pool.submit(mcp_call, client, token, "ssh_list_tool_catalog")
+            status, result = catalog_call.result(timeout=10)
+            assert status == 200 and result["result"], result
+        finally:
+            release.set()
+        assert all(task.result(timeout=60)[0] == 200 for task in blocked)
+
+
+# ------------------------- SSH-CORE-04: a client that leaves frees its slot --
+
+
+def mcp_scope(token, body):
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/mcp",
+        "raw_path": b"/mcp",
+        "root_path": "",
+        "query_string": b"",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"authorization", ("Bearer " + token).encode()),
+            (b"content-type", b"application/json"),
+            (b"accept", b"application/json, text/event-stream"),
+            (b"content-length", str(len(body)).encode()),
+        ],
+        "client": ("127.0.0.1", 50000),
+        "server": ("testserver", 80),
+    }
+
+
+def test_client_leaving_while_waiting_for_the_slot_gives_up(
+    client, key_pair, monkeypatch
+):
+    hid = ready_host(client, key_pair)
+    token = store.token("mcp.token")
+    monkeypatch.setattr(
+        diagnostics,
+        "_execute_inner",
+        lambda *a, **k: pytest.fail("a call whose client left reached SSH"),
+    )
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "ssh_diagnose_cpu", "arguments": {"host_id": hid}},
+        }
+    ).encode()
+    pending = [{"type": "http.request", "body": body, "more_body": False}]
+    sent = []
+
+    async def receive():
+        if pending:
+            return pending.pop()
+        await anyio.sleep(0.5)  # the client gives up while the call waits
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+
+    async def call():
+        await app(mcp_scope(token, body), receive, send)
+
+    with diagnostics._SLOTS:
+        diagnostics._ACTIVE_HOSTS.add(hid)  # another diagnostic holds the host
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            started = time.monotonic()
+            pool.submit(client.portal.call, call).result(timeout=10)
+            took = time.monotonic() - started
+    finally:
+        with diagnostics._SLOTS:
+            diagnostics._ACTIVE_HOSTS.discard(hid)
+            diagnostics._SLOTS.notify_all()
+    # Well within the 30 s slot wait: it gave up instead of holding on.
+    assert took < 8, took
+    with store.db() as c:
+        job = c.execute(
+            "SELECT status,error FROM diagnostic_jobs WHERE host_id=?", (hid,)
+        ).fetchone()
+    assert tuple(job) == ("cancelled", diagnostics.CALLER_GONE_ERROR)
+
+
+def test_running_ssh_read_stops_when_the_client_leaves(monkeypatch):
+    captured = {}
+
+    def inner(host_id, action, *args, cancelled, **kwargs):
+        captured["before"] = cancelled()
+        gone.set()  # the client disconnects while the output is read
+        captured["after"] = cancelled()
+        return {"status": "success"}
+
+    monkeypatch.setattr(diagnostics, "_execute_inner", inner)
+    gone = threading.Event()
+    token = diagnostics.CALLER_GONE.set(gone)
+    try:
+        diagnostics.execute(7, "cpu", cancelled=lambda: False)
+    finally:
+        diagnostics.CALLER_GONE.reset(token)
+    assert captured == {"before": False, "after": True}
+    # Background jobs carry no event: only their own cancel flag counts.
+    diagnostics.execute(7, "cpu", cancelled=lambda: False)
+    assert captured == {"before": False, "after": False}
+
+
+def test_a_queued_call_whose_client_left_does_not_start():
+    gone = threading.Event()
+    gone.set()
+    token = diagnostics.CALLER_GONE.set(gone)
+    try:
+        result = asyncio.run(
+            mcp_tools.run_inline_tool(
+                lambda: pytest.fail("started after the client left")
+            )
+        )
+    finally:
+        diagnostics.CALLER_GONE.reset(token)
+    assert result["status"] == "cancelled" and result["error_code"] == "cancelled"
+
+
+# ------------------------------- SSH-CORE-10: Origin behind a trusted proxy --
+
+
+def origin_request(peer, **headers):
+    raw = [(k.replace("_", "-").encode(), v.encode()) for k, v in headers.items()]
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/api/v1/groups",
+            "query_string": b"",
+            "headers": raw,
+            "client": (peer, 40000),
+            "server": ("10.0.0.5", 9099),
+        }
+    )
+
+
+PROXIED = {
+    "host": "10.0.0.5:9099",
+    "origin": "https://ssh.example.com",
+    "x_forwarded_proto": "https",
+    "x_forwarded_host": "ssh.example.com",
+}
+
+
+def test_origin_check_follows_a_trusted_proxy_only(monkeypatch):
+    monkeypatch.delenv(auth.TRUSTED_PROXIES_ENV, raising=False)
+    # Default: a direct deployment is checked as before.
+    assert not auth.trusted_origin(origin_request("172.18.0.1", **PROXIED))
+    direct = {"host": "10.0.0.5:9099", "origin": "http://10.0.0.5:9099"}
+    assert auth.trusted_origin(origin_request("192.0.2.9", **direct))
+    monkeypatch.setenv(auth.TRUSTED_PROXIES_ENV, "172.16.0.0/12, 192.0.2.1")
+    assert auth.trusted_origin(origin_request("172.18.0.1", **PROXIED))
+    assert auth.trusted_origin(origin_request("192.0.2.1", **PROXIED))
+    # The request's own origin still counts behind the proxy.
+    assert auth.trusted_origin(origin_request("172.18.0.1", **direct))
+    # A peer outside the list cannot forge the forwarded headers.
+    assert not auth.trusted_origin(origin_request("192.0.2.9", **PROXIED))
+    # The forwarded origin must still be the one the browser sent.
+    assert not auth.trusted_origin(
+        origin_request("172.18.0.1", **{**PROXIED, "origin": "https://evil.example"})
+    )
+    # Without X-Forwarded-Host the proxy's Host header is used.
+    host_kept = {**PROXIED, "host": "ssh.example.com"}
+    host_kept.pop("x_forwarded_host")
+    assert auth.trusted_origin(origin_request("172.18.0.1", **host_kept))
+    monkeypatch.setenv(auth.TRUSTED_PROXIES_ENV, "not-an-address")
+    assert not auth.trusted_origin(origin_request("172.18.0.1", **PROXIED))
+
+
+def test_console_writes_work_through_a_trusted_https_proxy(client, monkeypatch):
+    proxy = TestClient(app, client=("172.18.0.1", 40000))
+    proxy.cookies.update(client.cookies)
+    headers = {
+        **csrf(),
+        "Origin": "https://ssh.example.com",
+        "X-Forwarded-Proto": "https",
+        "X-Forwarded-Host": "ssh.example.com",
+    }
+    monkeypatch.delenv(auth.TRUSTED_PROXIES_ENV, raising=False)
+    refused = proxy.post("/api/v1/groups", headers=headers, json={"name": "via-proxy"})
+    assert refused.status_code == 403 and "来源" in refused.json()["detail"]
+    monkeypatch.setenv(auth.TRUSTED_PROXIES_ENV, "172.16.0.0/12")
+    created = proxy.post("/api/v1/groups", headers=headers, json={"name": "via-proxy"})
+    assert created.status_code == 201, created.text
+
+
+# ---------------------------------- SSH-FE-06: batch progress polls counts --
+
+
+def test_batch_progress_reads_counts_without_results(client, key_pair, monkeypatch):
+    hid = ready_host(client, key_pair)
+    monkeypatch.setattr(jobs.POOL, "submit", lambda *_: None)
+    batch = jobs.create([hid, 999999], {"action": "cpu"}, "ou_123456789")
+    monkeypatch.setattr(
+        jobs, "detail", lambda *_: pytest.fail("a progress poll decrypted a result")
+    )
+    response = client.get(f"/api/v1/jobs/batches/{batch['batch_id']}?counts_only=true")
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["counts"]["queued"] == 1 and data["total"] == 1
+    assert data["completed"] == 0 and data["items"] == []
+    assert [s["host_id"] for s in data["skipped"]] == [999999]
+    script = (ROOT / "web" / "interactions.js").read_text(encoding="utf-8")
+    progress = script.split("async function batchProgress", 1)[1].split("\n}\n", 1)[0]
+    assert "counts_only=true" in progress
+
+
+# --------------------------------- SSH-FE-08: 准备状态 shows, buttons act --
+
+
+def test_readiness_badge_is_not_an_action():
+    script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+    assert "readiness-button" not in script
+    row = next(line for line in script.splitlines() if "readiness-cell" in line)
+    # The badge is plain; the step that changes something is its own button.
+    assert "${badge(h.readiness" in row and "${prepareStep(h)}" in row
+    step = script.split("function prepareStep(", 1)[1].split("\n}\n", 1)[0]
+    assert 'data-action="prepare-host"' in step and 'data-step="${step}"' in step
+    assert "title=" in step and "aria-label=" in step and "下一步：" in step
+
+
+# ===================== Review of the P2 branch (findings of the follow-up) ==
+# ------- SSH-NGX-06 follow-up: upstream time next to lists, values that may
+# ------- be empty or hold spaces, no silent drop (review: ngx_cases*.py, drop.in)
+
+REVIEW_DUMP = r"""http {
+    log_format cn_main '$remote_addr - $remote_user [$time_local] "$request" '
+                       '$status $body_bytes_sent "$http_referer" '
+                       '"$http_user_agent" "$http_x_forwarded_for" '
+                       '$upstream_addr $upstream_response_time $request_time';
+    log_format rt_ut_addr '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent '
+                          '"$http_referer" "$http_user_agent" "$http_x_forwarded_for" '
+                          '$request_time $upstream_response_time $upstream_addr $upstream_status';
+    log_format utfirst '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent '
+                       '"$http_referer" "$http_user_agent" $upstream_response_time $request_time $upstream_addr';
+    log_format uri_mid '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent '
+                       '"$http_referer" "$http_user_agent" $request_time $uri $upstream_response_time';
+    log_format sn '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent '
+                  '"$http_referer" "$http_user_agent" $server_name $request_time $upstream_response_time';
+    log_format um '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent '
+                  '"$http_referer" "$http_user_agent" $uri $request_time $upstream_response_time';
+    log_format https_rt '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent '
+                        '"$http_referer" "$http_user_agent" $https $request_time';
+    log_format host_both '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent '
+                         '"$http_referer" "$http_user_agent" $host $request_time $upstream_response_time $uri';
+    access_log /l/cn_main.log cn_main;
+    access_log /l/rt_ut_addr.log rt_ut_addr;
+    access_log /l/utfirst.log utfirst;
+    access_log /l/uri_mid.log uri_mid;
+    access_log /l/sn.log sn;
+    access_log /l/um.log um;
+    access_log /l/https_rt.log https_rt;
+    access_log /l/host_both.log host_both;
+}
+"""
+REVIEW_LAYOUTS = {
+    # $upstream_addr is a list: walked, not "unknown width".
+    "/l/cn_main.log": "K 9 9 LL 0 0 0 9 L 1 0 0",
+    "/l/rt_ut_addr.log": "K 9 9 0 LLL 0 0 9 1 LL 0 0",
+    "/l/utfirst.log": "K 7 7 L L 0 0 7 0 PL 0 0",
+    # $uri, $server_name and $https may be empty or hold spaces: never counted.
+    "/l/uri_mid.log": "K 7 7 0 -1 0 0 7 -1 0 0 0",
+    "/l/sn.log": "K 7 7 -1 L 0 0 7 -1 0 0 0",
+    "/l/um.log": "K 7 7 -1 L 0 0 7 -1 0 0 0",
+    "/l/https_rt.log": "K 7 7 -1 0 0 0 0 0 0 0 0",
+    "/l/host_both.log": "K 7 -1 0 0 0 0 -1 0 0 0 0",
+}
+REVIEW_UA = '"GET /a HTTP/1.1" 200 5 "-" "Mozilla/5.0 (X11)"'
+
+
+def review_timing(command, path, rest, layout=None):
+    """TIMING lines of one request of the file `path`, its log_format known."""
+    line = f"10.0.0.1 - - {CLF.format(0)} {REVIEW_UA}{rest}"
+    marker = ["\x01AIOPS_F " + path, "\x01AIOPS_L " + (layout or REVIEW_LAYOUTS[path])]
+    out = access_awk(marker + [line], command)
+    return {row for row in out if row.split(" ", 1)[0] in TIMING_TAGS}
+
+
+TIMING_TAGS = {"REQ", "UPS", "REQ_SOURCE", "UPS_SOURCE", "NOUPSTREAM", "UNAVAILABLE"}
+
+
+def timed(rt, ut, req_source="1 0 0 0", ups_source="1 0 0 0"):
+    rows = {f"REQ_SOURCE {req_source}", f"UPS_SOURCE {ups_source}"}
+    rows.add(f"REQ 1 {rt} {rt} 0 0 0" if rt else "UNAVAILABLE request_time")
+    if ut == "-":
+        rows |= {"UNAVAILABLE upstream_time", "NOUPSTREAM 1"}
+    else:
+        rows |= {f"UPS 1 {ut} {ut} 0 0" if ut else "UNAVAILABLE upstream_time"}
+        rows.add("NOUPSTREAM 0")
+    return rows
+
+
+def test_review_layouts_walk_upstream_lists_and_skip_unknown_widths():
+    for command in awk_commands() or pytest.skip("needs awk"):
+        result = run_awk(
+            command, nginx.ALOG_AWK, REVIEW_DUMP.encode(), "pfx=/usr/share/nginx"
+        )
+        assert result.returncode == 0, (command, result.stderr)
+        got = dict(line.split(" ", 1) for line in result.stdout.decode().splitlines())
+        assert got == REVIEW_LAYOUTS, command
+
+
+@pytest.mark.parametrize(
+    "path, rest, rt, ut",
+    [
+        # One upstream, two (", "), an internal redirect (" : "), none ("-").
+        ("/l/cn_main.log", ' "-" 10.0.0.9:8080 0.050 0.060', "0.060", "0.050"),
+        (
+            "/l/cn_main.log",
+            ' "-" 10.0.0.9:8080, 10.0.0.8:8080 0.010, 0.050 0.070',
+            "0.070",
+            "0.050",
+        ),
+        (
+            "/l/cn_main.log",
+            ' "-" 10.0.0.9:8080 : 10.0.0.8:8080 0.010 : 0.050 0.070',
+            "0.070",
+            "0.050",
+        ),
+        ("/l/cn_main.log", ' "-" - - 0.001', "0.001", "-"),
+        ("/l/rt_ut_addr.log", ' "-" 0.060 0.050 10.0.0.9:8080 200', "0.060", "0.050"),
+        (
+            "/l/rt_ut_addr.log",
+            ' "-" 0.060 0.010, 0.050 10.0.0.9:8080, 10.0.0.8:8080 502, 200',
+            "0.060",
+            "0.050",
+        ),
+        # The request time right after the upstream list is not swallowed.
+        (
+            "/l/utfirst.log",
+            " 0.010, 0.050 0.060 10.0.0.9:8080, 10.0.0.8:8080",
+            "0.060",
+            "0.050",
+        ),
+    ],
+)
+def test_upstream_time_is_read_next_to_upstream_lists(path, rest, rt, ut):
+    for command in awk_commands() or pytest.skip("needs awk"):
+        assert review_timing(command, path, rest) == timed(rt, ut), command
+
+
+@pytest.mark.parametrize(
+    "path, rest, rt, ut",
+    [
+        # $server_name of a default server is "" (no token at all).
+        ("/l/sn.log", "  0.060 0.050", "0.060", "0.050"),
+        ("/l/sn.log", " example.com 0.060 0.050", "0.060", "0.050"),
+        # $uri is decoded: /files/v%201.5 is logged as "/files/v 1.5".
+        ("/l/um.log", " /files/v 1.5 0.060 0.050", "0.060", "0.050"),
+        ("/l/uri_mid.log", " 0.060 /a b 0.050", "0.060", "0.050"),
+    ],
+)
+def test_values_that_may_be_empty_or_hold_spaces_are_not_counted(path, rest, rt, ut):
+    for command in awk_commands() or pytest.skip("needs awk"):
+        assert review_timing(command, path, rest) == timed(rt, ut), command
+
+
+def test_https_off_is_an_empty_value():
+    for command in awk_commands() or pytest.skip("needs awk"):
+        for value in ("", "on"):
+            got = review_timing(command, "/l/https_rt.log", f" {value} 0.060")
+            assert got == timed("0.060", None, ups_source="0 0 0 1"), (command, value)
+
+
+def test_no_time_where_the_layout_points_is_guessed_and_counted():
+    for command in awk_commands() or pytest.skip("needs awk"):
+        # The review's drop.in: a layout that counted $uri as one token put
+        # request_time on "b"; the request was then counted nowhere.
+        drop = review_timing(
+            command, "/l/um.log", " /a b 0.060 0.050", "K 7 7 1 -1 0 0 7 2 0 0 0"
+        )
+        assert drop == timed("0.060", "0.050", req_source="0 0 1 0"), command
+        # Neither side of either value is fixed: both are guessed, and say so.
+        both = review_timing(command, "/l/host_both.log", " example.com 0.060 0.050 /a")
+        assert both == timed("0.060", "0.050", "0 0 1 0", "0 0 1 0"), command
+        # A host:port where the layout expects upstream times is not a time
+        # (lastnum would have read 8080); the guess finds none after 0.060.
+        port = review_timing(
+            command, "/l/x.log", " 0.060 10.0.0.9:8080", "K 7 7 0 1 0 0 7 1 0 0 0"
+        )
+        assert port == timed("0.060", None, ups_source="0 0 0 0"), command
+
+
+def test_access_summary_names_guessed_upstream_times():
+    def report(ups_sources, max_time="12.000"):
+        return observations.analyze(
+            "nginx_access",
+            "[AIOPS_FILES]\nWINDOW 1793316600 1793318400 20261029233000 20261030000000\n"
+            "FILE /var/log/nginx/access.log 10 10\n"
+            "[AIOPS_TOTALS]\nLINES 40 0 0\nTOTAL 40\nCLASS 2xx 40\nSELECTED 40\n"
+            "[AIOPS_TIMING]\nREQ 40 0.100 0.200 0 0 0\nREQ_SOURCE 40 0 0 0\n"
+            f"UPS 40 1.000 {max_time} 1 1\nUPS_SOURCE {ups_sources}\nNOUPSTREAM 0\n",
+            options={},
+        )
+
+    exact = report("40 0 0 0")
+    assert exact["summary"]["timing"]["upstream_time_source"] == {
+        "log_format": 40,
+        "field_name": 0,
+        "heuristic": 0,
+        "not_in_log_format": 0,
+    }
+    assert "推测" not in exact["summary"]["coverage"]
+    assert "推测" not in by_metric(exact)["upstream_time_max"]["hint"]
+    guessed = report("37 0 3 0")
+    coverage = guessed["summary"]["coverage"]
+    assert "3 条请求的 upstream_response_time 是按位置推测的" in coverage
+    assert "request_time 是按位置推测" not in coverage
+    assert "upstream_time_source" in by_metric(guessed)["upstream_time_max"]["hint"]
+    # Results of older servers have no UPS_SOURCE line.
+    old = observations.analyze(
+        "nginx_access", "[AIOPS_TIMING]\nUPS 1 0.1 0.1 0 0\n", options={}
+    )
+    assert old["summary"]["timing"]["upstream_time_source"] is None
+
+
+# ------- SSH-CORE-03 follow-up: waiters for a busy host do not hold up other
+# ------- hosts; no SSH without time left (review: hol_pool.py, exhausted_budget.py)
+
+
+def test_calls_waiting_for_a_busy_host_do_not_hold_up_other_hosts(monkeypatch):
+    busy_host, idle_host, waiting = 9101, 9102, 12
+    # More waiters than the eight threads the pool had (the review's case).
+    assert waiting < mcp_tools.INLINE_WORKERS
+    release = threading.Event()
+
+    def inner(host_id, action, *args, cancelled, **kwargs):
+        if host_id == busy_host:
+            release.wait(30)
+        return {"status": "success", "host_id": host_id}
+
+    monkeypatch.setattr(diagnostics, "_execute_inner", inner)
+
+    def call(host_id, options=None, action="cpu"):
+        return diagnostics.execute(host_id, action, options=options)
+
+    async def scenario():
+        busy = [
+            asyncio.ensure_future(mcp_tools.run_inline_tool(call, busy_host))
+            for _ in range(waiting)
+        ]
+        await asyncio.sleep(0.5)  # one holds the host, the others wait for it
+        started = time.monotonic()
+        try:
+            # ssh_collect bounded to 20 s, as the AI platform calls it.
+            other = await asyncio.wait_for(
+                mcp_tools.run_inline_tool(
+                    call,
+                    idle_host,
+                    {"actions": ["cpu"], "timeout_seconds": 20},
+                    "collect",
+                ),
+                15,
+            )
+            took = time.monotonic() - started
+        finally:
+            release.set()
+        return other, took, await asyncio.gather(*busy)
+
+    try:
+        other, took, results = asyncio.run(scenario())
+    finally:
+        release.set()
+    assert other["status"] == "success" and took < 5, (other, took)
+    assert [r["status"] for r in results] == ["success"] * waiting
+    assert not {busy_host, idle_host} & diagnostics._ACTIVE_HOSTS
+
+
+@pytest.mark.parametrize(
+    "queued, budget, connects",
+    [
+        # timeout_seconds=20: at least 5 s must be left once the slot is held.
+        (25, 20, False),
+        (16, 20, False),
+        (12, 20, True),
+        (1, 20, True),
+        # timeout_seconds=120: at least a quarter, 30 s.
+        (95, 120, False),
+        (60, 120, True),
+    ],
+)
+def test_a_call_without_time_left_once_it_has_its_slot_does_not_connect(
+    monkeypatch, queued, budget, connects
+):
+    runs = []
+    monkeypatch.setattr(
+        diagnostics,
+        "_execute_inner",
+        lambda *args, **kwargs: (
+            runs.append(kwargs["finish_by"]) or {"status": "success"}
+        ),
+    )
+    # The host is free, but the call queued `queued` seconds for a thread.
+    token = diagnostics.CALL_ACCEPTED_AT.set(time.monotonic() - queued)
+    options = {"actions": ["cpu"], "timeout_seconds": budget}
+    try:
+        if connects:
+            assert diagnostics.execute(9103, "collect", options=options)["status"] == (
+                "success"
+            )
+        else:
+            with pytest.raises(diagnostics.SSHDiagnosticError) as caught:
+                diagnostics.execute(9103, "collect", options=options)
+            message = str(caught.value)
+            assert "未连接主机" in message
+            assert mcp_tools.error_code(caught.value, message) == "busy"
+    finally:
+        diagnostics.CALL_ACCEPTED_AT.reset(token)
+    assert len(runs) == int(connects)
+    assert 9103 not in diagnostics._ACTIVE_HOSTS  # the slot is free again
+
+
+class HandshakeClient:
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize("change", ["client_left", "host_changed"])
+def test_the_handshake_tells_a_client_that_left_from_a_changed_host(
+    client, key_pair, monkeypatch, change
+):
+    hid = ready_host(client, key_pair)
+    gone = threading.Event()
+
+    def connect(*args, **kwargs):
+        if change == "client_left":
+            gone.set()  # the client disconnects while SSH connects
+        else:
+            with store.db() as c:
+                c.execute("UPDATE hosts SET revision=revision+1 WHERE id=?", (hid,))
+        return HandshakeClient()
+
+    monkeypatch.setattr(diagnostics, "client_connect", connect)
+    token = diagnostics.CALLER_GONE.set(gone)
+    try:
+        result = jobs.run_inline(hid, "cpu", "ou_123456789", source="web")
+    finally:
+        diagnostics.CALLER_GONE.reset(token)
+    with store.db() as c:
+        job = c.execute(
+            "SELECT status,error FROM diagnostic_jobs WHERE host_id=?", (hid,)
+        ).fetchone()
+    if change == "client_left":
+        # Was revision_changed: "任务已取消或主机配置已变更" matched 已变更 first.
+        assert (result["status"], result["error_code"]) == ("cancelled", "cancelled")
+        assert tuple(job) == ("cancelled", diagnostics.CALLER_GONE_ERROR)
+    else:
+        assert (result["status"], result["error_code"]) == (
+            "failed",
+            "revision_changed",
+        )
+        assert job["status"] == "failed" and "已变更" in job["error"]
+
+
+# ------- SSH-FE-08 follow-up: a next-step button does the step it names, and
+# ------- only while the host still needs it; the drawer names its step too.
+# ------- Unknown counts read 未知 (SSH-DIAG-12 in the console).
+
+NODE = shutil.which("node")
+needs_node = pytest.mark.skipif(not NODE, reason="needs node")
+# The console's own scripts (index.html order, ui-kit stubbed) in a bare node
+# context: a stub DOM whose elements accept anything, one per selector, and a
+# fetch that never answers (the page's login() waits forever).
+CONSOLE_HARNESS = r"""
+const vm = require("vm");
+const fs = require("fs");
+const [files, code] = JSON.parse(fs.readFileSync(0, "utf8"));
+function stub() {
+  const own = {};
+  return new Proxy(function () {}, {
+    get: (target, key) =>
+      typeof key === "symbol" || key === "then"
+        ? undefined
+        : key === "toString" || key === "valueOf"
+          ? () => ""
+          : key in own
+            ? own[key]
+            : (own[key] = stub()),
+    set: (target, key, value) => ((own[key] = value), true),
+    apply: () => stub(),
+  });
+}
+const elements = new Map();
+const element = (selector) => {
+  if (!elements.has(selector)) elements.set(selector, stub());
+  return elements.get(selector);
+};
+const ctx = {
+  console, setTimeout, clearTimeout, URLSearchParams,
+  fetch: () => new Promise(() => {}),
+  UIKit: { icon: () => "", hydrate() {}, notify() {}, confirm: async () => true },
+  document: {
+    querySelector: element,
+    querySelectorAll: () => [],
+    addEventListener() {},
+    documentElement: stub(),
+    body: stub(),
+  },
+  localStorage: { getItem: () => null, setItem() {} },
+  location: { hash: "#hosts", reload() {}, replace() {} },
+  history: { replaceState() {} },
+  addEventListener() {},
+};
+ctx.window = ctx;
+vm.createContext(ctx);
+for (const file of files) vm.runInContext(fs.readFileSync(file, "utf8"), ctx, { filename: file });
+Promise.resolve(vm.runInContext(code, ctx)).then(
+  (result) => process.stdout.write(JSON.stringify(result)),
+  (error) => {
+    process.stderr.write(String((error && error.stack) || error));
+    process.exit(1);
+  },
+);
+"""
+CONSOLE_SCRIPTS = ("presentation.js", "inventory.js", "interactions.js", "app.js")
+
+
+def console_eval(code):
+    """The JSON value of `code` (an expression; a promise is awaited) once the
+    console scripts are loaded."""
+    files = [str(ROOT / "web" / name) for name in CONSOLE_SCRIPTS]
+    proc = subprocess.run(
+        [NODE, "-e", CONSOLE_HARNESS],
+        input=json.dumps([files, code]).encode(),
+        capture_output=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr.decode()
+    return json.loads(proc.stdout.decode())
+
+
+def prepare_log(readiness, step):
+    """What prepareHost(7, step) asks the server and shows for a host now in
+    `readiness`: API calls, notices, dialogs, navigation, refreshes."""
+    host = {
+        "id": 7,
+        "name": "web-07",
+        "readiness": readiness,
+        "asset_type": "unsupported" != readiness and "linux" or "network",
+        "username": "root",
+        "port": 22,
+        "proxy_id": None,
+        "group_ids": [],
+    }
+    return console_eval(
+        "(async () => {"
+        "  const log = [];"
+        "  api = async (path, method) => {"
+        "    log.push((method || 'GET') + ' ' + path);"
+        f"    if (path.endsWith('/detail')) return {{ host: {json.dumps(host)} }};"
+        "    if (path === '/credentials') return [{ id: 1, name: 'c' }];"
+        "    if (path === '/jobs') return { total: 1, job_ids: ['j1'], skipped: [] };"
+        "    if (path === '/host-keys/scan') return { batch_id: 'b1' };"
+        "    return [];"
+        "  };"
+        "  notice = (text, failure) => log.push('notice ' + (failure ? 'error ' : '') + text);"
+        "  render = async () => log.push('render');"
+        "  go = (page) => log.push('go ' + page);"
+        "  openModal = (title) => log.push('modal ' + title);"
+        f"  await prepareHost(7, {json.dumps(step)});"
+        "  return log;"
+        "})()"
+    )
+
+
+DETAIL = "GET /hosts/7/detail"
+
+
+@needs_node
+@pytest.mark.parametrize(
+    "readiness, step, effect",
+    [
+        (
+            "disabled",
+            "enable",
+            [
+                "GET /credentials",
+                "GET /proxies",
+                "GET /groups",
+                "modal 编辑并启用资产 · web-07",
+            ],
+        ),
+        (
+            "missing_credential",
+            "bind",
+            ["GET /credentials", "modal 绑定 SSH 访问 · web-07"],
+        ),
+        (
+            "unverified",
+            "scan",
+            [
+                "POST /host-keys/scan",
+                "notice 扫描只收集候选公钥；请通过独立可信渠道核验后再确认。",
+                "go keys/b1",
+            ],
+        ),
+        ("untested", "test", ["POST /jobs", "go job/j1"]),
+        ("failed", "test", ["POST /jobs", "go job/j1"]),
+    ],
+)
+def test_a_next_step_button_does_the_step_it_names(readiness, step, effect):
+    assert prepare_log(readiness, step) == [DETAIL] + effect
+
+
+@needs_node
+@pytest.mark.parametrize(
+    "readiness, step",
+    [
+        # The list showed 下一步：扫描公钥 but the key was confirmed meanwhile:
+        # no scan, and no connection test in its place (what v0.9.0 did).
+        ("untested", "scan"),
+        ("verified", "test"),
+        # Enabled meanwhile: no key scan.
+        ("unverified", "enable"),
+        ("disabled", "scan"),
+        ("missing_credential", "test"),
+        ("unsupported", "enable"),
+        # A button without a step does nothing either.
+        ("unverified", "undefined"),
+    ],
+)
+def test_a_next_step_for_a_host_that_changed_only_refreshes(readiness, step):
+    log = prepare_log(readiness, step)
+    assert log[0] == DETAIL and log[-1] == "render" and len(log) == 3, log
+    assert log[1].startswith("notice error 「web-07」的状态已变为"), log
+    assert "未执行" in log[1] and "页面已刷新" in log[1]
+
+
+@needs_node
+def test_the_host_drawer_names_its_step_or_says_why_there_is_none():
+    states = [
+        "disabled",
+        "missing_credential",
+        "unverified",
+        "untested",
+        "failed",
+        "verified",
+        "unsupported",
+    ]
+    drawers = console_eval(
+        "(async () => {"
+        "  const out = {};"
+        f"  for (const readiness of {json.dumps(states)}) {{"
+        "    api = async () => ({"
+        "      host: { id: 7, name: 'web-07', readiness, address: '10.0.0.7', port: 22,"
+        "              asset_type: readiness === 'unsupported' ? 'network' : 'linux' },"
+        "      recent: [],"
+        "      last_test: null,"
+        "    });"
+        "    await showHost(7);"
+        "    out[readiness] = [document.querySelector('#host-drawer-content').innerHTML,"
+        "                      prepareStep({ id: 7, name: 'web-07', readiness })];"
+        "  }"
+        "  return out;"
+        "})()"
+    )
+    steps = {
+        "disabled": ("enable", "下一步：启用资产"),
+        "missing_credential": ("bind", "下一步：绑定凭据"),
+        "unverified": ("scan", "下一步：扫描公钥"),
+        "untested": ("test", "下一步：测试连接"),
+        "failed": ("test", "下一步：测试连接"),
+    }
+    for readiness, (drawer, row) in drawers.items():
+        assert "准备下一步" not in drawer, readiness
+        if readiness in steps:
+            step, label = steps[readiness]
+            assert f'data-step="{step}"' in drawer and label in drawer, readiness
+            # The list row keeps 测试 among its own actions.
+            assert (f'data-step="{step}"' in row) == (step != "test"), readiness
+        else:
+            assert 'data-action="prepare-host"' not in drawer + row, readiness
+    assert "准备已完成" in drawers["verified"][0]
+    assert "仅登记资产" in drawers["unsupported"][0]
+
+
+@needs_node
+def test_unknown_counts_read_as_unknown_in_the_console():
+    text, finding, no_threshold, view = console_eval(
+        "[valueText(null),"
+        " findingValue({ metric: 'failed_service_count', value: null, threshold: 1 }),"
+        " findingValue({ metric: 'x', value: 1, threshold: null }, true),"
+        " metricsView({ summary: { metrics: ["
+        "   { metric: 'failed_service_count', value: null, unit: '' },"
+        "   { metric: 'memory_available_percent', value: null, unit: '%' },"
+        "   { metric: 'load_per_core', value: 0.5 } ] } })]"
+    )
+    assert (text, finding, no_threshold) == ("未知", "未知", "—")
+    assert "null" not in view and view.count("未知") == 2
+    # An unknown percentage gets no gauge (it read 0% before).
+    assert view.count('class="metric-card') == 1

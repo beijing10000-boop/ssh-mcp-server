@@ -269,6 +269,50 @@ function hostKeyCommand(algorithm) {
         : "*";
   return `ssh-keygen -lf /etc/ssh/ssh_host_${file}_key.pub -E sha256`;
 }
+// 准备状态 only shows the state. A preparation step is a button of its own
+// that names it and carries it (data-step): prepareHost does that step and
+// nothing else, and only while the host is still in a state it is for
+// (`when`). Testing and diagnosing a host with SSH bound stay in the row's
+// actions; the host drawer, which has no 测试 button, offers the test as a
+// step (`drawer`).
+const PREPARE_STEPS = {
+  enable: {
+    when: ["disabled"],
+    label: "启用资产",
+    effect: "打开编辑对话框，保存后启用该资产",
+  },
+  bind: {
+    when: ["missing_credential"],
+    label: "绑定凭据",
+    effect: "打开对话框，为该主机绑定 SSH 凭据",
+  },
+  scan: {
+    when: ["unverified"],
+    label: "扫描公钥",
+    effect: "立即发起一次主机公钥扫描：只收集候选指纹，独立核验后才会确认",
+  },
+  test: {
+    when: ["untested", "failed"],
+    label: "测试连接",
+    effect: "立即提交一次只读的 SSH 连接测试，并打开测试结果",
+    drawer: true,
+  },
+};
+const nextStep = (h, inDrawer = false) =>
+  Object.keys(PREPARE_STEPS).find(
+    (step) =>
+      PREPARE_STEPS[step].when.includes(h.readiness) &&
+      (inDrawer || !PREPARE_STEPS[step].drawer),
+  );
+function prepareStep(h, inDrawer = false) {
+  const step = nextStep(h, inDrawer);
+  if (!step) return "";
+  const { label, effect } = PREPARE_STEPS[step];
+  return (
+    `<button type="button" class="btn small${inDrawer ? " primary" : ""}" data-action="prepare-host" data-id="${h.id}" data-step="${step}" ` +
+    `title="${esc(effect)}" aria-label="${esc(`下一步：${label}（${h.name}）`)}">${esc("下一步：" + label)}</button>`
+  );
+}
 async function pageHosts() {
   const [data, groups, credentials, proxies] = await Promise.all([
     api("/inventory/hosts?" + hostQuery() + "&page=" + state.hostPage),
@@ -303,7 +347,7 @@ async function pageHosts() {
         `<td><button type="button" class="text-button cell-title" data-action="host-detail" data-id="${h.id}">${esc(h.name)}</button><small>资产 ID ${h.id} · Zabbix Host ID ${esc(h.zabbix_hostid || "未关联")}</small></td>` +
         `<td class="mono">${esc(h.address)}:${h.port}<small>${esc(h.username)}${h.proxy_id ? " · 跳板 " + esc(proxies.find((p) => p.id === h.proxy_id)?.name || h.proxy_id) : " · 直连"}</small></td>` +
         `<td>${esc(h.mode === "gateway" ? "B · 受限强制命令网关" : "A · 标准免 Agent")}</td>` +
-        `<td><button type="button" class="readiness-button" data-action="prepare-host" data-id="${h.id}">${badge(h.readiness || "untested")}</button><small>${esc(groupNames)}</small></td>` +
+        `<td><div class="readiness-cell">${badge(h.readiness || "untested")}${prepareStep(h)}</div><small>${esc(groupNames)}</small></td>` +
         `<td class="date">${date(h.last_test_at)}<small>诊断 ${date(h.last_diagnostic_at)}</small></td>` +
         `<td><div class="actions">${actions}</div></td></tr>`
       );

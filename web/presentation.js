@@ -34,12 +34,19 @@ function breadcrumb() {
         : "概览";
   $("#breadcrumb-section").textContent = section;
 }
+// null is a value the collection could not establish (an unknown count):
+// 「未知」, never "null" and never 0.
 const valueText = (v) =>
-  typeof v === "object" ? JSON.stringify(v) : String(v ?? "—");
+  v === null
+    ? "未知"
+    : typeof v === "object"
+      ? JSON.stringify(v)
+      : String(v ?? "—");
 const numberText = (n) =>
   new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(n);
 function findingValue(f, threshold = false) {
   const value = threshold ? f.threshold : f.value;
+  if (threshold && value === null) return "—";
   if (typeof value !== "number") return valueText(value);
   const metric = String(f.metric ?? "");
   if (metric.endsWith("_KiB")) return formatSize(value * 1024);
@@ -151,8 +158,13 @@ function findingsView(findings = []) {
 }
 function metricsView(result) {
   const metrics = result.summary?.metrics || [];
+  // A gauge needs a number: an unknown value is only listed (as 未知) below.
   const visible = metrics
-    .filter((m) => m.unit === "%" || m.metric === "load_per_core")
+    .filter(
+      (m) =>
+        typeof m.value === "number" &&
+        (m.unit === "%" || m.metric === "load_per_core"),
+    )
     .slice(0, 30);
   let html = visible.length
     ? '<div class="metric-grid">' +

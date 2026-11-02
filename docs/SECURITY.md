@@ -1,6 +1,6 @@
 # 安全说明与部署验收
 
-1. **默认不对外暴露**：Compose 将端口绑定在 127.0.0.1；如需内网访问，可通过指定 WEB_BIND_IP 和网络 ACL 严格控制。HTTP 不适用于不可信网络；生产须 HTTPS。
+1. **默认不对外暴露**：Compose 将端口绑定在 127.0.0.1；如需内网访问，可通过指定 WEB_BIND_IP 和网络 ACL 严格控制。HTTP 不适用于不可信网络；生产须 HTTPS。经 HTTPS 反向代理部署时，在 `SSHMCP_TRUSTED_PROXIES` 中只写该代理的地址（见[安装文档](INSTALLATION.md#https-反向代理)）：只有来自这些地址的连接，其 `X-Forwarded-Proto`/`X-Forwarded-Host` 才参与 Origin 校验；写成过宽的网段等于允许能直连 9099 的人伪造这两个请求头（CSRF 令牌校验仍然生效）。
 2. **独立密钥**：bootstrap.token 仅用于首次初始化；Web 使用飞书 OAuth 会话（HttpOnly Cookie + CSRF），mcp.token 仅用于 MCP。令牌随机产生并保存在 Docker 持久卷；只有拥有卷访问权限的管理员可以查看。不得复制到 GitHub、截图或聊天。
 3. **密钥加密**：SSH 私钥、诊断请求与结果采用 Fernet 对称加密存储；数据库、密钥文件权限 0600，目录 0700。数据库与 master.key 不可公开共享，备份须包含两者并限制访问。运行容器使用非 root UID 10001，这不限制目标 SSH 账号使用 root。
 4. **两层 SSH 身份**：Web 凭据对应用户公钥 `authorized_keys`；目标服务器自身公钥来自 `/etc/ssh/ssh_host_*.pub`，必须单独核验并固定。批量扫描只能获得候选值。

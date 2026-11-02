@@ -179,20 +179,35 @@ async function showHost(id) {
     (tests?.error
       ? `<p class="inline-error">最近测试失败：${esc(tests.error)}</p>`
       : "") +
-    `<div class="actions">${btn("prepare-host", "准备下一步", h.id, "primary")}${btn("edit-host", "编辑资产", h.id)}${btn("diagnose-host", "诊断", h.id)}</div>` +
+    // The step itself, named, or what the state means: never an unnamed action.
+    `<div class="actions">${prepareStep(h, true) || `<span class="muted">${esc(PREPARED[h.readiness] || statuses[h.readiness] || "")}</span>`}${btn("edit-host", "编辑资产", h.id)}${btn("diagnose-host", "诊断", h.id)}</div>` +
     `<h3>常用诊断</h3><div class="actions">${quick}</div><h3>最近诊断</h3>` +
     table(["动作", "状态", "时间", "详情"], recent);
   $("#host-drawer").showModal();
 }
-async function prepareHost(id) {
+// Drawer text for a host without a preparation step.
+const PREPARED = {
+  verified: "准备已完成：SSH 验证通过，可以诊断",
+  unsupported: "仅登记资产：当前只提供 Linux SSH 诊断",
+};
+// One preparation step (PREPARE_STEPS), the one the button showed. A host
+// whose state changed since the list or drawer was drawn (another admin or
+// tab, a finished scan) is not given a different step in its place: the
+// page is refreshed to show the step it needs now.
+async function prepareHost(id, step) {
   const { host: h } = await api("/hosts/" + id + "/detail");
   $("#host-drawer").close();
-  if (h.asset_type !== "linux") {
-    notice("当前仅提供 Linux SSH 诊断，其他设备保留资产登记。");
-    go("hosts?status=unsupported");
+  const planned = PREPARE_STEPS[step];
+  if (!planned || !planned.when.includes(h.readiness)) {
+    notice(
+      `「${h.name}」的状态已变为「${statuses[h.readiness] || h.readiness}」，` +
+        `未执行「${planned ? "下一步：" + planned.label : "准备操作"}」；页面已刷新，请按最新状态操作。`,
+      true,
+    );
+    await render();
     return;
   }
-  if (!h.enabled) {
+  if (step === "enable") {
     [state.credentials, state.proxies, state.groups] = await Promise.all([
       api("/credentials"),
       api("/proxies"),
@@ -204,7 +219,7 @@ async function prepareHost(id) {
     );
     return;
   }
-  if (!h.credential_id) {
+  if (step === "bind") {
     state.credentials = await api("/credentials");
     if (!state.credentials.length) {
       notice("先添加 SSH 凭据，再从资产详情绑定。");
@@ -231,20 +246,21 @@ async function prepareHost(id) {
           proxy_id: h.proxy_id,
         }),
     );
-  } else if (!h.has_host_key) {
+  } else if (step === "scan") {
     const batch = await api("/host-keys/scan", "POST", { host_ids: [h.id] });
     state.batchId = batch.batch_id;
     notice("扫描只收集候选公钥；请通过独立可信渠道核验后再确认。");
     go("keys/" + batch.batch_id);
-  } else if (h.last_status === "success") {
-    await setTargets([h.id]);
-  } else {
+  } else if (step === "test") {
     await startJob(h.id, "connection");
   }
 }
 async function batchProgress() {
   if (!state.batchFilter) return "";
-  const data = await api("/jobs/batches/" + state.batchFilter);
+  // Polled every 3 s while jobs run: counts only, no decrypted results.
+  const data = await api(
+    "/jobs/batches/" + encodeURIComponent(state.batchFilter) + "?counts_only=true",
+  );
   const counts = Object.entries(data.counts)
     .map(([k, v]) => `<span>${esc(statuses[k])}: <strong>${v}</strong></span>`)
     .join("");
@@ -378,7 +394,7 @@ document.addEventListener("click", async (e) => {
   e.preventDefault();
   e.stopImmediatePropagation();
   // One request per click, as in app.js: a double click on 只重试失败项 or a
-  // readiness badge must not submit twice.
+  // 下一步 button must not submit twice.
   b.disabled = true;
   try {
     if (a === "remove-target") {
@@ -387,7 +403,7 @@ document.addEventListener("click", async (e) => {
     }
     if (a === "host-detail") await showHost(id);
     if (a === "close-drawer") $("#host-drawer").close();
-    if (a === "prepare-host") await prepareHost(id);
+    if (a === "prepare-host") await prepareHost(id, b.dataset.step);
     if (a === "sort-host") {
       state.hostDirection =
         state.hostSort === id && state.hostDirection === "asc" ? "desc" : "asc";

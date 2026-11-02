@@ -951,6 +951,7 @@ def test_changed_scripts_parse_under_sh():
         diagnostics.command_for(
             "collect", options={"actions": ["tcp_states", "cpu"], "timeout_seconds": 30}
         ),
+        diagnostics.command_for("time_sync"),
         *(script for _, script in nginx_scripts()),
     ]
     for script in scripts:
@@ -1099,6 +1100,7 @@ def test_el7_gc_log_probe_follows_a_deployment_link_and_reads_the_descriptor():
         diagnostics.command_for("service_detail", options={"service": "nginx"}),
         diagnostics.command_for("tcp_states"),
         diagnostics.command_for("syslog", options={}),
+        diagnostics.command_for("time_sync"),
         *(text for _, text in nginx_scripts()),
     ]
     for index, text in enumerate(changed):
@@ -1118,3 +1120,101 @@ def test_el7_gc_log_probe_follows_a_deployment_link_and_reads_the_descriptor():
     assert summary["gc_log"]["lines"] == CMS_RECORD
     assert summary["gc_log"]["last_pause_ms"] == 5678.901
     assert re.findall(r"(?m)^@@SYNTAX \d+ (\w+)$", text) == ["ok"] * len(changed)
+
+
+# systemd 219 has no `timedatectl show` (SSH-DIAG-16). The image has systemd
+# but no running bus: a private system bus with timedated answers
+# `timedatectl status` when the image can start them, otherwise the script
+# must end with timedatectl's own error. Then stubs (no bus, chronyc of EL7's
+# chrony 3.4) take the chronyc path under bash 4.2 and coreutils' timeout.
+EL7_TIME = r"""
+printf '@@VERSION %s\n' "$(timedatectl --version 2>&1 | head -n 1)"
+if command -v dbus-daemon >/dev/null 2>&1 && [ -x /usr/lib/systemd/systemd-timedated ]; then
+  mkdir -p /var/run/dbus
+  dbus-uuidgen --ensure >/dev/null 2>&1
+  dbus-daemon --system --fork >/dev/null 2>&1
+  i=0
+  while [ "$i" -lt 25 ] && [ ! -S /var/run/dbus/system_bus_socket ]; do sleep 0.2; i=$((i + 1)); done
+  /usr/lib/systemd/systemd-timedated >/dev/null 2>&1 &
+  i=0
+  while [ "$i" -lt 25 ] && ! timedatectl status >/dev/null 2>&1; do sleep 0.2; i=$((i + 1)); done
+fi
+timedatectl show >/dev/null 2>&1
+printf '@@SHOW %s\n' "$?"
+timedatectl status >/dev/null 2>&1
+printf '@@STATUS %s\n' "$?"
+cat > /tmp/time_sync.sh <<'AIOPS_SCRIPT_END'
+@SCRIPT@
+AIOPS_SCRIPT_END
+cat > /tmp/time_sync_raw.sh <<'AIOPS_SCRIPT_END'
+@RAW@
+AIOPS_SCRIPT_END
+printf '@@REAL\n'
+sh /tmp/time_sync.sh 2>/tmp/time_sync.err </dev/null
+printf '@@RC %s\n' "$?"
+sed 's/^/@@ERR /' /tmp/time_sync.err
+mkdir -p /tmp/stubs
+for t in date timeout cat; do ln -s "$(command -v "$t")" "/tmp/stubs/$t"; done
+printf '#!/bin/sh\necho "Failed to create bus connection: No such file or directory" >&2\nexit 1\n' > /tmp/stubs/timedatectl
+cat > /tmp/stubs/chronyc <<'AIOPS_STUB_END'
+#!/bin/sh
+cat <<'EOF'
+Reference ID    : C0A80101 (192.0.2.1)
+Stratum         : 3
+Ref time (UTC)  : Sun Nov 01 04:00:00 2026
+System time     : 0.000012345 seconds fast of NTP time
+Last offset     : +0.000001234 seconds
+RMS offset      : 0.000023456 seconds
+Frequency       : 1.234 ppm slow
+Residual freq   : +0.000 ppm
+Skew            : 0.012 ppm
+Root delay      : 0.001234567 seconds
+Root dispersion : 0.000123456 seconds
+Update interval : 64.2 seconds
+Leap status     : Normal
+EOF
+AIOPS_STUB_END
+chmod 755 /tmp/stubs/timedatectl /tmp/stubs/chronyc
+printf '@@STUB\n'
+PATH=/tmp/stubs /bin/sh /tmp/time_sync_raw.sh </dev/null
+printf '@@STUBRC %s\n' "$?"
+"""
+
+
+@needs_image
+def test_el7_time_sync_falls_back_from_timedatectl_show():
+    from test_procps_compat import in_container
+
+    body = EL7_TIME.replace("@SCRIPT@", diagnostics.command_for("time_sync")).replace(
+        "@RAW@", operations.SCRIPTS["time_sync"]
+    )
+    result = in_container(body)
+    text = result.stdout
+    assert "systemd 219" in re.search(r"(?m)^@@VERSION (.*)$", text)[1], text
+    assert re.search(r"(?m)^@@SHOW (\d+)$", text)[1] != "0"  # no show on 219
+    status = re.search(r"(?m)^@@STATUS (\d+)$", text)[1]
+    real = text.split("@@REAL\n", 1)[1].split("@@RC ", 1)[0]
+    code = re.search(r"(?m)^@@RC (\d+)$", text)[1]
+    errors = re.findall(r"(?m)^@@ERR (.*)$", text)
+    summary = observations.analyze(
+        "time_sync", real, status="success" if code == "0" else "partial"
+    )["summary"]
+    if status == "0":
+        # The real `timedatectl status` of systemd 219, parsed.
+        assert code == "0", text
+        assert summary["sync_source"] == "timedatectl status", real
+        assert summary["properties"]["NTPSynchronized"] in ("yes", "no"), real
+        assert (
+            "Timezone" in summary["properties"] and "LocalRTC" in summary["properties"]
+        )
+    else:
+        # No bus: timedatectl's error is the result, not an empty success.
+        assert code in ("1", "69"), text
+        assert errors or "CAPABILITY_MISSING:timedatectl" in real, text
+        assert summary["sync_source"] is None and summary["properties"] == {}
+    stub = text.split("@@STUB\n", 1)[1].split("@@STUBRC ", 1)[0]
+    assert re.search(r"(?m)^@@STUBRC 0$", text), text
+    stubbed = observations.analyze("time_sync", stub)["summary"]
+    assert stubbed["sync_source"] == "chronyc tracking", stub
+    assert stubbed["properties"] == {"NTPSynchronized": "yes"}
+    assert stubbed["chrony"]["leap_status"] == "Normal"

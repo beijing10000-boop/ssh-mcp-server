@@ -293,12 +293,17 @@ def work(ident, background=False):
         status = "failed"
         # Execution-stage failures carry the same stable code as pre-checks, so
         # a client can tell a busy host from a stale revision or a dead SSH.
+        code = error_code(exc, error)
+        if code == "cancelled" and diagnostics.caller_gone():
+            # The MCP client left (diagnostics.CALLER_GONE): the call stopped
+            # waiting for its slot, or its SSH read, and kept nothing.
+            status, error = "cancelled", diagnostics.CALLER_GONE_ERROR
         result = {
             "host_id": job["host_id"],
             "action": job["action"],
             "status": status,
             "error": error,
-            "error_code": error_code(exc, error),
+            "error_code": code,
         }
     for attempt in range(1, SAVE_ATTEMPTS + 1):
         try:
@@ -429,7 +434,10 @@ def detail(ident):
     return data
 
 
-def batch_detail(batch_id, page=1, page_size=25, *, actor=None):
+def batch_detail(batch_id, page=1, page_size=25, *, actor=None, items=True):
+    """A batch's counts and skipped hosts, plus one page of its jobs (each
+    decrypted and analysed) unless ``items`` is false: a progress poll then
+    reads counts only."""
     if not re.fullmatch(r"[a-f0-9]{32}", batch_id):
         raise ValueError("批次 ID 格式无效")
     if (
@@ -471,8 +479,9 @@ def batch_detail(batch_id, page=1, page_size=25, *, actor=None):
     skipped = (
         json.loads(store.unseal(batch["skipped"])) if "skipped" in batch.keys() else []
     )
+    page_rows = rows[(page - 1) * page_size : page * page_size] if items else []
     items = []
-    for row in rows[(page - 1) * page_size : page * page_size]:
+    for row in page_rows:
         job = detail(row["id"])
         item = {
             k: job[k]
@@ -509,10 +518,15 @@ def get_batch(
     batch_id: str,
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
+    counts_only: bool = False,
     actor=Depends(admin),
 ):
+    """``counts_only=true`` (the console's progress poll): counts, totals and
+    skipped hosts, ``items`` empty, without decrypting any result."""
     try:
-        return observations.present(batch_detail(batch_id, page, page_size))
+        return observations.present(
+            batch_detail(batch_id, page, page_size, items=not counts_only)
+        )
     except (ValueError, PermissionError) as exc:
         raise HTTPException(
             422 if isinstance(exc, ValueError) else 404, str(exc)

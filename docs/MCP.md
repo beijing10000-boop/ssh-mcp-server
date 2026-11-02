@@ -6,6 +6,8 @@
 - 地址：`http://可信内网IP:9099/mcp`
 - Header：`Authorization: Bearer <Web「系统配置 → MCP 接入」签发的客户端令牌>`
 - Web 使用飞书 Cookie 会话，不能用于 MCP；初始化 Token 也不能用于 MCP。
+- 带 `Origin` 的浏览器请求只接受本服务自己的来源；经 HTTPS 反向代理接入时，按[安装文档](INSTALLATION.md#https-反向代理)设置 `SSHMCP_TRUSTED_PROXIES`，该代理转发的 `X-Forwarded-Proto`/`X-Forwarded-Host` 才计入（v0.10.0）。不带 Origin 的 MCP 客户端不受影响。
+- 鉴权只读数据库：客户端的“最近使用时间”每分钟最多写一次，数据库被长事务占用时跳过，不影响调用（v0.10.0）。
 
 在 Web「系统配置 → MCP 接入」创建客户端，选择允许的主机组（或明确授权全部主机）、诊断动作和 1–365 天有效期。原始令牌只显示一次，关闭弹窗后不能再次读取；数据库仅存哈希。撤销/到期从下一次请求起生效，不承诺终止已经执行中的 SSH。v0.6.0 起可以对有效客户端「编辑权限」（调整动作、全部主机与主机组），令牌保持不变，详见下文[客户端授权自动扩展与编辑](#客户端授权自动扩展与编辑)。
 
@@ -56,7 +58,7 @@
 | ssh_diagnose_resource_limits | 文件句柄、PID 与当前 SSH shell 限制 |
 | ssh_diagnose_mounts | 挂载类型与只读文件系统 |
 | ssh_diagnose_block_devices | 块设备结构 |
-| ssh_diagnose_time_sync | 时间与 NTP/chrony 状态 |
+| ssh_diagnose_time_sync | 时间与 NTP/chrony 状态；`timedatectl show` 不可用（systemd 239 以前，如 EL7）时回退 `timedatectl status`，再回退 `chronyc tracking`、`ntpstat`，`summary.sync_source` 写明来源（v0.10.0） |
 | ssh_diagnose_tcp_states | TCP 状态分布 |
 | ssh_diagnose_service_inventory | 系统服务清单 |
 | ssh_diagnose_timers | systemd timer 上次和下次运行 |
@@ -83,18 +85,30 @@
 | ssh_diagnose_nginx_access（nginx_access） | `minutes`=30（1–1440）、`since`/`until`（Unix 秒，最长 24 小时）、`path`、`status`（all、4xx、5xx 或具体码）、`keyword`（≤64 字符）、`top`=10（5–30） | 远端 awk 聚合访问日志：请求总数、状态码分布、错误请求 TOP URL/IP/UA、每分钟请求与 5xx 趋势、request_time/upstream_response_time 统计。只读每个日志尾部约 30 MB（跨轮转时另读未压缩轮转文件尾部 10 MB），窗口被截断时说明覆盖范围；`path` 只接受 Nginx 配置声明的 access_log 或标准日志目录 | 中 |
 | ssh_diagnose_syslog（syslog） | `minutes`=30（1–1440）、`since`/`until`、`unit`、`priority`=warning（emerg…debug）、`keyword`、`pid`、`lines`=120（20–300） | 优先 journalctl，journald 不可用、无权限或未覆盖窗口时回退 /var/log/messages、syslog、secure、auth.log 尾部并说明来源；返回按级别/单元计数、OOM/磁盘 I/O/网络链路/服务失败/内核异常/登录失败分类与代表性日志行；区分“无日志”与“无权限” | 低 |
 | ssh_diagnose_java（java） | 无 | 盘点最多 20 个 Java 进程：PID、用户、运行时长、RSS、线程与句柄数、systemd 单元、JAR/主类、应用名、-Xms/-Xmx/-Xss 与 GC 参数、GC 与应用日志位置、JDK 路径与版本。只读 /proc，不附加 JVM；启动命令脱敏，完整命令只在 `detail=full` 附带 | 低 |
-| ssh_diagnose_jvm（jvm） | `pid`（必填）、`probes`（heap_info、vm_flags、gc_stat、gc_log，缺省前三项） | 对指定 Java 进程执行有界探针：jcmd GC.heap_info、jcmd VM.flags、jstat -gc、GC 日志尾部 40 行。jcmd 会让 JVM 短暂进入安全点，生产高峰期谨慎使用；需以 root（经 runuser 切换到 JVM 所属用户）或与 JVM 相同的用户执行，否则返回能力缺失 | 中 |
+| ssh_diagnose_jvm（jvm） | `pid`（必填）、`probes`（heap_info、vm_flags、gc_stat、gc_log，缺省前三项） | 对指定 Java 进程执行有界探针：jcmd GC.heap_info、jcmd VM.flags、jstat -gc、GC 日志尾部 40 行。需以 root（经 runuser 切换到 JVM 所属用户）或与 JVM 相同的用户执行，否则返回能力缺失。对目标的副作用见下文 [jvm 探针的副作用](#jvm-探针的副作用) | 中 |
 | ssh_diagnose_service_detail（service_detail） | `service`（必填，systemd 单元名）、`minutes`=30（1–1440） | 单个 systemd 服务深度诊断：状态、Result、退出码、重启次数与策略、启动时间、MainPID、内存/任务数、ExecStart、运行用户与工作目录、单元文件与 drop-in、cgroup 进程、监听端口、窗口内日志与近 24 小时异常退出/重启记录；单元不存在时返回 `unit_not_found`，不会说成“已停止” | 低 |
 | ssh_diagnose_service_map（service_map） | 无 | 监听端口 → 进程（PID、程序名、用户）→ systemd 单元/容器映射（最多 80 行），附 RSS 与运行时长；非 root 账号只能看到自己进程的端口归属 | 低 |
 | ssh_collect（collect） | `actions`（1–6 个固定动作，按顺序执行）、`service`（含 service/logs 步骤时必填，否则不能传）、`minutes`=30（1–120，日志类步骤的窗口）、`timeout_seconds`（可选，10–120，v0.9.0） | 在一次 SSH 会话内顺序执行多个固定诊断，每个步骤单独返回 exit_code、summary 与 findings，并合并为带 `source_action` 的总 findings；执行上限 120 秒（另可能排队最多 30 秒），给出 `timeout_seconds` 时排队与执行合计不超过该值，见下文 [ssh_collect 使用建议](#ssh_collect-使用建议)。可组合动作为 cpu、memory、processes、memory_processes、pressure、resource_limits、disk、io、mount_health、block_devices、network、sockets、tcp_states、system、health、capabilities、failed_services、service_inventory、timers、time_sync、containers、container_stats、security_status、kernel、log_errors、oom、service、logs（不含 directory、peer_*、triage 及扩展动作） | 低 |
 
 共 51 个工具：32 类经典单项诊断（含连接测试）、7 类 v0.6.0 深度诊断、单会话多项采集 `ssh_collect`、组合诊断 `ssh_triage`、6 个资产/目录查询工具和 4 个后台任务工具。`ssh_list_hosts` 支持 query、group_id、offset、limit（最多 1000），返回当前授权范围内的所属主机组名称，只返回当前客户端可访问且已就绪的资产。所有执行操作**仅接受登记的数字 host_id**，单项诊断支持可选的 `expected_revision`：建议 AI 平台始终传入解析时取得的版本，拒绝过期映射。即使模型请求任意 IP 或 shell 命令，服务端也没有对应工具。
 
+### jvm 探针的副作用
+
+`ssh_diagnose_jvm` 是唯一会改变目标进程状态的动作，因此只能手动授权（同样写在工具说明与 `ssh_list_tool_catalog` 的 `notes` 中，v0.10.0）：
+
+- **heap_info、vm_flags（jcmd）附加到 JVM**：jcmd 先在 JVM 的工作目录（不可写时为 JVM 的 `/tmp`）创建 `.attach_pid<PID>` 并向 JVM 发送 SIGQUIT，结束后删除该文件（被 8 秒超时终止时可能残留）；JVM 随即启动常驻的 Attach Listener 线程，并在其 `/tmp` 留下 `.java_pid<PID>` 套接字，二者保留到 JVM 退出。不捕获 SIGQUIT（`-Xrs`、jsvc 父进程）或带 `-XX:+DisableAttachMechanism` 的 JVM 跳过 jcmd，以免 SIGQUIT 终止进程。
+- **命令在 JVM 内执行**：可能短暂进入安全点或持有堆锁，生产高峰期谨慎使用；不触发 GC、不生成堆转储、不修改参数。
+- **身份**：root 账号经 `runuser -u <JVM 属主>` 执行（系统日志可能记录一次 runuser 会话）；其他账号必须就是 JVM 属主。
+- **gc_stat（jstat -gc）** 只读 JVM 的性能计数文件 `/tmp/hsperfdata_<用户>/<PID>`，不附加、不发信号；**gc_log** 只读 GC 日志尾部 40 行。
+- jcmd、jstat 自身以 `-Xmx64m`、`-XX:-UsePerfData` 启动（不留下自己的计数文件），每个探针限时 8 秒。
+
 `ssh_submit_diagnostics` 不接受扩展参数：扩展动作只能以注册表默认参数批量提交，`jvm`、`service_detail` 这类有必填参数的动作以及 `ssh_collect` 请使用同步工具。Web 控制台与 `POST /api/v1/jobs`、`POST /api/v1/hosts/{id}/diagnose` 通过 `options` 对象传入扩展动作的全部参数（经典动作仍用 service、minutes、directory_root）。
 
-结果包含 `status=success|partial|failed|cancelled`；失败结果另含稳定的 `error_code`（`forbidden` 未授权、`unavailable` 主机不存在/无权访问、`not_linux` 资产不是 Linux（解析工具另附 `asset_type` 与 `name`）、`not_ready` Linux 已登记但停用、公钥未核验或未绑定凭据、`mapping_unresolved` Zabbix 映射缺失或重复、`busy` 同主机或 SSH 名额排队超时，或待执行任务已满、`timeout`、`revision_changed`、`host_unverified` 执行阶段的主机公钥问题（未核验、格式无效或与登记的不一致）、`unsupported`、`invalid_argument`、`cancelled`、`failed`），`error` 仍为中文说明。v0.6.0 起执行阶段（SSH 已开始后）的失败也带 `error_code`，可以区分主机繁忙、版本过期与 SSH 故障。v0.9.0起，诊断工具创建任务时的三类拒绝改用专用代码（`error` 文字不变）：所有诊断任务中排队与运行中的合计已达 200 个返回 `busy`（原 `invalid_argument`）；主机已停用、公钥未核验或未绑定凭据返回 `not_ready`（原 `host_unverified`）；资产不是 Linux 返回 `not_linux`（原 `invalid_argument`）。非 Linux 资产不能启用，诊断工具对它通常先返回 `not_ready`，要区分资产类型请用解析工具。已创建的执行任务包含 `job_id`，可供管理员在 Web 查看。工具层面的 MCP `isError` 和结果里的 `status` 都需要检查。缺命令、读取权限不足、非零退出或输出截断不能解释为诊断成功。单项诊断同步返回；批量任务通过 ssh_submit_diagnostics 后台提交，再查询状态。客户端断连不保证立即取消远端任务。
+结果包含 `status=success|partial|failed|cancelled`；失败结果另含稳定的 `error_code`（`forbidden` 未授权、`unavailable` 主机不存在/无权访问、`not_linux` 资产不是 Linux（解析工具另附 `asset_type` 与 `name`）、`not_ready` Linux 已登记但停用、公钥未核验或未绑定凭据、`mapping_unresolved` Zabbix 映射缺失或重复、`busy` 同主机或 SSH 名额排队超时，或待执行任务已满、`timeout`、`revision_changed`、`host_unverified` 执行阶段的主机公钥问题（未核验、格式无效或与登记的不一致）、`unsupported`、`invalid_argument`、`cancelled`、`failed`），`error` 仍为中文说明。v0.6.0 起执行阶段（SSH 已开始后）的失败也带 `error_code`，可以区分主机繁忙、版本过期与 SSH 故障。v0.9.0起，诊断工具创建任务时的三类拒绝改用专用代码（`error` 文字不变）：所有诊断任务中排队与运行中的合计已达 200 个返回 `busy`（原 `invalid_argument`）；主机已停用、公钥未核验或未绑定凭据返回 `not_ready`（原 `host_unverified`）；资产不是 Linux 返回 `not_linux`（原 `invalid_argument`）。非 Linux 资产不能启用，诊断工具对它通常先返回 `not_ready`，要区分资产类型请用解析工具。已创建的执行任务包含 `job_id`，可供管理员在 Web 查看。工具层面的 MCP `isError` 和结果里的 `status` 都需要检查。缺命令、读取权限不足、非零退出或输出截断不能解释为诊断成功。单项诊断同步返回；批量任务通过 ssh_submit_diagnostics 后台提交，再查询状态。
 
-同一主机同一时刻只执行一个诊断。v0.6.0 起同步 MCP 调用等待同主机名额的时间从 2 秒延长到 30 秒，超过才返回 `busy`；后台任务最多等待 180 秒；`ssh_collect` 给出 `timeout_seconds` 时最多等待该值的一半，且不超过 30 秒（v0.9.0）。执行超时时保留已经读到的输出，结果标记 `timed_out=true` 与 `incomplete_reason`（`timeout`、`output_limit`、`exit_code`、`stderr`），状态为 partial；完全没有输出才返回 `timeout` 失败。stderr 只有致命错误（命令不存在、权限拒绝、用法错误等）才使结果变为 partial，df 读取 gvfs/FUSE 挂载之类的已知噪声放在 `warnings` 中，不影响状态。stderr 只保留前 2 KiB；v0.9.0起超出时结果带 `stderr_truncated=true`，stdout 照常读完（此前会提前结束读取并报 `output_limit`）。
+**客户端离开（v0.10.0）**：同步诊断（`ssh_diagnose_*`、`ssh_test_connection`、`ssh_collect`、`ssh_triage`）的客户端在收到结果前关闭 HTTP 连接时（会话关闭、进程退出、HTTP 超时后断开），服务端在约 0.2 秒内察觉：仍在等待主机名额的调用放弃等待，不占名额、不连接 SSH；正在建立 SSH 连接的调用在握手结束后关闭连接、不执行命令，正在读取输出的调用停止读取并关闭 SSH 通道，二者都释放名额；尚在服务端排队、未开始的调用不再执行。已创建的任务记为 `cancelled`（`error` 为“MCP 客户端已断开连接，诊断已取消”，`error_code=cancelled`；SSH 握手期间断开的此前被归为 `revision_changed`），已读到的输出不保留。不能取消的情形：客户端只放弃等待而保持连接（例如 MCP Python SDK 中对 `call_tool` 套 `wait_for` 的超时，会话与连接保持到会话关闭），或发送 MCP `notifications/cancelled`（本服务是无状态 HTTP，取消通知作为另一个请求到达，找不到原调用）——此时调用照常执行完（会话关闭时仍未结束的才取消），需要服务端在调用方期限内结束的请给 `ssh_collect` 传 `timeout_seconds`；排队仍受 30 秒（`ssh_collect` 给出 `timeout_seconds` 时为其一半）的上限约束，执行受各动作的时间上限约束。后台任务（`ssh_submit_diagnostics`）与客户端连接无关，只能用 `ssh_cancel_diagnostic_job` 或 Web 取消。经反向代理接入时，代理的读超时应长于调用方自身的超时（建议 ≥180 秒），否则代理先断开连接，调用会被当作客户端离开而取消。
+
+同一主机同一时刻只执行一个诊断。同步诊断调用在服务端独立的 32 线程池中等待名额与执行（v0.10.0；此前与解析、目录、任务查询等轻量工具共用一个线程池，同时排队的诊断多时轻量工具也要等）；超过 32 个的调用在服务端排队，轻量工具不受影响，排队等线程的时间计入下述 30 秒（以及 `timeout_seconds`）。等名额的调用占用一个线程，32 个线程即 4 个名额加 28 个等待者：同时等待繁忙主机的调用不超过 28 个时，其他主机的调用不必排队。v0.6.0 起同步 MCP 调用等待同主机名额的时间从 2 秒延长到 30 秒，超过才返回 `busy`；后台任务最多等待 180 秒；`ssh_collect` 给出 `timeout_seconds` 时最多等待该值的一半，且不超过 30 秒（v0.9.0）。执行超时时保留已经读到的输出，结果标记 `timed_out=true` 与 `incomplete_reason`（`timeout`、`output_limit`、`exit_code`、`stderr`），状态为 partial；完全没有输出才返回 `timeout` 失败。stderr 只有致命错误（命令不存在、权限拒绝、用法错误等）才使结果变为 partial，df 读取 gvfs/FUSE 挂载之类的已知噪声放在 `warnings` 中，不影响状态。stderr 只保留前 2 KiB；v0.9.0起超出时结果带 `stderr_truncated=true`，stdout 照常读完（此前会提前结束读取并报 `output_limit`）。
 
 `ssh_resolve_target` 与 `ssh_resolve_host` 成功时新增 `asset_type`（Linux 主机为 `linux`）和 `mode`（诊断模式：A 模式 `standard`，B 模式强制命令网关 `gateway`；B 模式主机不支持任何 v0.6.0 新动作）。失败时：资产不是 Linux 返回 `not_linux` 并附 `asset_type` 与 `name`，AI 平台可据此改走仅 Zabbix 的分析路径；Linux 主机已登记但停用、公钥未核验或未绑定凭据返回 `not_ready`（`asset_type=linux`）；主机不存在或不在授权范围内仍为 `unavailable`。
 
@@ -111,7 +125,7 @@
 AI 平台在告警分析前做预采集时，应把同一主机需要的多个固定诊断合并成**一次** `ssh_collect` 调用（例如 `actions=["cpu","processes","pressure"]`，或 `["service","logs","failed_services"]` 加 `service`），不要并发调用多个单项工具：同一主机的诊断是串行的，多个并发调用会排队等待名额，单次调用等待超过 30 秒即返回 `busy`；`ssh_collect` 只建立一次 SSH 会话，不会自我排队。
 
 - 每次最多 6 个步骤，执行上限 120 秒（另可能排队最多 30 秒）、单步输出上限 32 KiB；步骤越多耗时越长，按需选择。
-- 调用方自身有超时（如 AI 平台的单工具超时）时，传 `timeout_seconds`（10–120，略小于自身超时；v0.9.0）：排队与执行合计不超过该值，排队最多等 min(30, timeout_seconds ÷ 2) 秒，SSH 握手各阶段分享剩余时间，读取输出到上限前 1 秒为止。每个步骤另有单步超时 max(5, min(20, ⌊(timeout_seconds − 5) ÷ 步骤数⌋)) 秒（目标机有 `timeout` 命令时生效），被终止的步骤为 `partial` 并带 `timed_out=true` 与 `error`，后续步骤照常执行。到达上限时返回已完成的步骤，整体 `timed_out=true`、状态为 partial；一点输出都没读到才返回 `timeout` 失败。经跳板访问的主机，跳板的握手与通道建立同样按剩余时间计时。不传时与 v0.8.0 相同。调用方可从 `tools/list` 中 `ssh_collect` 的 inputSchema 是否含 `timeout_seconds` 判断服务端是否支持。
+- 调用方自身有超时（如 AI 平台的单工具超时）时，传 `timeout_seconds`（10–120，略小于自身超时；v0.9.0）：排队与执行合计不超过该值，排队最多等 min(30, timeout_seconds ÷ 2) 秒；取得名额时若剩余不足 max(5, timeout_seconds ÷ 4) 秒（例如在服务端线程池中排队过久），立即返回 `busy`（“…未连接主机，请稍后重试”），不连接 SSH（v0.10.0）；SSH 握手各阶段分享剩余时间，读取输出到上限前 1 秒为止。每个步骤另有单步超时 max(5, min(20, ⌊(timeout_seconds − 5) ÷ 步骤数⌋)) 秒（目标机有 `timeout` 命令时生效），被终止的步骤为 `partial` 并带 `timed_out=true` 与 `error`，后续步骤照常执行。到达上限时返回已完成的步骤，整体 `timed_out=true`、状态为 partial；一点输出都没读到才返回 `timeout` 失败。经跳板访问的主机，跳板的握手与通道建立同样按剩余时间计时。不传时与 v0.8.0 相同。调用方可从 `tools/list` 中 `ssh_collect` 的 inputSchema 是否含 `timeout_seconds` 判断服务端是否支持。
 - 结果在 `summary.steps` 中逐步给出 status、exit_code、summary、findings；总 `findings` 带 `source_action`，`summary.completed/total` 说明完成情况，未完成步骤会产生 `triage_coverage` 线索。v0.9.0起任一步骤的 status 不是 success 时，顶层 `status` 为 `partial`（此前整段脚本退出码总是 0，步骤失败时顶层仍可能是 `success`）；顶层 `incomplete_reason` 只反映整段执行，仅因步骤失败时为 null。
 - Nginx、syslog、Java、服务详情等扩展动作不能放进 `ssh_collect`，需单独调用对应工具；同一主机上它们同样串行执行。
 
@@ -159,5 +173,13 @@ v0.9.0修正了以下结果，拿不到数据时给出 null 与说明，调用�
 - **jvm**：`gc_log` 探针只输出 GC 记录格式的行；容器内（根目录与本机不同）的 JVM，GC 日志文件或其任一上级目录是符号链接时不读取，`probes.gc_log` 为 `symlink_refused`；与本机同根的 JVM 可跟随链接，但最终文件必须是 JVM 属主的普通文件。
 - **processes / memory_processes / health**：进程名可以含空格（如 `PM2 v5.3.0: God`），数值列不再错位。
 - **日志类的内核分类**（logs、kernel、log_errors、oom）不再把 Python 日志的 `DEBUG:` 当作内核 `BUG:`。
+
+v0.10.0（未发布）的结果变化，同样只增不删：
+
+- **未知的计数为 null**：经典动作的采集不完整（输出 `CAPABILITY_MISSING:*`、非零退出、致命 stderr、超时或截断，即 `status` 不是 `success`）时，计数类指标为 0 的改为 null（未知）：`failed_service_count`、`observed_log_lines`、`oom_matches`、`observed_rows`、`listening_ports`、`reported_firewall_services`、`processes_uninterruptible`、`unavailable_commands` 的 `summary.metrics[].value`，以及日志类的 `summary.entries_total`。大于 0 的计数照常给出（已看到的证据，是下限）。完整采集的 0 仍是 0。
+- **`ssh_diagnose_service`**：一个单元的属性没有“失败服务数”可数，`failed_service_count` 指标的 value 恒为 null，`summary.failed_services` 为 null（此前恒为 0 和 `[]`）；字段保留，按名读取的客户端不会出错。`failed_services`、`service_inventory` 两个动作不变。
+- **`ssh_diagnose_time_sync`**：EL7（systemd 219）等没有 `timedatectl show` 的主机改读 `timedatectl status`（脚本段 `[AIOPS_TIMEDATECTL_STATUS]`，标签映射到原来的 Timezone、LocalRTC、NTP、NTPSynchronized）；timedatectl 不可用或连不上 D-Bus 时，用 `chronyc tracking`（Leap status 为 Not synchronised 即未同步）再用 `ntpstat`（退出码 0 已同步、1 未同步、2 无法判断）。新增 `summary.sync_source`：`timedatectl show`、`timedatectl status`、`chronyc tracking`、`ntpstat`，都取不到为 null；chronyc 可用时新增 `summary.chrony`（`reference`、`stratum`、`system_time`、`last_offset`、`leap_status`），用到 ntpstat 时新增 `summary.ntpstat`（`exit_code`、`state`）。每个外部命令限时 5 秒（有 `timeout` 时）。chronyc 的非零退出不再让整个结果变为 partial；只有 timedatectl 自身失败且没有其他来源时结果才是 partial（stderr 为 timedatectl 的错误），什么都没有时仍是 `CAPABILITY_MISSING:timedatectl`。
+- **`ssh_diagnose_containers`**：状态含 `(unhealthy)`（容器在运行但健康检查失败）时报 warning 级 `container_state`（`threshold` 为 `healthy`）；`(healthy)`、`(health: starting)` 不报。
+- **`ssh_diagnose_nginx_access`**：request_time 与 upstream_response_time 按该访问日志在 nginx 配置（`nginx -T`，失败时读配置文件）中的 log_format 定位：计算 `$request_time`、`$upstream_response_time` 所在的引号分段与前后的词数，`rt=$request_time` 这类前后缀也去掉；`$upstream_response_time $request_time` 的顺序、`$msec`、`"$gzip_ratio"` 不再被误读。`$upstream_addr`、`$upstream_status`、`$upstream_*_time` 等上游列表（多个上游记为 `a, b : c`，未经上游为 `-`）按 `,` 与 ` : ` 分隔逐词跳过，相邻的耗时照样按格式定位；`$host`、`$server_name`、`$https`、`$remote_user`、`$uri`、`$document_uri`、`$args`、`$query_string` 与请求头变量可能为空或含空格，不按一个词计数，只从另一侧定位。日志格式未知（没有取得配置、`escape=json`/`none` 的非 JSON 行、配置中没有该文件或该格式名）、某一行的引号数与格式不符，或格式所指的位置不是耗时（例如改格式前写入的行）时，该字段按原来的位置推测并计为推测，不丢弃。给出 `path` 时也读取配置（多一次有界的 `nginx -T`）。新增 `summary.timing.request_time_source` 与 `upstream_time_source`：`log_format`、`field_name`（JSON 键或 `rt=`/`urt=`）、`heuristic`（推测）、`not_in_log_format`（格式已知但没有该变量）四项的请求数（`upstream_time_source` 也计入取得 `-` 的请求）；有推测时 coverage、`slow_requests_over_3s`（request_time）与 `upstream_time_max`（upstream_response_time）的提示会注明。脚本输出多 `REQ_SOURCE`、`UPS_SOURCE` 两行。
 
 输出脱敏覆盖 `-Dxxx.password=` 等点分/驼峰形式的密钥参数、任意协议 URL 中的 `user:pass@`、AKIA/LTAI 开头的云访问密钥和 JWT。v0.9.0起另覆盖：以 pass 为独立词的键（`DB_PASS`、`-Dredis.pass=`、`?pass=`）与任意含 pwd 的键（`loginPwd`、`?pwd=`，`PWD`、`OLDPWD` 除外）；Redis 的 `requirepass`、`masterauth`；命令行中的 `mysql -p密码`、`redis-cli -a 密码`；会话 Cookie（`JSESSIONID`、`PHPSESSID`、`sessionid`、`connect.sid`、`sid`）；`Authorization: Basic/Bearer/Digest` 的凭据；Java 启动参数中值在下一个参数里的 `--password` 一类选项；手机号与 18 位身份证号部分遮盖（`138****8000`、`110101********1234`）。Nginx 与 syslog 的日志证据行另遮盖单独出现的 `Basic`/`Bearer` 凭据。审计 detail 记录已校验参数的摘要（例如 `actions=cpu,memory;minutes=60`），不记录模型原始输入。

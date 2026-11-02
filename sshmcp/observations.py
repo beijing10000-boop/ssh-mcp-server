@@ -56,6 +56,48 @@ def metric(
     )
 
 
+def unknown_metric(summary, key, unit="", threshold=None):
+    """A metric whose value is not known (null), listed so clients still find it."""
+    summary["metrics"].append(
+        {
+            "metric": key,
+            "value": None,
+            "unit": unit,
+            "threshold": threshold,
+            "level": "info",
+        }
+    )
+
+
+# Counts of what a classic collection returned. Only a complete run can say
+# "none": after a missing capability (CAPABILITY_MISSING), a failed, timed-out
+# or cut-short run, 0 means "not seen", so analyze() turns it into null
+# (unknown). A count above 0 stays: what was seen is evidence, a lower bound.
+INCOMPLETE_UNKNOWN_COUNTS = frozenset(
+    {
+        "failed_service_count",
+        "observed_log_lines",
+        "oom_matches",
+        "observed_rows",
+        "listening_ports",
+        "reported_firewall_services",
+        "processes_uninterruptible",
+        "unavailable_commands",
+    }
+)
+INCOMPLETE_UNKNOWN_SUMMARY = ("entries_total",)
+
+
+def unknown_counts(summary):
+    for item in summary["metrics"]:
+        if item["metric"] in INCOMPLETE_UNKNOWN_COUNTS and item["value"] == 0:
+            item["value"] = None
+            item["level"] = "info"
+    for key in INCOMPLETE_UNKNOWN_SUMMARY:
+        if summary.get(key) == 0:
+            summary[key] = None
+
+
 # Zabbix "Linux by Zabbix agent" default {$LOAD_AVG_PER_CPU.MAX.WARN}; keeping the
 # same line means an active load alert is not reported back as "info".
 LOAD_PER_CORE_WARN = 1.5
@@ -287,20 +329,26 @@ def services(text, summary, findings):
         for line in text.splitlines()
         if ".service" in line and not line.startswith("AIOPS_GATEWAY")
     ]
-    failed = [
-        row[0].lstrip("●")
-        for row in rows
-        if row and ("failed" in row or summary["action"] == "failed_services")
-    ]
-    metric(
-        summary,
-        findings,
-        "failed_service_count",
-        len(failed),
-        threshold=1,
-        hint="检查失败服务的依赖、退出原因和日志；不自动重启",
-    )
-    summary["failed_services"] = failed[:60]
+    if summary["action"] == "service":
+        # One unit's properties: there is no list of failed services to count.
+        # Null, not 0; kept for clients that read the fields.
+        unknown_metric(summary, "failed_service_count", threshold=1)
+        summary["failed_services"] = None
+    else:
+        failed = [
+            row[0].lstrip("●")
+            for row in rows
+            if row and ("failed" in row or summary["action"] == "failed_services")
+        ]
+        metric(
+            summary,
+            findings,
+            "failed_service_count",
+            len(failed),
+            threshold=1,
+            hint="检查失败服务的依赖、退出原因和日志；不自动重启",
+        )
+        summary["failed_services"] = failed[:60]
     if summary["action"] == "service_inventory":
         summary["units"] = [
             {
@@ -318,18 +366,105 @@ def services(text, summary, findings):
         summary["active_counts"] = counts
 
 
+# `timedatectl status` labels and the `timedatectl show` properties they mean.
+# show exists from systemd 239 on; EL7 (systemd 219) and Ubuntu 18.04 (237)
+# only have status, whose labels changed over the releases.
+TIMEDATECTL_STATUS = {
+    "time zone": "Timezone",
+    "rtc in local tz": "LocalRTC",
+    "ntp enabled": "NTP",  # systemd <= 235 (EL7)
+    "network time on": "NTP",  # systemd <= 218
+    "systemd-timesyncd.service active": "NTP",  # systemd 236-238
+    "ntp service": "NTP",  # systemd >= 239: active / inactive / n/a
+    "ntp synchronized": "NTPSynchronized",  # systemd <= 235 (EL7)
+    "system clock synchronized": "NTPSynchronized",  # systemd >= 236
+}
+CHRONY_FIELDS = {
+    "reference id": "reference",
+    "stratum": "stratum",
+    "system time": "system_time",
+    "last offset": "last_offset",
+    "leap status": "leap_status",
+}
+
+
+def _chrony(text):
+    """`chronyc tracking` fields (a section since v0.10.0, bare lines before)."""
+    block = section(text, "CHRONYC")
+    if block:
+        code = re.search(r"(?m)^AIOPS_RC (\d+)$", block)
+        if code and code[1] != "0":
+            return {}
+    fields = {}
+    for line in (block or text).splitlines():
+        label, sep, value = line.partition(":")
+        key = CHRONY_FIELDS.get(label.strip().lower())
+        if sep and key and key not in fields:
+            fields[key] = value.strip()[:80]
+    if "leap_status" not in fields:
+        return {}
+    if "stratum" in fields:
+        fields["stratum"] = (
+            int(fields["stratum"]) if fields["stratum"].isdigit() else None
+        )
+    return fields
+
+
 def time_sync(text, summary, findings):
-    summary["properties"] = dict(
+    props = dict(
         re.findall(r"(?m)^(Timezone|LocalRTC|NTP|NTPSynchronized)=(.*)$", text)
     )
-    if summary["properties"].get("NTPSynchronized") == "no":
+    source = "timedatectl show" if "NTPSynchronized" in props else None
+    # systemd < 239: the script falls back to `timedatectl status`.
+    for line in section(text, "TIMEDATECTL_STATUS").splitlines():
+        label, sep, value = line.partition(":")
+        key = TIMEDATECTL_STATUS.get(label.strip().lower())
+        if not sep or not key or key in props:
+            continue
+        value = value.strip()
+        if key == "Timezone":
+            value = value.split(" ")[0]  # "Asia/Shanghai (CST, +0800)"
+        elif key == "NTP":
+            value = {"active": "yes", "inactive": "no"}.get(value, value)
+        props[key] = value[:80]
+        if key == "NTPSynchronized" and source is None:
+            source = "timedatectl status"
+    chrony = _chrony(text)
+    ntpstat = None
+    block = section(text, "NTPSTAT")
+    code = re.search(r"(?m)^AIOPS_RC (\d+)$", block)
+    if code:
+        lines = [l.strip() for l in block[: code.start()].splitlines() if l.strip()]
+        ntpstat = {"exit_code": int(code[1]), "state": lines[0][:160] if lines else ""}
+    # Without timedatectl, chronyc then ntpstat (0 synchronised, 1 not, 2
+    # cannot tell) say whether the clock is synchronised.
+    if "NTPSynchronized" not in props:
+        if chrony:
+            unsynced = chrony["leap_status"].lower().startswith("not synchron")
+            props["NTPSynchronized"] = "no" if unsynced else "yes"
+            source = "chronyc tracking"
+        elif ntpstat and ntpstat["exit_code"] in (0, 1):
+            props["NTPSynchronized"] = "yes" if ntpstat["exit_code"] == 0 else "no"
+            source = "ntpstat"
+    summary["properties"] = props
+    summary["sync_source"] = source
+    if chrony:
+        summary["chrony"] = chrony
+    if ntpstat:
+        summary["ntpstat"] = ntpstat
+    summary["coverage"] = (
+        f"同步状态来自 {source}；单次查询"
+        if source
+        else "没有取得同步状态（timedatectl、chronyc、ntpstat 均不可用或失败）"
+    )
+    if props.get("NTPSynchronized") == "no":
         findings.append(
             {
                 "level": "warning",
                 "metric": "NTPSynchronized",
                 "value": "no",
                 "threshold": "yes",
-                "hint": "核查 NTP 服务与时间源可达性，单次查询不能量化时钟偏差",
+                "hint": f"{source} 报告时钟未同步：核查 NTP 服务与时间源可达性，单次查询不能量化时钟偏差",
             }
         )
 
@@ -789,6 +924,18 @@ def containers(text, summary, findings):
                         "hint": "核查容器退出原因和应用日志，停止状态也可能是计划操作",
                     }
                 )
+            elif "(unhealthy)" in f[3]:
+                # Running, but its own HEALTHCHECK fails ("Up 2 hours (unhealthy)").
+                findings.append(
+                    {
+                        "level": "warning",
+                        "metric": "container_state",
+                        "value": f[1] + ": " + f[3],
+                        "threshold": "healthy",
+                        "hint": "容器在运行但健康检查失败：进程存活不代表服务可用；"
+                        "核查应用日志、依赖与健康检查命令（本工具不执行 inspect）",
+                    }
+                )
         elif len(f) >= 6:
             rows.append(
                 {
@@ -876,6 +1023,8 @@ def analyze(
         summary["analysis"] = data
     missing = sorted(set(re.findall(r"CAPABILITY_MISSING:([\w-]+)", text)))
     if missing or status != "success" or truncated:
+        if action in PARSERS:
+            unknown_counts(summary)
         findings.append(
             {
                 "level": "info",

@@ -41,6 +41,34 @@ WEB_BIND_IP=你的服务器可信内网IP
 
 然后运行 `docker compose up -d`。只绑定指定网卡并用防火墙/ACL 限制来源。HTTP 只允许隔离内网联调；生产应放到具备 HTTPS、认证和访问控制的反向代理后。
 
+### HTTPS 反向代理
+
+Web 的写操作（以及带 `Origin` 的浏览器 MCP 请求）要求浏览器的 `Origin` 就是本服务自己的来源。服务默认只按请求本身的协议与 `Host` 判断；HTTPS 代理把请求以 HTTP 转给容器时，二者对不上，所有保存、删除等操作都会返回 403“请求来源不受信任”。v0.10.0 起在仓库目录的 `.env` 写明代理的地址，服务才采信该代理转发的 `X-Forwarded-Proto` 与 `X-Forwarded-Host`：
+
+```dotenv
+# 逗号分隔的 IP 或网段：容器看到的代理连接来源。经 Compose 端口映射时
+# 通常是项目网络的网关（见下），也可以写 Docker 私有网段 172.16.0.0/12。
+SSHMCP_TRUSTED_PROXIES=172.18.0.1
+```
+
+查询项目网络网关：`docker network inspect standalone-ssh-mcp_default --format '{{(index .IPAM.Config 0).Gateway}}'`。修改后 `docker compose up -d` 生效。不设置（默认）时行为与以前相同；只写自己控制的代理地址，不要写 `0.0.0.0/0`，否则任何能直连 9099 的人都可以伪造这两个请求头。
+
+代理需要转发浏览器使用的协议与主机名（含端口），读超时长于 MCP 调用方的超时（调用方断开后服务端会取消仍在等待的诊断）。nginx 示例（证书等其余配置略）：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:9099;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $http_host;
+    proxy_read_timeout 180s;
+}
+```
+
+这里用 `$http_host`（浏览器请求头中的主机名与端口），不用 `$host`：`$host` 不含端口，代理监听 443 以外的端口（如 `https://ssh.example.com:8443`）时，转发的来源与浏览器的 `Origin` 对不上，写操作仍返回 403。
+
+`/setup` 中的“访问协议”与“Web 外部地址”填浏览器实际访问的 `https` 与域名，与飞书回调地址一致。
+
 ## 四、Web 配置顺序
 
 1. 首次访问 /setup，填写一次性 Token、飞书应用 App ID、App Secret、管理员 Open ID、Web 外部地址，并在飞书开放平台登记对应 /api/v1/auth/callback 回调地址；保存后使用飞书登录。

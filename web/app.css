@@ -566,14 +566,11 @@ button.capability {
   font-size: 12px;
   color: var(--text-2);
 }
-.readiness-button {
-  padding: 0;
-  border: 0;
-  background: none;
-  cursor: pointer;
-}
-.readiness-button:hover .status {
-  box-shadow: 0 0 0 2px currentColor;
+.readiness-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
 }
 .host-drawer {
   position: fixed;

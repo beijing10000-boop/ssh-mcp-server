@@ -272,13 +272,14 @@ def _add_columns(c, table: str, columns: dict[str, str]):
 
 
 @contextmanager
-def db():
-    c = sqlite3.connect(str(DATA_DIR / "ssh-mcp.sqlite3"), timeout=10)
+def db(timeout=10):
+    """A connection that waits up to ``timeout`` seconds for a locked database."""
+    c = sqlite3.connect(str(DATA_DIR / "ssh-mcp.sqlite3"), timeout=timeout)
     (DATA_DIR / "ssh-mcp.sqlite3").chmod(0o600)
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA journal_mode=WAL")
     c.execute("PRAGMA foreign_keys=ON")
-    c.execute("PRAGMA busy_timeout=10000")
+    c.execute(f"PRAGMA busy_timeout={int(timeout * 1000)}")
     try:
         yield c
         c.commit()
