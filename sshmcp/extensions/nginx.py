@@ -269,10 +269,12 @@ END {
 # SEGMENTS is the number of '"'-separated segments of a line in that format
 # and RT / UT locate $request_time / $upstream_response_time (layout()):
 # "SEG BEFORE AFTER PREFIX SUFFIX". SEG 0: not in the format; -1: not
-# locatable. BEFORE / AFTER count the space-separated tokens around the
-# variable in its segment, -1 when one of them may hold spaces itself
-# ($time_local, $request, headers, upstream lists); PREFIX / SUFFIX are the
-# lengths of literal text glued to it ("rt=$request_time" -> 3).
+# locatable. BEFORE / AFTER describe the space-separated tokens around the
+# variable in its segment: their number when each has a fixed width, a code
+# of P (one fixed-width token) and L (an upstream list such as $upstream_addr,
+# "a, b : c" when logged) when lists are among them, -1 when one may be empty
+# or hold spaces ($time_local, $request, $uri, $host, headers); PREFIX /
+# SUFFIX are the lengths of literal text glued to it ("rt=$request_time" -> 3).
 # Single quotes never appear here (the program sits in '...'): sprintf("%c", 39).
 ALOG_AWK = r"""
 function args(s,    n, i, c, q, cur, have, len) {
@@ -317,7 +319,33 @@ function plain(t,    v) {
     }
     return 1
 }
-function layout(f, v,    p, w, s, k, i, c, q, a, b, pre, post, px, sx, nb, na, tb, ta, j) {
+# A format token: "P" when its width is fixed (literal text, single-value
+# variables), "L" for one upstream list variable with literal text around
+# it, "" when it may be empty or hold spaces.
+function unit(t,    v, n) {
+    if (plain(t)) return "P"
+    n = 0
+    while (match(t, /[$][{]?[A-Za-z0-9_]+/)) {
+        v = substr(t, RSTART + 1, RLENGTH - 1)
+        sub(/^[{]/, "", v)
+        if (!(v in list) || ++n > 1) return ""
+        t = substr(t, RSTART + RLENGTH)
+    }
+    return "L"
+}
+# The tokens t[1..n] on one side of a variable: their number when all have a
+# fixed width, a code of P and L when upstream lists are among them, else -1.
+function side(t, n,    j, k, c, lists) {
+    c = ""
+    for (j = 1; j <= n; j++) {
+        k = unit(t[j])
+        if (k == "") return -1
+        if (k == "L") lists = 1
+        c = c k
+    }
+    return lists ? c : n
+}
+function layout(f, v,    p, w, s, k, i, c, q, a, b, pre, post, px, sx, nb, na, tb, ta, cb, ca) {
     w = length(v) + 3
     p = index(f, "${" v "}")
     if (!p) {
@@ -346,10 +374,19 @@ function layout(f, v,    p, w, s, k, i, c, q, a, b, pre, post, px, sx, nb, na, t
     if (index(px sx, "$")) return "-1 0 0 0 0"
     nb = split(pre, tb, " ")
     na = split(post, ta, " ")
-    for (j = 1; j <= nb; j++) if (!plain(tb[j])) { nb = -1; break }
-    for (j = 1; j <= na; j++) if (!plain(ta[j])) { na = -1; break }
-    if (nb < 0 && na < 0) return "-1 0 0 0 0"
-    return (q + 1) " " nb " " na " " length(px) " " length(sx)
+    cb = side(tb, nb)
+    ca = side(ta, na)
+    # A list is walked to where an element has no trailing "," and no ":"
+    # token follows; literal "," or ":" in the segment would blur that.
+    s = " " pre " " px "X" sx " " post " "
+    gsub(/\t/, " ", s)
+    if (index(s, ", ") || index(s, " : ")) {
+        if (cb ~ /[PL]/) cb = -1
+        if (ca ~ /[PL]/) ca = -1
+        if ((v in list) && (cb == -1 || ca == -1)) return "-1 0 0 0 0"
+    }
+    if (cb == -1 && ca == -1) return "-1 0 0 0 0"
+    return (q + 1) " " cb " " ca " " length(px) " " length(sx)
 }
 function addfmt(n,    i, f) {
     if (n < 2) return
@@ -380,14 +417,22 @@ function directive(    n) {
 }
 BEGIN {
     sq = sprintf("%c", 39)
-    names = "remote_addr remote_port remote_user server_addr server_port server_name host"
-    names = names " hostname status body_bytes_sent bytes_sent request_length request_time"
-    names = names " msec time_iso8601 connection connection_requests pipe scheme https"
-    names = names " request_method request_uri uri document_uri args query_string"
-    names = names " server_protocol pid gzip_ratio request_id ssl_protocol ssl_cipher"
-    names = names " upstream_cache_status"
+    # Always exactly one token. Not here: values that can be empty or hold
+    # spaces ($host, $server_name, $https, $remote_user, the decoded $uri,
+    # $args, headers).
+    names = "remote_addr remote_port server_addr server_port hostname status"
+    names = names " body_bytes_sent bytes_sent request_length request_time msec"
+    names = names " time_iso8601 connection connection_requests pipe scheme"
+    names = names " request_method request_uri server_protocol pid gzip_ratio"
+    names = names " request_id ssl_protocol ssl_cipher upstream_cache_status"
     count = split(names, single, " ")
     for (i = 1; i <= count; i++) one[single[i]] = 1
+    # One value per upstream tried: "a, b : c" (one token "-" when unused).
+    names = "upstream_addr upstream_status upstream_response_time upstream_connect_time"
+    names = names " upstream_header_time upstream_response_length upstream_bytes_received"
+    names = names " upstream_bytes_sent upstream_queue_time"
+    count = split(names, multi, " ")
+    for (i = 1; i <= count; i++) list[multi[i]] = 1
 }
 pending {
     text = text "\n" $0
@@ -471,25 +516,65 @@ function lastnum(src_,    cnt_, parts_, idx_, val_) {
     for (idx_ = 1; idx_ <= cnt_; idx_++) if (parts_[idx_] ~ /^[0-9]+[.]?[0-9]*$/) val_ = parts_[idx_]
     return val_
 }
+# An upstream list in wt[1..wn] ("0.010, 0.050 : 0.020"; "-" when unused):
+# the index of the last token of the one starting at i_ (d_ = 1), or of the
+# first token of the one ending at i_ (d_ = -1). An element with a trailing
+# "," or followed by a ":" token continues the list.
+function lend(i_, d_) {
+    while (1) {
+        if (d_ > 0) {
+            if (i_ < wn && wt[i_] ~ /,$/) i_++
+            else if (i_ + 1 < wn && wt[i_ + 1] == ":") i_ += 2
+            else return i_
+        } else if (i_ > 1 && wt[i_ - 1] ~ /,$/) i_--
+        else if (i_ > 2 && wt[i_ - 1] == ":") i_ -= 2
+        else return i_
+    }
+}
+# The index of the first token of a value past the tokens before it (side
+# code_ of a layout, d_ = 1), or of its last token before the tokens after it
+# (d_ = -1); 0 when the line is too short. A side is a count of fixed-width
+# tokens or a code of P (one token) and L (an upstream list).
+function past(code_, d_,    i_, k_, n_) {
+    if (code_ ~ /^[0-9]+$/) i_ = (d_ > 0) ? code_ + 1 : wn - code_
+    else if (code_ ~ /^[PL]+$/) {
+        n_ = length(code_)
+        i_ = (d_ > 0) ? 1 : wn
+        k_ = (d_ > 0) ? 1 : n_
+        for (; k_ >= 1 && k_ <= n_; k_ += d_) {
+            if (i_ < 1 || i_ > wn) return 0
+            if (substr(code_, k_, 1) == "L") i_ = lend(i_, d_)
+            i_ += d_
+        }
+    } else return 0
+    return (i_ >= 1 && i_ <= wn) ? i_ : 0
+}
 # The value at a log_format position (layout() of ALOG_AWK) in the line split
-# at double quotes into q[1..nq]: segment s_, counted from its start (b_
-# tokens before) or its end (a_ tokens after), less p_ / x_ literal characters
-# around it. A value that may span tokens (multi_: upstream lists) needs both.
-function pick(s_, b_, a_, p_, x_, multi_,    cnt_, tok_, lo_, hi_, v_, i_) {
+# at double quotes into q[1..nq]: in segment s_, past the tokens before it
+# (b_) or after it (a_), less p_ / x_ literal characters around it. One token
+# is found from either side (a count rather than a walk over lists); an
+# upstream list (multi_) between both, or walked from the side that is known.
+function pick(s_, b_, a_, p_, x_, multi_,    lo_, hi_, v_, i_) {
     if (s_ < 1 || s_ > nq) return ""
-    cnt_ = split(q[s_], tok_, " ")
-    if (b_ >= 0 && (!multi_ || a_ >= 0)) {
-        lo_ = b_ + 1
-        hi_ = multi_ ? cnt_ - a_ : lo_
-    } else if (a_ >= 0 && !multi_) {
-        lo_ = cnt_ - a_
-        hi_ = lo_
-    } else return ""
-    if (lo_ < 1 || hi_ > cnt_ || lo_ > hi_) return ""
-    v_ = tok_[lo_]
-    for (i_ = lo_ + 1; i_ <= hi_; i_++) v_ = v_ " " tok_[i_]
+    wn = split(q[s_], wt, " ")
+    lo_ = past(b_, 1)
+    hi_ = past(a_, -1)
+    if (!multi_) {
+        if (lo_ && !(hi_ && b_ !~ /^[0-9]+$/ && a_ ~ /^[0-9]+$/)) hi_ = lo_
+        else lo_ = hi_
+    } else if (!hi_) hi_ = lo_ ? lend(lo_, 1) : 0
+    else if (!lo_) lo_ = lend(hi_, -1)
+    if (lo_ < 1 || hi_ < lo_) return ""
+    v_ = wt[lo_]
+    for (i_ = lo_ + 1; i_ <= hi_; i_++) v_ = v_ " " wt[i_]
     if (length(v_) <= p_ + x_) return ""
     return substr(v_, p_ + 1, length(v_) - p_ - x_)
+}
+# Upstream times as logged: "0.010, 0.050 : 0.020", "-".
+function times(v_,    n_, t_, i_) {
+    n_ = split(v_, t_, " ")
+    for (i_ = 1; i_ <= n_; i_++) if (t_[i_] !~ /^([0-9]+[.][0-9]+,?|:|-,?)$/) return 0
+    return n_ > 0
 }
 BEGIN {
     split("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec", mn, " ")
@@ -509,8 +594,8 @@ substr($0, 1, 8) == "\001AIOPS_L" {
     lk = (split(substr($0, 10), lv, " ") == 12 && lv[1] == "K")
     if (lk) {
         lq = lv[2] + 0
-        rseg = lv[3] + 0; rbef = lv[4] + 0; raft = lv[5] + 0; rpre = lv[6] + 0; rsuf = lv[7] + 0
-        useg = lv[8] + 0; ubef = lv[9] + 0; uaft = lv[10] + 0; upre = lv[11] + 0; usuf = lv[12] + 0
+        rseg = lv[3] + 0; rbef = lv[4]; raft = lv[5]; rpre = lv[6] + 0; rsuf = lv[7] + 0
+        useg = lv[8] + 0; ubef = lv[9]; uaft = lv[10]; upre = lv[11] + 0; usuf = lv[12] + 0
     }
     next
 }
@@ -524,6 +609,7 @@ substr($0, 1, 1) == "\001" { next }
     rt = ""
     ut = ""
     how = ""
+    uhow = ""
     nou = 0
     ip = "-"
     uri = "-"
@@ -540,6 +626,7 @@ substr($0, 1, 1) == "\001" { next }
         if (index($0, "\"upstream_response_time\":")) {
             ut = lastnum(jv($0, "upstream_response_time"))
             if (ut == "") nou = 1
+            uhow = "k"
         }
         ip = jv($0, "remote_addr")
         uri = jv($0, "request_uri")
@@ -563,53 +650,70 @@ substr($0, 1, 1) == "\001" { next }
         m = split(q[2], rq, " ")
         uri = (m >= 2) ? rq[2] : q[2]
         if (n >= 6) ua = q[6]
-        if (lk && n == lq && rseg >= 0) {
+        if (lk && n == lq) {
             # The log_format of the file is known and the line has its shape.
             if (rseg == 0) how = "n"
-            else {
+            else if (rseg > 0) {
                 v = pick(rseg, rbef, raft, rpre, rsuf, 0)
                 if (v ~ /^[0-9]+[.][0-9]+$/) {
                     rt = v
                     how = "f"
                 }
             }
-            if (useg > 0) {
+            if (useg == 0) uhow = "n"
+            else if (useg > 0) {
                 v = pick(useg, ubef, uaft, upre, usuf, 1)
-                if (v != "") {
+                if (times(v)) {
                     ut = lastnum(v)
                     if (ut == "") nou = 1
+                    uhow = "f"
                 }
             }
-        } else {
+        }
+        if (how == "" || uhow == "") {
+            # No layout, a line not in it, or no value where the layout puts
+            # one: named fields (rt=, urt=), else the first decimal number
+            # after the user agent and the upstream times right after it.
+            # Each value keeps the mark of where it came from.
             rest = ""
             for (i = 7; i <= n; i++) rest = rest " " q[i]
+            grt = ""
+            gut = ""
+            gnou = 0
+            gk = "k"
             if (match(rest, /[ \t](rt|request_time)=[0-9]+[.][0-9]+/)) {
                 v = substr(rest, RSTART, RLENGTH)
                 sub(/^[ \t]*[a-z_]+=/, "", v)
-                rt = v
-                how = "k"
+                grt = v
                 if (match(rest, /(urt|upstream_response_time)=[ \t]*[0-9.,: -]+/)) {
                     v = substr(rest, RSTART, RLENGTH)
                     sub(/^[a-z_]+=/, "", v)
-                    ut = lastnum(v)
-                    if (ut == "") nou = 1
+                    gut = lastnum(v)
+                    if (gut == "") gnou = 1
                 }
             } else {
-                # Unknown format (or a line not in it): the first decimal
-                # number after the user agent, marked as a guess.
+                gk = "g"
                 m = split(rest, tok, " ")
                 for (i = 1; i <= m; i++) {
                     if (tok[i] !~ /^[0-9]+[.][0-9]+$/) continue
-                    rt = tok[i]
-                    how = "g"
-                    if (i < m && tok[i + 1] == "-") nou = 1
+                    grt = tok[i]
+                    if (i < m && tok[i + 1] == "-") gnou = 1
                     else {
                         v = ""
                         for (j = i + 1; j <= m && tok[j] ~ /^([0-9]+[.][0-9]+,?|:|-,?)$/; j++) v = v " " tok[j]
-                        ut = lastnum(v)
+                        gut = lastnum(v)
                     }
                     break
                 }
+            }
+            if (how == "" && grt != "") {
+                rt = grt
+                how = gk
+            }
+            if (uhow == "" && (gut != "" || gnou)) {
+                ut = gut
+                nou = gnou
+                uhow = gk
             }
         }
     }
@@ -654,6 +758,10 @@ substr($0, 1, 1) == "\001" { next }
         if (v > 3) u3++
     }
     if (nou) nn++
+    if (uhow == "f") usf++
+    else if (uhow == "k") usk++
+    else if (uhow == "g") usg++
+    else if (uhow == "n") usn++
     if (sel == "all" || st == sel || (substr(sel, 2) == "xx" && cl == substr(sel, 1, 1) "xx")) {
         selc++
         x = uri
@@ -688,6 +796,9 @@ END {
     print "REQ_SOURCE", rsf + 0, rsk + 0, rsg + 0, rsn + 0
     if (uc) printf "UPS %d %.3f %.3f %d %d\n", uc, us / uc, umax, u1, u3
     else print "UNAVAILABLE upstream_time"
+    # The same for upstream_response_time (a number or "-" found), and the
+    # requests whose known log_format has no $upstream_response_time.
+    print "UPS_SOURCE", usf + 0, usk + 0, usg + 0, usn + 0
     print "NOUPSTREAM", nn + 0
     for (i = (ns > 10 ? ns - 10 : 0); i < ns; i++) print "SAMPLE", i, smp[i % 10]
     first = ""
@@ -1162,7 +1273,7 @@ printf '[AIOPS_MINUTES]\n'
 printf 'BUCKET %s\n' "$bucket"
 printf '%s\n' "$agg" | grep '^MINUTE ' | sort -k2,2 | tail -n 120
 printf '[AIOPS_TIMING]\n'
-printf '%s\n' "$agg" | grep -E '^(REQ|REQ_SOURCE|UPS|NOUPSTREAM|UNAVAILABLE) '
+printf '%s\n' "$agg" | grep -E '^(REQ|REQ_SOURCE|UPS|UPS_SOURCE|NOUPSTREAM|UNAVAILABLE) '
 printf '[AIOPS_SAMPLES]\n'
 printf '%s\n' "$agg" | grep '^SAMPLE ' | sort -k2,2n | tail -n 10 | cut -c1-260
 exit 0
@@ -2063,17 +2174,23 @@ def _timing(text: str) -> dict:
         "upstream_time": None,
         "no_upstream": None,
         "request_time_source": None,
+        "upstream_time_source": None,
+    }
+    sources = {
+        "REQ_SOURCE": "request_time_source",
+        "UPS_SOURCE": "upstream_time_source",
     }
     for line in _lines(text, "TIMING"):
         fields = line.split()
-        if fields[:1] == ["REQ_SOURCE"] and len(fields) == 5:
+        if fields[:1] and fields[0] in sources and len(fields) == 5:
             counts = [_int(v) for v in fields[1:]]
             if None not in counts:
-                # Requests in the window by how request_time was found: the
+                # Requests in the window by how the value was found: the
                 # access log's configured log_format, a named field (JSON key,
-                # rt=), a positional guess (format unknown or the line not in
-                # it), or none (the known format has no $request_time).
-                timing["request_time_source"] = dict(zip(REQUEST_TIME_SOURCES, counts))
+                # rt=, urt=), a positional guess (format unknown, the line not
+                # in it, or no value where the format puts one), or none (the
+                # known format does not have the variable).
+                timing[sources[fields[0]]] = dict(zip(REQUEST_TIME_SOURCES, counts))
         elif fields[:1] == ["REQ"] and len(fields) == 7:
             values = [observations.number(v) for v in fields[1:]]
             if None not in values:
@@ -2254,8 +2371,16 @@ def parse_access(text, summary, findings, options) -> None:
         }
     )
     rotated = any(f["rotated"] for f in files["files"])
-    sources = timing["request_time_source"] or {}
-    guessed = sources.get("heuristic") or 0
+    guessed = (timing["request_time_source"] or {}).get("heuristic") or 0
+    up_guessed = (timing["upstream_time_source"] or {}).get("heuristic") or 0
+    guesses = "、".join(
+        f"{count} 条请求的 {name}"
+        for name, count in (
+            ("request_time", guessed),
+            ("upstream_response_time", up_guessed),
+        )
+        if count
+    )
     summary["coverage"] = (
         "只读每个访问日志尾部约 30 MB"
         + ("，并读取了未压缩轮转文件尾部 10 MB" if rotated else "，未读取轮转文件")
@@ -2265,10 +2390,10 @@ def parse_access(text, summary, findings, options) -> None:
         "总量、状态码、分钟趋势与耗时统计覆盖窗口内全部请求（keyword 先行过滤）；"
         "无法识别的日志格式计入 unparsed_lines"
         + (
-            f"；{guessed} 条请求的 request_time 是按位置推测的（未取得该日志的 log_format，"
-            "或该行与 log_format 不符），可能误读 $gzip_ratio、$msec 等其他数值字段，"
-            "见 timing.request_time_source"
-            if guessed
+            f"；{guesses} 是按位置推测的（未取得该日志的 log_format、该行与 log_format 不符，"
+            "或 log_format 所指的位置不是耗时），可能误读 $gzip_ratio、$msec 等其他数值字段，"
+            "见 timing.request_time_source 与 upstream_time_source"
+            if guesses
             else ""
         )
     )
@@ -2388,7 +2513,12 @@ def parse_access(text, summary, findings, options) -> None:
                 "metric": "upstream_time_max",
                 "value": upstream_time["max"],
                 "threshold": 10,
-                "hint": "上游最长响应 ≥10 秒（经验阈值）：检查后端慢接口、proxy_read_timeout 以及是否接近超时被切断",
+                "hint": "上游最长响应 ≥10 秒（经验阈值）：检查后端慢接口、proxy_read_timeout 以及是否接近超时被切断"
+                + (
+                    "；部分上游耗时是按位置推测的（见 timing.upstream_time_source），先核对 log_format"
+                    if up_guessed
+                    else ""
+                ),
             }
         )
     since = (window or {}).get("since_local")
@@ -2491,7 +2621,8 @@ register(
             "只读取每个访问日志尾部约 30 MB（窗口跨轮转时另读未压缩轮转文件尾部 10 MB），超大日志可能覆盖不到整个窗口。",
             "path 只接受 nginx 配置中的 access_log、标准 Nginx 日志目录，或 /data|/opt|/home|/srv|/app 下的 */logs/*access*.log；符号链接按真实路径再校验。",
             "request_time 与 upstream_response_time 按 nginx -T（或配置文件）中该日志的 log_format 定位；"
-            "格式未知或某行与格式不符时退回按位置推测，timing.request_time_source 按来源计数。",
+            "格式未知、某行与格式不符或该位置不是耗时时退回按位置推测，"
+            "timing.request_time_source 与 upstream_time_source 按来源计数。",
         ),
     )
 )

@@ -861,6 +861,7 @@ MINUTE 202610292358 1 0
 REQ 44 6.168 60.001 12 12 4
 REQ_SOURCE 32 11 1 0
 UPS 28 9.034 60.000 8 8
+UPS_SOURCE 32 11 1 0
 NOUPSTREAM 16
 [AIOPS_SAMPLES]
 SAMPLE 0 10.1.0.3 - - [29/Oct/2026:23:30:45 +0000] "GET /api/v1/orders?id=8 HTTP/1.1" 502 157 "-" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36" 0.002 0.001
@@ -1100,7 +1101,8 @@ def test_scripts_are_read_only_bounded_and_portable():
             )
             assert calls == [")"] * program.count("match(")
             # Scalars only (length(array) is not POSIX): ALOG_AWK measures the
-            # config text and format strings, ACCESS_AWK a picked value.
+            # config text and format strings, ACCESS_AWK a picked value and
+            # the P/L code of a layout side.
             assert set(re.findall(r"length\(([^)]*)\)", program)) <= {
                 "$3",
                 "name_",
@@ -1111,6 +1113,7 @@ def test_scripts_are_read_only_bounded_and_portable():
                 "px",
                 "sx",
                 "v_",
+                "code_",
             }
 
 
@@ -1438,6 +1441,13 @@ def test_access_parser_reads_the_real_script_output():
         # JSON lines name it, and the one line with an extra quoted field
         # (not in the format) is guessed.
         "request_time_source": {
+            "log_format": 32,
+            "field_name": 11,
+            "heuristic": 1,
+            "not_in_log_format": 0,
+        },
+        # The same lines for upstream_response_time (a time or "-").
+        "upstream_time_source": {
             "log_format": 32,
             "field_name": 11,
             "heuristic": 1,

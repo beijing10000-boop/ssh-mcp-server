@@ -748,7 +748,7 @@ def ssh_diagnose_nginx_access(
     top: Annotated[int, Field(ge=5, le=30, description="TOP 条数")] = 10,
     expected_revision: Revision = None,
 ) -> dict:
-    """在远端用 awk 聚合 Nginx 访问日志：时间窗口（minutes，或 since/until Unix 秒，最长 24 小时）内的请求总数、状态码分布（2xx/3xx/4xx/5xx 与具体码）、错误请求 TOP URL / 客户端 IP / User-Agent、每分钟请求与 5xx 趋势、request_time 与 upstream_response_time 统计（日志格式含这些字段时；按该日志在 nginx 配置中的 log_format 定位，格式未知时按位置推测并在 timing.request_time_source 标明）。只读取文件尾部有限字节，不返回整份日志；窗口被轮转文件切断时说明覆盖范围。"""
+    """在远端用 awk 聚合 Nginx 访问日志：时间窗口（minutes，或 since/until Unix 秒，最长 24 小时）内的请求总数、状态码分布（2xx/3xx/4xx/5xx 与具体码）、错误请求 TOP URL / 客户端 IP / User-Agent、每分钟请求与 5xx 趋势、request_time 与 upstream_response_time 统计（日志格式含这些字段时；按该日志在 nginx 配置中的 log_format 定位，格式未知时按位置推测并在 timing.request_time_source、upstream_time_source 标明）。只读取文件尾部有限字节，不返回整份日志；窗口被轮转文件切断时说明覆盖范围。"""
     return _run(
         host_id,
         "nginx_access",

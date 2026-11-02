@@ -425,13 +425,14 @@ http {
 }
 """
 LAYOUTS = [
-    "/var/log/nginx/main.log K 7 7 0 -1 0 0 7 1 0 0 0",
-    "/var/log/nginx/up.log K 7 7 -1 0 0 0 7 0 1 0 0",
+    # "L": the upstream list next to it, walked at its "," and ":" separators.
+    "/var/log/nginx/main.log K 7 7 0 L 0 0 7 1 0 0 0",
+    "/var/log/nginx/up.log K 7 7 L 0 0 0 7 0 1 0 0",
     "/var/log/nginx/gz.log K 9 0 0 0 0 0 0 0 0 0 0",
     "/var/log/nginx/timed.log K 3 3 2 0 3 1 0 0 0 0 0",
     "/var/log/nginx/json.log U",
     "/var/log/nginx/default.log K 7 0 0 0 0 0 0 0 0 0 0",
-    "/usr/share/nginx/logs/rel.log K 7 7 0 -1 0 0 7 1 0 0 0",
+    "/usr/share/nginx/logs/rel.log K 7 7 0 L 0 0 7 1 0 0 0",
     "/var/log/nginx/nofmt.log U",
 ]
 
@@ -494,6 +495,7 @@ def test_request_time_is_read_at_its_log_format_position():
         assert "REQ 2 0.150 0.250 0 0 0" in out, (command, out)
         assert "UPS 1 0.020 0.020 0 0" in out, (command, out)
         assert "REQ_SOURCE 2 0 0 1" in out, (command, out)
+        assert "UPS_SOURCE 1 0 0 2" in out, (command, out)
 
 
 def test_request_time_is_guessed_and_counted_without_a_layout():
@@ -931,3 +933,198 @@ def test_readiness_badge_is_not_an_action():
     step = script.split("function prepareStep(h)", 1)[1].split("\n}\n", 1)[0]
     assert 'data-action="prepare-host"' in step
     assert "title=" in step and "aria-label=" in step and "下一步：" in step
+
+
+# ===================== Review of the P2 branch (findings of the follow-up) ==
+# ------- SSH-NGX-06 follow-up: upstream time next to lists, values that may
+# ------- be empty or hold spaces, no silent drop (review: ngx_cases*.py, drop.in)
+
+REVIEW_DUMP = r"""http {
+    log_format cn_main '$remote_addr - $remote_user [$time_local] "$request" '
+                       '$status $body_bytes_sent "$http_referer" '
+                       '"$http_user_agent" "$http_x_forwarded_for" '
+                       '$upstream_addr $upstream_response_time $request_time';
+    log_format rt_ut_addr '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent '
+                          '"$http_referer" "$http_user_agent" "$http_x_forwarded_for" '
+                          '$request_time $upstream_response_time $upstream_addr $upstream_status';
+    log_format utfirst '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent '
+                       '"$http_referer" "$http_user_agent" $upstream_response_time $request_time $upstream_addr';
+    log_format uri_mid '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent '
+                       '"$http_referer" "$http_user_agent" $request_time $uri $upstream_response_time';
+    log_format sn '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent '
+                  '"$http_referer" "$http_user_agent" $server_name $request_time $upstream_response_time';
+    log_format um '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent '
+                  '"$http_referer" "$http_user_agent" $uri $request_time $upstream_response_time';
+    log_format https_rt '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent '
+                        '"$http_referer" "$http_user_agent" $https $request_time';
+    log_format host_both '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent '
+                         '"$http_referer" "$http_user_agent" $host $request_time $upstream_response_time $uri';
+    access_log /l/cn_main.log cn_main;
+    access_log /l/rt_ut_addr.log rt_ut_addr;
+    access_log /l/utfirst.log utfirst;
+    access_log /l/uri_mid.log uri_mid;
+    access_log /l/sn.log sn;
+    access_log /l/um.log um;
+    access_log /l/https_rt.log https_rt;
+    access_log /l/host_both.log host_both;
+}
+"""
+REVIEW_LAYOUTS = {
+    # $upstream_addr is a list: walked, not "unknown width".
+    "/l/cn_main.log": "K 9 9 LL 0 0 0 9 L 1 0 0",
+    "/l/rt_ut_addr.log": "K 9 9 0 LLL 0 0 9 1 LL 0 0",
+    "/l/utfirst.log": "K 7 7 L L 0 0 7 0 PL 0 0",
+    # $uri, $server_name and $https may be empty or hold spaces: never counted.
+    "/l/uri_mid.log": "K 7 7 0 -1 0 0 7 -1 0 0 0",
+    "/l/sn.log": "K 7 7 -1 L 0 0 7 -1 0 0 0",
+    "/l/um.log": "K 7 7 -1 L 0 0 7 -1 0 0 0",
+    "/l/https_rt.log": "K 7 7 -1 0 0 0 0 0 0 0 0",
+    "/l/host_both.log": "K 7 -1 0 0 0 0 -1 0 0 0 0",
+}
+REVIEW_UA = '"GET /a HTTP/1.1" 200 5 "-" "Mozilla/5.0 (X11)"'
+
+
+def review_timing(command, path, rest, layout=None):
+    """TIMING lines of one request of the file `path`, its log_format known."""
+    line = f"10.0.0.1 - - {CLF.format(0)} {REVIEW_UA}{rest}"
+    marker = ["\x01AIOPS_F " + path, "\x01AIOPS_L " + (layout or REVIEW_LAYOUTS[path])]
+    out = access_awk(marker + [line], command)
+    return {row for row in out if row.split(" ", 1)[0] in TIMING_TAGS}
+
+
+TIMING_TAGS = {"REQ", "UPS", "REQ_SOURCE", "UPS_SOURCE", "NOUPSTREAM", "UNAVAILABLE"}
+
+
+def timed(rt, ut, req_source="1 0 0 0", ups_source="1 0 0 0"):
+    rows = {f"REQ_SOURCE {req_source}", f"UPS_SOURCE {ups_source}"}
+    rows.add(f"REQ 1 {rt} {rt} 0 0 0" if rt else "UNAVAILABLE request_time")
+    if ut == "-":
+        rows |= {"UNAVAILABLE upstream_time", "NOUPSTREAM 1"}
+    else:
+        rows |= {f"UPS 1 {ut} {ut} 0 0" if ut else "UNAVAILABLE upstream_time"}
+        rows.add("NOUPSTREAM 0")
+    return rows
+
+
+def test_review_layouts_walk_upstream_lists_and_skip_unknown_widths():
+    for command in awk_commands() or pytest.skip("needs awk"):
+        result = run_awk(
+            command, nginx.ALOG_AWK, REVIEW_DUMP.encode(), "pfx=/usr/share/nginx"
+        )
+        assert result.returncode == 0, (command, result.stderr)
+        got = dict(line.split(" ", 1) for line in result.stdout.decode().splitlines())
+        assert got == REVIEW_LAYOUTS, command
+
+
+@pytest.mark.parametrize(
+    "path, rest, rt, ut",
+    [
+        # One upstream, two (", "), an internal redirect (" : "), none ("-").
+        ("/l/cn_main.log", ' "-" 10.0.0.9:8080 0.050 0.060', "0.060", "0.050"),
+        (
+            "/l/cn_main.log",
+            ' "-" 10.0.0.9:8080, 10.0.0.8:8080 0.010, 0.050 0.070',
+            "0.070",
+            "0.050",
+        ),
+        (
+            "/l/cn_main.log",
+            ' "-" 10.0.0.9:8080 : 10.0.0.8:8080 0.010 : 0.050 0.070',
+            "0.070",
+            "0.050",
+        ),
+        ("/l/cn_main.log", ' "-" - - 0.001', "0.001", "-"),
+        ("/l/rt_ut_addr.log", ' "-" 0.060 0.050 10.0.0.9:8080 200', "0.060", "0.050"),
+        (
+            "/l/rt_ut_addr.log",
+            ' "-" 0.060 0.010, 0.050 10.0.0.9:8080, 10.0.0.8:8080 502, 200',
+            "0.060",
+            "0.050",
+        ),
+        # The request time right after the upstream list is not swallowed.
+        (
+            "/l/utfirst.log",
+            " 0.010, 0.050 0.060 10.0.0.9:8080, 10.0.0.8:8080",
+            "0.060",
+            "0.050",
+        ),
+    ],
+)
+def test_upstream_time_is_read_next_to_upstream_lists(path, rest, rt, ut):
+    for command in awk_commands() or pytest.skip("needs awk"):
+        assert review_timing(command, path, rest) == timed(rt, ut), command
+
+
+@pytest.mark.parametrize(
+    "path, rest, rt, ut",
+    [
+        # $server_name of a default server is "" (no token at all).
+        ("/l/sn.log", "  0.060 0.050", "0.060", "0.050"),
+        ("/l/sn.log", " example.com 0.060 0.050", "0.060", "0.050"),
+        # $uri is decoded: /files/v%201.5 is logged as "/files/v 1.5".
+        ("/l/um.log", " /files/v 1.5 0.060 0.050", "0.060", "0.050"),
+        ("/l/uri_mid.log", " 0.060 /a b 0.050", "0.060", "0.050"),
+    ],
+)
+def test_values_that_may_be_empty_or_hold_spaces_are_not_counted(path, rest, rt, ut):
+    for command in awk_commands() or pytest.skip("needs awk"):
+        assert review_timing(command, path, rest) == timed(rt, ut), command
+
+
+def test_https_off_is_an_empty_value():
+    for command in awk_commands() or pytest.skip("needs awk"):
+        for value in ("", "on"):
+            got = review_timing(command, "/l/https_rt.log", f" {value} 0.060")
+            assert got == timed("0.060", None, ups_source="0 0 0 1"), (command, value)
+
+
+def test_no_time_where_the_layout_points_is_guessed_and_counted():
+    for command in awk_commands() or pytest.skip("needs awk"):
+        # The review's drop.in: a layout that counted $uri as one token put
+        # request_time on "b"; the request was then counted nowhere.
+        drop = review_timing(
+            command, "/l/um.log", " /a b 0.060 0.050", "K 7 7 1 -1 0 0 7 2 0 0 0"
+        )
+        assert drop == timed("0.060", "0.050", req_source="0 0 1 0"), command
+        # Neither side of either value is fixed: both are guessed, and say so.
+        both = review_timing(command, "/l/host_both.log", " example.com 0.060 0.050 /a")
+        assert both == timed("0.060", "0.050", "0 0 1 0", "0 0 1 0"), command
+        # A host:port where the layout expects upstream times is not a time
+        # (lastnum would have read 8080); the guess finds none after 0.060.
+        port = review_timing(
+            command, "/l/x.log", " 0.060 10.0.0.9:8080", "K 7 7 0 1 0 0 7 1 0 0 0"
+        )
+        assert port == timed("0.060", None, ups_source="0 0 0 0"), command
+
+
+def test_access_summary_names_guessed_upstream_times():
+    def report(ups_sources, max_time="12.000"):
+        return observations.analyze(
+            "nginx_access",
+            "[AIOPS_FILES]\nWINDOW 1793316600 1793318400 20261029233000 20261030000000\n"
+            "FILE /var/log/nginx/access.log 10 10\n"
+            "[AIOPS_TOTALS]\nLINES 40 0 0\nTOTAL 40\nCLASS 2xx 40\nSELECTED 40\n"
+            "[AIOPS_TIMING]\nREQ 40 0.100 0.200 0 0 0\nREQ_SOURCE 40 0 0 0\n"
+            f"UPS 40 1.000 {max_time} 1 1\nUPS_SOURCE {ups_sources}\nNOUPSTREAM 0\n",
+            options={},
+        )
+
+    exact = report("40 0 0 0")
+    assert exact["summary"]["timing"]["upstream_time_source"] == {
+        "log_format": 40,
+        "field_name": 0,
+        "heuristic": 0,
+        "not_in_log_format": 0,
+    }
+    assert "推测" not in exact["summary"]["coverage"]
+    assert "推测" not in by_metric(exact)["upstream_time_max"]["hint"]
+    guessed = report("37 0 3 0")
+    coverage = guessed["summary"]["coverage"]
+    assert "3 条请求的 upstream_response_time 是按位置推测的" in coverage
+    assert "request_time 是按位置推测" not in coverage
+    assert "upstream_time_source" in by_metric(guessed)["upstream_time_max"]["hint"]
+    # Results of older servers have no UPS_SOURCE line.
+    old = observations.analyze(
+        "nginx_access", "[AIOPS_TIMING]\nUPS 1 0.1 0.1 0 0\n", options={}
+    )
+    assert old["summary"]["timing"]["upstream_time_source"] is None
