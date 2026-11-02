@@ -12,7 +12,8 @@ console polls batch counts only (SSH-FE-06) and its 准备状态 is not a button
 
 Parser, API and awk tests run everywhere awk is installed; the script runs
 need /bin/sh (dash on CI). The EL7 run of time_sync is in
-test_audit_followup.py (-k el7).
+test_audit_followup.py (-k el7). The tests at the end cover the review of
+this branch; its console tests run the web scripts in node (skipped without).
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -932,8 +933,8 @@ def test_readiness_badge_is_not_an_action():
     row = next(line for line in script.splitlines() if "readiness-cell" in line)
     # The badge is plain; the step that changes something is its own button.
     assert "${badge(h.readiness" in row and "${prepareStep(h)}" in row
-    step = script.split("function prepareStep(h)", 1)[1].split("\n}\n", 1)[0]
-    assert 'data-action="prepare-host"' in step
+    step = script.split("function prepareStep(", 1)[1].split("\n}\n", 1)[0]
+    assert 'data-action="prepare-host"' in step and 'data-step="${step}"' in step
     assert "title=" in step and "aria-label=" in step and "下一步：" in step
 
 
@@ -1268,3 +1269,242 @@ def test_the_handshake_tells_a_client_that_left_from_a_changed_host(
             "revision_changed",
         )
         assert job["status"] == "failed" and "已变更" in job["error"]
+
+
+# ------- SSH-FE-08 follow-up: a next-step button does the step it names, and
+# ------- only while the host still needs it; the drawer names its step too.
+# ------- Unknown counts read 未知 (SSH-DIAG-12 in the console).
+
+NODE = shutil.which("node")
+needs_node = pytest.mark.skipif(not NODE, reason="needs node")
+# The console's own scripts (index.html order, ui-kit stubbed) in a bare node
+# context: a stub DOM whose elements accept anything, one per selector, and a
+# fetch that never answers (the page's login() waits forever).
+CONSOLE_HARNESS = r"""
+const vm = require("vm");
+const fs = require("fs");
+const [files, code] = JSON.parse(fs.readFileSync(0, "utf8"));
+function stub() {
+  const own = {};
+  return new Proxy(function () {}, {
+    get: (target, key) =>
+      typeof key === "symbol" || key === "then"
+        ? undefined
+        : key === "toString" || key === "valueOf"
+          ? () => ""
+          : key in own
+            ? own[key]
+            : (own[key] = stub()),
+    set: (target, key, value) => ((own[key] = value), true),
+    apply: () => stub(),
+  });
+}
+const elements = new Map();
+const element = (selector) => {
+  if (!elements.has(selector)) elements.set(selector, stub());
+  return elements.get(selector);
+};
+const ctx = {
+  console, setTimeout, clearTimeout, URLSearchParams,
+  fetch: () => new Promise(() => {}),
+  UIKit: { icon: () => "", hydrate() {}, notify() {}, confirm: async () => true },
+  document: {
+    querySelector: element,
+    querySelectorAll: () => [],
+    addEventListener() {},
+    documentElement: stub(),
+    body: stub(),
+  },
+  localStorage: { getItem: () => null, setItem() {} },
+  location: { hash: "#hosts", reload() {}, replace() {} },
+  history: { replaceState() {} },
+  addEventListener() {},
+};
+ctx.window = ctx;
+vm.createContext(ctx);
+for (const file of files) vm.runInContext(fs.readFileSync(file, "utf8"), ctx, { filename: file });
+Promise.resolve(vm.runInContext(code, ctx)).then(
+  (result) => process.stdout.write(JSON.stringify(result)),
+  (error) => {
+    process.stderr.write(String((error && error.stack) || error));
+    process.exit(1);
+  },
+);
+"""
+CONSOLE_SCRIPTS = ("presentation.js", "inventory.js", "interactions.js", "app.js")
+
+
+def console_eval(code):
+    """The JSON value of `code` (an expression; a promise is awaited) once the
+    console scripts are loaded."""
+    files = [str(ROOT / "web" / name) for name in CONSOLE_SCRIPTS]
+    proc = subprocess.run(
+        [NODE, "-e", CONSOLE_HARNESS],
+        input=json.dumps([files, code]).encode(),
+        capture_output=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr.decode()
+    return json.loads(proc.stdout.decode())
+
+
+def prepare_log(readiness, step):
+    """What prepareHost(7, step) asks the server and shows for a host now in
+    `readiness`: API calls, notices, dialogs, navigation, refreshes."""
+    host = {
+        "id": 7,
+        "name": "web-07",
+        "readiness": readiness,
+        "asset_type": "unsupported" != readiness and "linux" or "network",
+        "username": "root",
+        "port": 22,
+        "proxy_id": None,
+        "group_ids": [],
+    }
+    return console_eval(
+        "(async () => {"
+        "  const log = [];"
+        "  api = async (path, method) => {"
+        "    log.push((method || 'GET') + ' ' + path);"
+        f"    if (path.endsWith('/detail')) return {{ host: {json.dumps(host)} }};"
+        "    if (path === '/credentials') return [{ id: 1, name: 'c' }];"
+        "    if (path === '/jobs') return { total: 1, job_ids: ['j1'], skipped: [] };"
+        "    if (path === '/host-keys/scan') return { batch_id: 'b1' };"
+        "    return [];"
+        "  };"
+        "  notice = (text, failure) => log.push('notice ' + (failure ? 'error ' : '') + text);"
+        "  render = async () => log.push('render');"
+        "  go = (page) => log.push('go ' + page);"
+        "  openModal = (title) => log.push('modal ' + title);"
+        f"  await prepareHost(7, {json.dumps(step)});"
+        "  return log;"
+        "})()"
+    )
+
+
+DETAIL = "GET /hosts/7/detail"
+
+
+@needs_node
+@pytest.mark.parametrize(
+    "readiness, step, effect",
+    [
+        (
+            "disabled",
+            "enable",
+            [
+                "GET /credentials",
+                "GET /proxies",
+                "GET /groups",
+                "modal 编辑并启用资产 · web-07",
+            ],
+        ),
+        (
+            "missing_credential",
+            "bind",
+            ["GET /credentials", "modal 绑定 SSH 访问 · web-07"],
+        ),
+        (
+            "unverified",
+            "scan",
+            [
+                "POST /host-keys/scan",
+                "notice 扫描只收集候选公钥；请通过独立可信渠道核验后再确认。",
+                "go keys/b1",
+            ],
+        ),
+        ("untested", "test", ["POST /jobs", "go job/j1"]),
+        ("failed", "test", ["POST /jobs", "go job/j1"]),
+    ],
+)
+def test_a_next_step_button_does_the_step_it_names(readiness, step, effect):
+    assert prepare_log(readiness, step) == [DETAIL] + effect
+
+
+@needs_node
+@pytest.mark.parametrize(
+    "readiness, step",
+    [
+        # The list showed 下一步：扫描公钥 but the key was confirmed meanwhile:
+        # no scan, and no connection test in its place (what v0.9.0 did).
+        ("untested", "scan"),
+        ("verified", "test"),
+        # Enabled meanwhile: no key scan.
+        ("unverified", "enable"),
+        ("disabled", "scan"),
+        ("missing_credential", "test"),
+        ("unsupported", "enable"),
+        # A button without a step does nothing either.
+        ("unverified", "undefined"),
+    ],
+)
+def test_a_next_step_for_a_host_that_changed_only_refreshes(readiness, step):
+    log = prepare_log(readiness, step)
+    assert log[0] == DETAIL and log[-1] == "render" and len(log) == 3, log
+    assert log[1].startswith("notice error 「web-07」的状态已变为"), log
+    assert "未执行" in log[1] and "页面已刷新" in log[1]
+
+
+@needs_node
+def test_the_host_drawer_names_its_step_or_says_why_there_is_none():
+    states = [
+        "disabled",
+        "missing_credential",
+        "unverified",
+        "untested",
+        "failed",
+        "verified",
+        "unsupported",
+    ]
+    drawers = console_eval(
+        "(async () => {"
+        "  const out = {};"
+        f"  for (const readiness of {json.dumps(states)}) {{"
+        "    api = async () => ({"
+        "      host: { id: 7, name: 'web-07', readiness, address: '10.0.0.7', port: 22,"
+        "              asset_type: readiness === 'unsupported' ? 'network' : 'linux' },"
+        "      recent: [],"
+        "      last_test: null,"
+        "    });"
+        "    await showHost(7);"
+        "    out[readiness] = [document.querySelector('#host-drawer-content').innerHTML,"
+        "                      prepareStep({ id: 7, name: 'web-07', readiness })];"
+        "  }"
+        "  return out;"
+        "})()"
+    )
+    steps = {
+        "disabled": ("enable", "下一步：启用资产"),
+        "missing_credential": ("bind", "下一步：绑定凭据"),
+        "unverified": ("scan", "下一步：扫描公钥"),
+        "untested": ("test", "下一步：测试连接"),
+        "failed": ("test", "下一步：测试连接"),
+    }
+    for readiness, (drawer, row) in drawers.items():
+        assert "准备下一步" not in drawer, readiness
+        if readiness in steps:
+            step, label = steps[readiness]
+            assert f'data-step="{step}"' in drawer and label in drawer, readiness
+            # The list row keeps 测试 among its own actions.
+            assert (f'data-step="{step}"' in row) == (step != "test"), readiness
+        else:
+            assert 'data-action="prepare-host"' not in drawer + row, readiness
+    assert "准备已完成" in drawers["verified"][0]
+    assert "仅登记资产" in drawers["unsupported"][0]
+
+
+@needs_node
+def test_unknown_counts_read_as_unknown_in_the_console():
+    text, finding, no_threshold, view = console_eval(
+        "[valueText(null),"
+        " findingValue({ metric: 'failed_service_count', value: null, threshold: 1 }),"
+        " findingValue({ metric: 'x', value: 1, threshold: null }, true),"
+        " metricsView({ summary: { metrics: ["
+        "   { metric: 'failed_service_count', value: null, unit: '' },"
+        "   { metric: 'memory_available_percent', value: null, unit: '%' },"
+        "   { metric: 'load_per_core', value: 0.5 } ] } })]"
+    )
+    assert (text, finding, no_threshold) == ("未知", "未知", "—")
+    assert "null" not in view and view.count("未知") == 2
+    # An unknown percentage gets no gauge (it read 0% before).
+    assert view.count('class="metric-card') == 1

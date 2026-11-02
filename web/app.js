@@ -269,23 +269,47 @@ function hostKeyCommand(algorithm) {
         : "*";
   return `ssh-keygen -lf /etc/ssh/ssh_host_${file}_key.pub -E sha256`;
 }
-// 准备状态 only shows the state. A preparation step that changes something
-// (opens an editor, starts a key scan) is a button of its own that names it;
-// testing and diagnosing a host with SSH bound stay in the row's actions.
+// 准备状态 only shows the state. A preparation step is a button of its own
+// that names it and carries it (data-step): prepareHost does that step and
+// nothing else, and only while the host is still in a state it is for
+// (`when`). Testing and diagnosing a host with SSH bound stay in the row's
+// actions; the host drawer, which has no 测试 button, offers the test as a
+// step (`drawer`).
 const PREPARE_STEPS = {
-  disabled: ["启用资产", "打开编辑对话框，保存后启用该资产"],
-  missing_credential: ["绑定凭据", "打开对话框，为该主机绑定 SSH 凭据"],
-  unverified: [
-    "扫描公钥",
-    "立即发起一次主机公钥扫描：只收集候选指纹，独立核验后才会确认",
-  ],
+  enable: {
+    when: ["disabled"],
+    label: "启用资产",
+    effect: "打开编辑对话框，保存后启用该资产",
+  },
+  bind: {
+    when: ["missing_credential"],
+    label: "绑定凭据",
+    effect: "打开对话框，为该主机绑定 SSH 凭据",
+  },
+  scan: {
+    when: ["unverified"],
+    label: "扫描公钥",
+    effect: "立即发起一次主机公钥扫描：只收集候选指纹，独立核验后才会确认",
+  },
+  test: {
+    when: ["untested", "failed"],
+    label: "测试连接",
+    effect: "立即提交一次只读的 SSH 连接测试，并打开测试结果",
+    drawer: true,
+  },
 };
-function prepareStep(h) {
-  const step = PREPARE_STEPS[h.readiness];
+const nextStep = (h, inDrawer = false) =>
+  Object.keys(PREPARE_STEPS).find(
+    (step) =>
+      PREPARE_STEPS[step].when.includes(h.readiness) &&
+      (inDrawer || !PREPARE_STEPS[step].drawer),
+  );
+function prepareStep(h, inDrawer = false) {
+  const step = nextStep(h, inDrawer);
   if (!step) return "";
-  const [label, effect] = step;
+  const { label, effect } = PREPARE_STEPS[step];
   return (
-    `<button type="button" class="btn small" data-action="prepare-host" data-id="${h.id}" ` +
+    `<button type="button" class="btn small${inDrawer ? " primary" : ""}" data-action="prepare-host" data-id="${h.id}" data-step="${step}" ` +
     `title="${esc(effect)}" aria-label="${esc(`下一步：${label}（${h.name}）`)}">${esc("下一步：" + label)}</button>`
   );
 }
