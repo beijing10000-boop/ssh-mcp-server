@@ -53,17 +53,19 @@ SSHMCP_TRUSTED_PROXIES=172.18.0.1
 
 查询项目网络网关：`docker network inspect standalone-ssh-mcp_default --format '{{(index .IPAM.Config 0).Gateway}}'`。修改后 `docker compose up -d` 生效。不设置（默认）时行为与以前相同；只写自己控制的代理地址，不要写 `0.0.0.0/0`，否则任何能直连 9099 的人都可以伪造这两个请求头。
 
-代理需要转发浏览器使用的协议与主机名，读超时长于 MCP 调用方的超时（调用方断开后服务端会取消仍在等待的诊断）。nginx 示例（证书等其余配置略）：
+代理需要转发浏览器使用的协议与主机名（含端口），读超时长于 MCP 调用方的超时（调用方断开后服务端会取消仍在等待的诊断）。nginx 示例（证书等其余配置略）：
 
 ```nginx
 location / {
     proxy_pass http://127.0.0.1:9099;
-    proxy_set_header Host $host;
+    proxy_set_header Host $http_host;
     proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Host $http_host;
     proxy_read_timeout 180s;
 }
 ```
+
+这里用 `$http_host`（浏览器请求头中的主机名与端口），不用 `$host`：`$host` 不含端口，代理监听 443 以外的端口（如 `https://ssh.example.com:8443`）时，转发的来源与浏览器的 `Origin` 对不上，写操作仍返回 403。
 
 `/setup` 中的“访问协议”与“Web 外部地址”填浏览器实际访问的 `https` 与域名，与飞书回调地址一致。
 
