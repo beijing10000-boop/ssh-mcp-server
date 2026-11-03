@@ -2,7 +2,7 @@
 
 > 独立部署、中文优先、免 Agent 的 Linux SSH 诊断服务。默认 Web/MCP 端口 **9099**。
 
-**当前版本：v0.10.0**
+**当前版本：v0.10.1**
 
 v0.10.0 处理 2026-11 联合审计剩余的 P2：采集不完整时计数为 null（未知）而不是 0，EL7 上的时间同步可用，Nginx 访问日志的耗时按 log_format 定位，调用方断开时诊断取消并释放名额，诊断工具使用独立线程池，HTTPS 反向代理下的 Web 写操作可用（`SSHMCP_TRUSTED_PROXIES`）。工具与参数不变，无数据库结构变化；有几处取值变化，见 [v0.10.0 说明](docs/RELEASE-v0.10.0.md)。
 
@@ -68,7 +68,7 @@ docker compose exec ssh-mcp cat /app/data/bootstrap.token
 
 需开放给可信内网时，在项目目录创建 `.env`，并设置 `WEB_BIND_IP=内网绑定IP`；建议同时通过防火墙限制允许访问的源地址。
 
-本次升级见 [v0.10.0 说明](docs/RELEASE-v0.10.0.md)，之前的版本见 [v0.9.0 说明](docs/RELEASE-v0.9.0.md)、[v0.8.0 说明](docs/RELEASE-v0.8.0.md)（ps 列修复见 [v0.7.2 说明](docs/RELEASE-v0.7.2.md)，Java 启动命令修复见 [v0.7.1 说明](docs/RELEASE-v0.7.1.md)，界面与 v0.7.0 的改动见 [v0.7.0 说明](docs/RELEASE-v0.7.0.md)），v0.6.0 的工具与授权扩展见 [v0.6.0 说明](docs/RELEASE-v0.6.0.md)，备份与迁移步骤见 [v0.4 发布与迁移说明](docs/RELEASE-v0.4.md)。配置入口见 [v0.3.1 系统配置说明](docs/RELEASE-v0.3.1.md)。请先阅读 [v0.3 优化与升级说明](docs/RELEASE-v0.3.md)，以及 [安装部署](docs/INSTALLATION.md)、[v0.2 升级与验证](docs/RELEASE-v0.2.md)、[架构评估](docs/ARCHITECTURE.md)、[AI 平台改造方案](docs/AI-PLATFORM-INTEGRATION.md)、[MCP 接入](docs/MCP.md)、[安全说明](docs/SECURITY.md)、[目录与 IP 流量分析](docs/INSIGHTS.md)。
+本次升级见 [v0.10.1 说明](docs/RELEASE-v0.10.1.md)（Nginx master 只采用 root 或诊断账号运行的进程，RSA 主机公钥在 OpenSSH 8.8+ 上不再误报，TCP 状态与服务清单完整或注明截断），之前的版本见 [v0.10.0 说明](docs/RELEASE-v0.10.0.md)、[v0.9.0 说明](docs/RELEASE-v0.9.0.md)、[v0.8.0 说明](docs/RELEASE-v0.8.0.md)（ps 列修复见 [v0.7.2 说明](docs/RELEASE-v0.7.2.md)，Java 启动命令修复见 [v0.7.1 说明](docs/RELEASE-v0.7.1.md)，界面与 v0.7.0 的改动见 [v0.7.0 说明](docs/RELEASE-v0.7.0.md)），v0.6.0 的工具与授权扩展见 [v0.6.0 说明](docs/RELEASE-v0.6.0.md)，备份与迁移步骤见 [v0.4 发布与迁移说明](docs/RELEASE-v0.4.md)。配置入口见 [v0.3.1 系统配置说明](docs/RELEASE-v0.3.1.md)。请先阅读 [v0.3 优化与升级说明](docs/RELEASE-v0.3.md)，以及 [安装部署](docs/INSTALLATION.md)、[v0.2 升级与验证](docs/RELEASE-v0.2.md)、[架构评估](docs/ARCHITECTURE.md)、[AI 平台改造方案](docs/AI-PLATFORM-INTEGRATION.md)、[MCP 接入](docs/MCP.md)、[安全说明](docs/SECURITY.md)、[目录与 IP 流量分析](docs/INSIGHTS.md)。
 
 ## 核心能力
 
