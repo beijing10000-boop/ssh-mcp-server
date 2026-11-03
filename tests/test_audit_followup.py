@@ -580,9 +580,10 @@ def test_jump_host_keeps_six_seconds_per_stage_without_a_budget(monkeypatch):
 
 # --------------------------------------------------- 6. bounded master lookup --
 
+MASTER_PS = "ps -e -o pid= -o uid= -o args="
 TIMED_PS = (
-    "margs=$( { if command -v timeout >/dev/null 2>&1; then timeout -k 1 3 ps -eo args=;"
-    " else ps -eo args=; fi; } 2>/dev/null | awk"
+    f"mline=$( {{ if command -v timeout >/dev/null 2>&1; then timeout -k 1 3 {MASTER_PS};"
+    f" else {MASTER_PS}; fi; }} 2>/dev/null | awk"
 )
 
 
@@ -597,8 +598,8 @@ def nginx_scripts():
 def test_nginx_master_lookup_runs_under_timeout():
     for name, script in nginx_scripts():
         assert TIMED_PS in script, name
-        # No ps -eo args= outside that timeout wrapper.
-        assert script.count("ps -eo args=") == 2, name
+        # No master lookup outside that timeout wrapper.
+        assert script.count(MASTER_PS) == 2, name
 
 
 @needs_sh
@@ -617,6 +618,62 @@ def test_nginx_master_lookup_gives_up_on_a_stuck_ps(tmp_path):
     )
     assert time.monotonic() - began < 15
     assert "MARGS=[]" in result.stdout, result.stdout + result.stderr
+
+
+FAKE_MASTER = "nginx: master process /tmp/x/nginx -c /tmp/x/evil.conf"
+REAL_MASTER = "nginx: master process /usr/sbin/nginx -c /etc/nginx/nginx.conf"
+
+
+def master_lookup(tmp_path, ps_output, me="1000"):
+    write_stubs(
+        tmp_path,
+        {
+            "ps": f"cat <<'EOF'\n{ps_output}EOF\n",
+            "id": f'case "$1" in -u) echo {me};; esac\n',
+        },
+    )
+    script = (
+        "NGX=/usr/sbin/nginx\n"
+        + nginx._MASTER
+        + 'printf \'MARGS=[%s] MCONF=[%s] UNTRUSTED=[%s]\\n\' "$margs" "$mconf" "$muntrusted"\n'
+    )
+    result = subprocess.run(
+        ["/bin/sh", "-c", script],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{tmp_path}:/usr/bin:/bin", "LC_ALL": "C"},
+        timeout=60,
+    )
+    return result.stdout
+
+
+@needs_sh
+def test_a_master_line_another_account_wrote_is_not_followed(tmp_path):
+    # SE-01: anyone can name a process like the master; a root diagnosis must
+    # not run `nginx -T -c <their config>` (load_module) or their binary.
+    out = master_lookup(tmp_path, f"  4242 64000 {FAKE_MASTER}\n")
+    assert "MARGS=[] MCONF=[] UNTRUSTED=[1]" in out, out
+    # The real (root) master still counts, after a fake one too.
+    out = master_lookup(
+        tmp_path, f"  4242 64000 {FAKE_MASTER}\n  1201     0 {REAL_MASTER}\n"
+    )
+    assert f"MARGS=[{REAL_MASTER}] MCONF=[/etc/nginx/nginx.conf] UNTRUSTED=[]" in out, (
+        out
+    )
+    # A master of the diagnosing account itself is its own.
+    out = master_lookup(tmp_path, f"  4242  1000 {REAL_MASTER}\n")
+    assert "MCONF=[/etc/nginx/nginx.conf] UNTRUSTED=[]" in out, out
+
+
+def test_an_untrusted_master_is_a_finding():
+    from test_ext_nginx import analyze
+
+    report = analyze(
+        "nginx", "[AIOPS_BIN]\nBIN /usr/sbin/nginx\nMASTER_UNTRUSTED\n", minutes=30
+    )
+    found = {f["metric"]: f for f in report["findings"]}
+    assert found["nginx_master_untrusted"]["level"] == "warning"
+    assert report["summary"]["master_untrusted"] is True
 
 
 # --------------------------------- 7./8. GC log symlinks and descriptor checks --

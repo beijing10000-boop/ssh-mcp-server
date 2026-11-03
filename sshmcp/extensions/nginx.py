@@ -849,13 +849,29 @@ opt() {
 # nginx -T and the relative paths, so both actions follow the serving instance.
 # ps reads every /proc/<pid>/cmdline, which stalls on a process stuck in D
 # state: bounded like every other command that may hang.
+# Any account can name a process "nginx: master process BIN -c CONF" (exec -a):
+# only a master run by root or by this account is trusted (only they can
+# start one with that argv). Otherwise a fake line would have a root
+# diagnosis run `nginx -T -c <someone's config>` (load_module loads any .so)
+# or a binary of its choosing. An untrusted master line is reported, not
+# followed.
 _MASTER = (
     r"""
 margs=''
+muntrusted=''
 if command -v ps >/dev/null 2>&1; then
-  margs=$( { """
-    + timed(3, "ps -eo args=")
-    + r"""; } 2>/dev/null | awk '$1 ~ /^(nginx|openresty|tengine):$/ && $2 == "master" {print; exit}')
+  me=$(id -u 2>/dev/null)
+  mline=$( { """
+    + timed(3, "ps -e -o pid= -o uid= -o args=")
+    + r"""; } 2>/dev/null | awk -v me="$me" '$3 ~ /^(nginx|openresty|tengine):$/ && $4 == "master" {
+      if ($2 == 0 || $2 == me) {print; found = 1; exit}
+      untrusted = 1
+    }
+    END {if (untrusted && !found) print "UNTRUSTED"}')
+  case "$mline" in
+    UNTRUSTED) muntrusted=1; mline='' ;;
+  esac
+  margs=$(printf '%s\n' "$mline" | awk 'NR == 1 {sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+/, ""); print}')
 fi
 mbin=$(printf '%s\n' "$margs" | awk '{print $4}')
 mpfx=$(printf '%s\n' "$margs" | awk '{for (i = 5; i < NF; i++) if ($i == "-p") {print $(i + 1); exit}}')
@@ -931,6 +947,7 @@ if [ -n "$mconf" ]; then set -- "$@" -c "$mconf"; printf 'CONF_ARG %s\n' "$mconf
 if [ -z "$msame" ]; then
   case "$mbin" in /*) printf 'MASTER_BIN %s\n' "$mbin" ;; esac
 fi
+if [ -n "$muntrusted" ]; then printf 'MASTER_UNTRUSTED\n'; fi
 printf '[AIOPS_VERSION]\n'
 ver=''
 if [ -n "$NGX" ]; then
@@ -1891,6 +1908,19 @@ def parse_nginx(text, summary, findings, options) -> None:
                 "hint": "PATH、常见安装目录与进程中都没有 Nginx；若运行在容器内请改查容器，或确认主机是否部署了 Nginx",
             }
         )
+    if any(line == "MASTER_UNTRUSTED" for line in _lines(text, "BIN")):
+        # A master line only another account could have written: not followed.
+        summary["master_untrusted"] = True
+        findings.append(
+            {
+                "level": "warning",
+                "metric": "nginx_master_untrusted",
+                "value": "进程列表中的 Nginx master 不是 root 或本诊断账号运行的",
+                "threshold": "master 由 root 或诊断账号运行",
+                "hint": "没有采用该进程声明的二进制与 -c/-p 参数（任何账号都能把进程命名为 nginx: master process）；"
+                "若 Nginx 确由其他账号运行，请用该账号诊断，否则核查这个进程",
+            }
+        )
     if master_bin and binary and master_bin != binary:
         findings.append(
             {
@@ -2399,6 +2429,22 @@ def parse_access(text, summary, findings, options) -> None:
     )
     requests = totals["requests"]
     classes = totals["by_class"]
+    if not has_section(text, "TOTALS"):
+        # The action ended (time limit, output cut) before the counts were
+        # written: the totals are unknown, not zero requests.
+        totals["requests"] = totals["selected"] = None
+        summary["totals_missing"] = True
+        findings.append(
+            {
+                "level": "warning",
+                "metric": "access_totals_missing",
+                "value": "访问日志统计未完成",
+                "threshold": "取得请求总量",
+                "hint": "动作在写出统计前结束（超时或输出被截断）：请求量、状态码与耗时未知，不能据此判断“没有流量”；"
+                "可缩短时间窗口后重试，或改用日志平台的 Nginx 专项报告",
+            }
+        )
+        return
     observations.metric(summary, findings, "requests_total", requests)
     if requests:
         observations.metric(

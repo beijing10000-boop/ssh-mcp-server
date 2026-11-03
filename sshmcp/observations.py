@@ -325,7 +325,8 @@ def services(text, summary, findings):
             }
         )
     rows = [
-        line.split()
+        # A failed unit may come with systemd's bullet as a field of its own.
+        [field for field in line.split() if field not in ("●", "*")] or [""]
         for line in text.splitlines()
         if ".service" in line and not line.startswith("AIOPS_GATEWAY")
     ]
@@ -359,11 +360,22 @@ def services(text, summary, findings):
             }
             for row in rows
             if row and row[0].lstrip("●").endswith(".service")
-        ][:100]
+        ][:200]
         counts = {}
         for unit in summary["units"]:
             counts[unit["active"]] = counts.get(unit["active"], 0) + 1
         summary["active_counts"] = counts
+        total = re.search(r"(?m)^UNITS_TOTAL (\d+)$", text)
+        if total:
+            # The host has more units than listed: the inactive tail was cut
+            # (units not inactive come first and are all listed).
+            summary["units_total"] = int(total[1])
+            summary["units_truncated"] = int(total[1]) > len(summary["units"])
+            if summary["units_truncated"]:
+                summary["coverage"] = (
+                    f"主机共有 {total[1]} 个服务单元，列出了全部非 inactive 的与部分 inactive 的"
+                    f"（共 {len(summary['units'])} 个）；active_counts 只统计列出的单元"
+                )
 
 
 # `timedatectl status` labels and the `timedatectl show` properties they mean.
@@ -656,7 +668,9 @@ def security(text, summary, findings):
 
 def tcp(text, summary, findings):
     counts = {
-        k: int(v) for k, v in re.findall(r"(?m)^([A-Z][A-Z-]+)\s+(\d+)\s*$", text)
+        # FIN-WAIT-1 / FIN-WAIT-2 carry digits.
+        k: int(v)
+        for k, v in re.findall(r"(?m)^([A-Z][A-Z0-9-]*)\s+(\d+)\s*$", text)
     }
     summary["states"] = counts
     for key, value in counts.items():

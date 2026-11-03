@@ -164,6 +164,14 @@ v0.6.0 的 summary 补充了可直接引用的证据，模型在默认 summary �
 - **service_inventory / sockets / health**：summary 分别带结构化的 `units` 与 `active_counts`、`listening` 与 `socket_stats`、`top_processes`。
 - **扩展动作**：summary 带 `request`（已校验并补齐默认值的参数）；结果另带 `request_options` 与 `risk`。
 
+未发布（2026-11 第三轮审计）修正了以下结果（字段只增不改）：
+
+- **nginx / nginx_access 的 master**：只采用 root 或诊断账号本身运行的 `nginx: master process` 行（`ps -e -o pid= -o uid= -o args=`）；其他账号运行的同名进程（任何账号都能这样命名进程）不再决定二进制与 `-c`/`-p`，nginx 动作报 warning 级 `nginx_master_untrusted`，`summary.master_untrusted=true`。
+- **nginx_access**：动作在写出统计段前结束（超时或输出被截断）时，`summary.totals_missing=true`、`totals.requests` 为 null，报 warning 级 `access_totals_missing`，不再报 `requests_total=0` 与“可能确实没有流量”的 `no_requests`。
+- **tcp_states**：`summary.states` 包含 FIN-WAIT-1 / FIN-WAIT-2（此前正则不接受数字，这两种状态被丢掉）。
+- **service_inventory**：先列全部非 inactive 的单元（失败单元不会被截掉），再列最多 50 个 inactive 的；新增 `summary.units_total`（主机上的服务单元总数）与 `units_truncated`，被截短时 `coverage` 写明 `active_counts` 只统计列出的单元。此前只取 `systemctl` 输出的前 100 行且不标截断。
+- **连接**：固定的主机公钥为 RSA 时，握手只协商 RSA 的签名算法（rsa-sha2-512/256、ssh-rsa）。此前目标同时有 Ed25519/ECDSA 主机密钥、又不再提供 SHA-1 `ssh-rsa` 签名（OpenSSH 8.8+、RHEL/Rocky 9 默认策略）时，握手拿到的是另一把密钥，被误报为“SSH 主机公钥与已登记公钥不一致”（`host_unverified`）。
+
 v0.9.0修正了以下结果，拿不到数据时给出 null 与说明，调用方应把 null 当作“未知”而不是 0：
 
 - **nginx**：新增 `summary.process_listing`：`ok`；`limited`（看不到 PID 1，多为 /proc 以 hidepid 挂载，脚本标记 `PS_LIMITED`）；`failed`（ps 不接受所需的列，`CAPABILITY_MISSING:ps-columns`，结果为 partial）；`missing`（没有 ps）；没有进程段时为 null。`worker_count` 只在列表完整或列出了 Nginx 进程时为数值，否则为 null。只有完整列表中没有 master、systemd 也不是 active 时才报 critical 的 `nginx_inactive`；受限列表中没有 master 时报 info 级 `nginx_process_not_visible`。master 排在进程列表最前，不会被 40 行上限截掉。没有读到任何 error.log 时 `errors.lines_in_window` 为 null，并报 info 级 `error_log_not_read`。

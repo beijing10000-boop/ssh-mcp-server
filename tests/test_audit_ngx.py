@@ -513,6 +513,11 @@ def nginx_ps(sh, rows, args):
     fix = sh["fix_dir"]
     _write(fix / "ps_full.txt", "".join(row + "\n" for row in rows))
     _write(fix / "ps_args.txt", "".join(arg + "\n" for arg in args))
+    # The master lookup's `pid uid args`: every process run by root here.
+    _write(
+        fix / "ps_uid.txt",
+        "".join(f"{900 + i} 0 {arg}\n" for i, arg in enumerate(args)),
+    )
     _write(fix / "systemd.txt", "")
 
 
