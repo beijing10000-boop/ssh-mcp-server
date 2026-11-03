@@ -381,6 +381,19 @@ def ps_text(binary):
     return full, args.replace(master.format("/usr/sbin/nginx"), master.format(binary))
 
 
+UIDS = {"root": 0, "www-data": 33, "app": 1000, "ops": 1001}
+
+
+def ps_uid_text(binary):
+    """`ps -e -o pid= -o uid= -o args=` output: the master lookup trusts only
+    a master run by root or by the diagnosing account."""
+    full, args = ps_text(binary)
+    return "".join(
+        f"{line.split()[0]:>7} {UIDS[line.split()[2]]:>5} {arg}\n"
+        for line, arg in zip(full.splitlines(), args.splitlines())
+    )
+
+
 SS_LISTEN = """State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess
 LISTEN 0      511          0.0.0.0:80         0.0.0.0:*    users:(("nginx",pid=1203,fd=6),("nginx",pid=1202,fd=6),("nginx",pid=1201,fd=6))
 LISTEN 0      511          0.0.0.0:443        0.0.0.0:*    users:(("nginx",pid=1203,fd=7),("nginx",pid=1202,fd=7),("nginx",pid=1201,fd=7))
@@ -470,6 +483,7 @@ def install_fixture(base, shell_path=str, t_mode="ok"):
     full, args = ps_text(sh["nginx"])
     _write(fix / "ps_full.txt", full)
     _write(fix / "ps_args.txt", args)
+    _write(fix / "ps_uid.txt", ps_uid_text(sh["nginx"]))
     _write(fix / "ss_listen.txt", SS_LISTEN)
     _write(fix / "ss_estab.txt", ss_established_text())
     _write(fix / "systemd.txt", SYSTEMD_TEXT)
@@ -481,6 +495,7 @@ def install_fixture(base, shell_path=str, t_mode="ok"):
         "  *) exit 1 ;;\n"
         "esac\n",
         "ps": 'case "$*" in\n'
+        f"  *uid=*) cat '{sh['fix']}/ps_uid.txt' ;;\n"
         f"  *pid=*) cat '{sh['fix']}/ps_full.txt' ;;\n"
         f"  *) cat '{sh['fix']}/ps_args.txt' ;;\n"
         "esac\n",

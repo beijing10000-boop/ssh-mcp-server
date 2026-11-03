@@ -490,6 +490,31 @@ def private_key(credential_id: int):
     raise SSHDiagnosticError("私钥格式或口令无效；支持 Ed25519/RSA/ECDSA")
 
 
+# Host key algorithms that sign with a pinned key of each type. An RSA key
+# signs as rsa-sha2-512/256 too: OpenSSH 8.8+ and the RHEL 9 crypto policy no
+# longer offer SHA-1 "ssh-rsa" signatures.
+HOST_KEY_FAMILIES = {
+    "ssh-rsa": ("rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"),
+    "ssh-ed25519": ("ssh-ed25519",),
+    "ecdsa-sha2-nistp256": ("ecdsa-sha2-nistp256",),
+    "ecdsa-sha2-nistp384": ("ecdsa-sha2-nistp384",),
+    "ecdsa-sha2-nistp521": ("ecdsa-sha2-nistp521",),
+}
+
+
+def pinned_algorithms(key_type: str) -> dict:
+    """disabled_algorithms that keep the handshake to the pinned key's own
+    algorithms: otherwise a server that also has an Ed25519 key, and no
+    longer offers ssh-rsa, answers with that key, and the pinned RSA key looks
+    changed (refused as a mismatch)."""
+    allowed = HOST_KEY_FAMILIES.get(key_type, (key_type,))
+    return {
+        "keys": [
+            alg for alg in paramiko.Transport._preferred_keys if alg not in allowed
+        ]
+    }
+
+
 def client_connect(target: dict, key, *, sock=None, timeout=6):
     """Each handshake stage (TCP, banner, auth, channel) waits up to ``timeout``."""
     expected = store.validate_hostkey(target.get("host_key", ""))
@@ -516,6 +541,7 @@ def client_connect(target: dict, key, *, sock=None, timeout=6):
             auth_timeout=timeout,
             channel_timeout=timeout,
             sock=sock,
+            disabled_algorithms=pinned_algorithms(key_type),
         )
         return client
     except Exception:

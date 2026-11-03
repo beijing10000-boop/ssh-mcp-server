@@ -54,10 +54,16 @@ SCRIPTS = {
         'NR==1 && ($1=="State" || $1=="Recv-Q" || $1=="Netid") {next} '
         "NF>=5 {states[$1]++} END {for (s in states) print s,states[s]}' | sort"
     ),
+    # Units that are not inactive first (failed ones are never cut), then the
+    # inactive tail; UNITS_TOTAL says how many there were, so a cut list is
+    # never read as the whole inventory.
     "service_inventory": (
         "if ! command -v systemctl >/dev/null 2>&1; then printf 'CAPABILITY_MISSING:systemctl\\n'; exit 69; fi; "
         "rows=$(systemctl list-units --type=service --all --no-pager --plain --no-legend); code=$?; "
-        'printf \'%s\\n\' "$rows" | head -n 100; exit "$code"'
+        "printf 'UNITS_TOTAL %s\\n' \"$(printf '%s\\n' \"$rows\" | grep -c '[.]service')\"; "
+        "printf '%s\\n' \"$rows\" | awk '{a = ($1 ~ /[.]service$/) ? $3 : $4} a != \"inactive\"' | head -n 150; "
+        "printf '%s\\n' \"$rows\" | awk '{a = ($1 ~ /[.]service$/) ? $3 : $4} a == \"inactive\"' | head -n 50; "
+        'exit "$code"'
     ),
     "timers": (
         "if ! command -v systemctl >/dev/null 2>&1; then printf 'CAPABILITY_MISSING:systemctl\\n'; exit 69; fi; "

@@ -513,6 +513,11 @@ def nginx_ps(sh, rows, args):
     fix = sh["fix_dir"]
     _write(fix / "ps_full.txt", "".join(row + "\n" for row in rows))
     _write(fix / "ps_args.txt", "".join(arg + "\n" for arg in args))
+    # The master lookup's `pid uid args`: every process run by root here.
+    _write(
+        fix / "ps_uid.txt",
+        "".join(f"{900 + i} 0 {arg}\n" for i, arg in enumerate(args)),
+    )
     _write(fix / "systemd.txt", "")
 
 
@@ -681,6 +686,12 @@ def test_access_and_status_follow_the_running_master_config(tmp_path, monkeypatc
     _write(
         base / "fix" / "ps_args.txt",
         f"nginx: master process {sh['nginx']} -c {custom_conf}\nnginx: worker process\n",
+    )
+    # The master lookup reads `pid uid args`: a root master.
+    _write(
+        base / "fix" / "ps_uid.txt",
+        f"1201 0 nginx: master process {sh['nginx']} -c {custom_conf}\n"
+        "1202 33 nginx: worker process\n",
     )
     fix = sh["fix"]
     _write(
