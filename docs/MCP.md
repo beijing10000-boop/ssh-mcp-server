@@ -164,7 +164,7 @@ v0.6.0 的 summary 补充了可直接引用的证据，模型在默认 summary �
 - **service_inventory / sockets / health**：summary 分别带结构化的 `units` 与 `active_counts`、`listening` 与 `socket_stats`、`top_processes`。
 - **扩展动作**：summary 带 `request`（已校验并补齐默认值的参数）；结果另带 `request_options` 与 `risk`。
 
-未发布（2026-11 第三轮审计）修正了以下结果（字段只增不改）：
+v0.10.1（2026-11 第三轮审计）修正了以下结果（字段只增不改）：
 
 - **nginx / nginx_access 的 master**：只采用 root 或诊断账号本身运行的 `nginx: master process` 行（`ps -e -o pid= -o uid= -o args=`）；其他账号运行的同名进程（任何账号都能这样命名进程）不再决定二进制与 `-c`/`-p`，nginx 动作报 warning 级 `nginx_master_untrusted`，`summary.master_untrusted=true`。
 - **nginx_access**：动作在写出统计段前结束（超时或输出被截断）时，`summary.totals_missing=true`、`totals.requests` 为 null，报 warning 级 `access_totals_missing`，不再报 `requests_total=0` 与“可能确实没有流量”的 `no_requests`。
