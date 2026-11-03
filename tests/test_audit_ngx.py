@@ -687,6 +687,12 @@ def test_access_and_status_follow_the_running_master_config(tmp_path, monkeypatc
         base / "fix" / "ps_args.txt",
         f"nginx: master process {sh['nginx']} -c {custom_conf}\nnginx: worker process\n",
     )
+    # The master lookup reads `pid uid args`: a root master.
+    _write(
+        base / "fix" / "ps_uid.txt",
+        f"1201 0 nginx: master process {sh['nginx']} -c {custom_conf}\n"
+        "1202 33 nginx: worker process\n",
+    )
     fix = sh["fix"]
     _write(
         base / "bin" / "nginx",
