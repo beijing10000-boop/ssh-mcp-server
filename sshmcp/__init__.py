@@ -1,3 +1,3 @@
 """独立 Linux SSH MCP 诊断服务器。"""
 
-__version__ = "0.10.1"
+__version__ = "0.10.2"
