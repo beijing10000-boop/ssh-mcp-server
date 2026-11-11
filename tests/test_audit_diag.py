@@ -599,6 +599,37 @@ def test_service_detail_script_reports_failed_show_and_history(tmp_path):
     assert report["summary"]["counts"]["restarts_24h"] is None
 
 
+@needs_sh
+def test_service_detail_with_properties_and_exit_1_is_not_a_failed_show(tmp_path):
+    """Seen live on EL7 hosts: systemctl show printed LoadState/ActiveState and
+    exited 1; every service_detail there came back partial with SHOW_FAILED."""
+    stubs = {
+        "id": 'case "$1" in -u) echo 0;; -nG) echo root;; esac\n',
+        "systemctl": 'case "$1" in show) printf "Id=app.service\\nLoadState=loaded\\n'
+        'ActiveState=active\\nSubState=running\\nMainPID=0\\n"; exit 1;; esac\n',
+        "journalctl": "exit 0\n",
+    }
+    for name, body in stubs.items():
+        path = tmp_path / name
+        path.write_text("#!/bin/sh\n" + body)
+        path.chmod(0o755)
+    spec = extensions.spec_for("service_detail")
+    options = extensions.validate_options(spec, {"service": "app"})
+    result = subprocess.run(
+        ["/bin/sh", "-c", spec.script(options)],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{tmp_path}:/usr/bin:/bin", "LC_ALL": "C"},
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SHOW_FAILED" not in result.stdout and "SHOW_RC 1" in result.stdout
+    report = observations.analyze(
+        "service_detail", result.stdout, status="success", options=options
+    )
+    assert "unit_state_unknown" not in by_metric(report)
+
+
 def test_restart_loop_needs_restarts_in_the_last_24_hours():
     # SSH-DIAG-08: NRestarts counts since the last manual start.
     old = detail(

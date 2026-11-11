@@ -314,9 +314,13 @@ def detail_script(options: dict) -> str:
         "printf '%s\\n' \"$show\" | cut -c1-300",
         # No properties (timeout, D-Bus failure) is an unknown state, not a
         # healthy one: marked, and the run exits 1 so the result is partial.
+        # Older systemd (EL7) prints every property and still exits 1 when
+        # one asked for is unknown to it: with LoadState in the output the
+        # unit's state is known, so only the exit code is noted.
         "rc=0",
-        'if [ "$src" != 0 ] || [ -z "$show" ]; then '
-        "printf 'SHOW_FAILED %s\\n' \"$src\"; rc=1; fi",
+        "if [ -z \"$show\" ] || ! printf '%s\\n' \"$show\" | grep -q '^LoadState='; then "
+        "printf 'SHOW_FAILED %s\\n' \"$src\"; rc=1; "
+        'elif [ "$src" != 0 ]; then printf \'SHOW_RC %s\\n\' "$src"; fi',
         # The canonical Id (aliases resolved) for journal matches; only the
         # unit-name alphabet passes, anything else falls back to the request.
         "id=$(printf '%s\\n' \"$show\" | sed -n 's/^Id=//p' | head -n 1)",
