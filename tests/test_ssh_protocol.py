@@ -20,7 +20,7 @@ def target(client, monkeypatch):
     monkeypatch.setattr(
         store,
         "private_ip",
-        lambda value: value if value == "127.0.0.1" else original(value),
+        lambda value, **kw: value if value == "127.0.0.1" else original(value, **kw),
     )
     host_key, user_key = paramiko.RSAKey.generate(2048), paramiko.RSAKey.generate(2048)
     secret = io.StringIO()

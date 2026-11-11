@@ -312,7 +312,7 @@ def unseal(ciphertext: str) -> str:
     return _fernet(DATA_DIR.resolve()).decrypt(ciphertext.encode()).decode()
 
 
-def private_ip(value: str) -> str:
+def private_ip(value: str, *, allow_public: bool = False) -> str:
     try:
         addr = ipaddress.ip_address(value.strip())
     except ValueError:
@@ -325,6 +325,10 @@ def private_ip(value: str) -> str:
         if addr.version == 4
         else addr in ipaddress.ip_network("fc00::/7")
     )
+    # Jump/proxy hosts may be reached over the public internet; a routable
+    # global unicast address is accepted only when the caller opts in.
+    if allow_public and addr.is_global:
+        allowed = True
     if (
         not allowed
         or getattr(addr, "scope_id", None)

@@ -515,13 +515,16 @@ def pinned_algorithms(key_type: str) -> dict:
     }
 
 
-def client_connect(target: dict, key, *, sock=None, timeout=6):
+def client_connect(target: dict, key, *, sock=None, timeout=6, allow_public=False):
     """Each handshake stage (TCP, banner, auth, channel) waits up to ``timeout``."""
     expected = store.validate_hostkey(target.get("host_key", ""))
     key_type, encoded = expected.split()
     public_key = paramiko.PKey.from_type_string(key_type, base64.b64decode(encoded))
     client = paramiko.SSHClient()
-    address, port = store.private_ip(target["address"]), int(target.get("port", 22))
+    address, port = (
+        store.private_ip(target["address"], allow_public=allow_public),
+        int(target.get("port", 22)),
+    )
     client.get_host_keys().add(
         address if port == 22 else f"[{address}]:{port}",
         key_type,
@@ -557,7 +560,10 @@ def _route(host: dict, timeout=6):
     tunnel = None
     if proxy:
         jump = client_connect(
-            proxy, private_key(proxy["credential_id"]), timeout=timeout
+            proxy,
+            private_key(proxy["credential_id"]),
+            timeout=timeout,
+            allow_public=True,
         )
         try:
             tunnel = jump.get_transport().open_channel(

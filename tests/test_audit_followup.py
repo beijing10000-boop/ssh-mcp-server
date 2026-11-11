@@ -539,7 +539,7 @@ def via_jump_host(monkeypatch):
         def close(self):
             pass
 
-    def connect(target, key, *, sock=None, timeout=6):
+    def connect(target, key, *, sock=None, timeout=6, allow_public=False):
         calls.append((target["username"] + ".connect", timeout))
         return Client()
 

@@ -60,6 +60,19 @@ def test_auth_is_deny_by_default(client):
     assert client.get("/api/v1/hosts").status_code == 200
 
 
+def test_proxy_address_allows_public_jump_opt_in():
+    # A jump/proxy host may sit on the public internet; accepted only with the
+    # explicit opt-in, and never loopback/link-local/multicast/unspecified.
+    assert store.private_ip("8.8.8.8", allow_public=True) == "8.8.8.8"
+    assert store.private_ip("172.20.1.15", allow_public=True) == "172.20.1.15"
+    for bad in ("127.0.0.1", "169.254.1.1", "0.0.0.0", "224.0.0.1", "example.org"):
+        with pytest.raises(ValueError):
+            store.private_ip(bad, allow_public=True)
+    # Managed targets stay private-only: the default rejects public addresses.
+    with pytest.raises(ValueError):
+        store.private_ip("8.8.8.8")
+
+
 def test_target_scope_and_no_arbitrary_shell():
     assert store.private_ip("172.20.1.15") == "172.20.1.15"
     for host in ("8.8.8.8", "localhost", "127.0.0.1", "169.254.1.1", "example.org"):

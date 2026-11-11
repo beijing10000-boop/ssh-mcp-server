@@ -121,7 +121,8 @@ def safe_host_input(item: HostIn) -> dict:
 
 def safe_proxy_input(item: ProxyIn) -> dict:
     x = item.model_dump()
-    x["address"] = store.private_ip(x["address"])
+    # A jump host may sit on the public internet, unlike managed targets.
+    x["address"] = store.private_ip(x["address"], allow_public=True)
     x["username"] = store.username(x["username"])
     x["host_key"] = store.validate_hostkey(x["host_key"])
     return x
