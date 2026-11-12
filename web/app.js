@@ -235,6 +235,18 @@ function openModal(title, fields, submit) {
   $("#editor").showModal();
   $('#editor-form button[type="submit"]').textContent = "保存";
 }
+// A client token is shown once, in the dialog, with a button to copy it.
+function showToken(token, text) {
+  openModal(
+    "保存客户端令牌",
+    `<div class="wide"><p class="notice">${esc(text)}</p>` +
+      field("new_token", "MCP 接入令牌", token, "textarea", null, true) +
+      "</div>" +
+      btn("copy-token", "复制令牌"),
+    null,
+  );
+  $("#editor-fields textarea").readOnly = true;
+}
 function clearEditor() {
   state.editor = null;
   $("#editor-fields").replaceChildren();
@@ -762,12 +774,20 @@ async function pageClients() {
         : c.group_ids
             .map((id) => groups.find((g) => g.id === id)?.name || "已删除分组")
             .join("、");
-      const actions = c.enabled
-        ? '<div class="actions">' +
-          (c.expired ? "" : btn("edit-client", "编辑权限", c.id)) +
-          btn("revoke-client", "撤销", c.id, "danger") +
-          "</div>"
-        : "—";
+      // A working client: change its scope, replace its token (lost or
+      // leaked) or revoke it. An expired one can have its token replaced
+      // (which renews it) or be deleted; a revoked one can only be deleted,
+      // which frees its name.
+      const actions =
+        '<div class="actions">' +
+        (c.enabled
+          ? (c.expired ? "" : btn("edit-client", "编辑权限", c.id)) +
+            btn("rotate-client", "重新生成令牌", c.id) +
+            (c.expired
+              ? btn("delete-client", "删除", c.id, "danger")
+              : btn("revoke-client", "撤销", c.id, "danger"))
+          : btn("delete-client", "删除", c.id, "danger")) +
+        "</div>";
       return (
         `<tr><td><strong>${esc(c.name)}</strong><small class="mono">${esc(c.prefix)}…</small></td>` +
         `<td>${esc(scope)}<small>${c.actions.length} 项诊断权限${esc(costlyActions(c.actions))}</small></td>` +
@@ -781,7 +801,7 @@ async function pageClients() {
     headers: { Authorization: "Bearer <客户端令牌>" },
   };
   return (
-    '<div class="page-intro"><p>为每个 AI 平台或集成系统签发独立令牌，限定主机组、工具与有效期。编辑权限不更换令牌，从下一次 MCP 请求起生效。</p></div>' +
+    '<div class="page-intro"><p>为每个 AI 平台或集成系统签发独立令牌，限定主机组、工具与有效期。编辑权限不更换令牌，从下一次 MCP 请求起生效。令牌忘了或可能泄露时「重新生成令牌」（客户端与权限不变，旧令牌立即失效）；已撤销或已过期的客户端可以删除，名称随之可以重新使用。</p></div>' +
     panel(
       "MCP 客户端",
       table(["客户端", "授权范围", "有效期 / 最近使用", "状态", "操作"], rows),
@@ -1488,24 +1508,11 @@ $("#editor-form").addEventListener("submit", async (e) => {
     closeModal();
     notice(result?.notice || "保存成功", !!result?.warn);
     await render();
-    if (result?.token) {
-      openModal(
-        "保存客户端令牌",
-        '<div class="wide"><p class="notice">仅显示这一次。关闭后不能再次读取，可撤销后重新签发。</p>' +
-          field(
-            "new_token",
-            "MCP 接入令牌",
-            result.token,
-            "textarea",
-            null,
-            true,
-          ) +
-          "</div>" +
-          btn("copy-token", "复制令牌"),
-        null,
+    if (result?.token)
+      showToken(
+        result.token,
+        "仅显示这一次，关闭后不能再次读取。忘记时可在列表中「重新生成令牌」。",
       );
-      $("#editor-fields textarea").readOnly = true;
-    }
   } catch (ex) {
     error.textContent = ex.message;
     error.hidden = false;
@@ -2177,6 +2184,42 @@ document.addEventListener("click", async (e) => {
       )
         return;
       await api("/mcp/clients/" + id + "/revoke", "POST");
+      await render();
+      return;
+    }
+    if (action === "rotate-client") {
+      const c = state.clients.find((x) => String(x.id) === id);
+      if (!c) throw Error("该客户端已不存在，请刷新页面后再操作。");
+      if (
+        !(await askConfirmation(
+          `重新生成「${c.name}」的令牌？会签发一个新令牌，旧令牌立即失效：正在使用它的系统要换成新令牌才能继续访问。名称、诊断权限与主机范围不变，有效期从现在起重新计算 90 天。令牌忘了或可能泄露时使用。`,
+          { danger: true, confirmText: "重新生成" },
+        ))
+      )
+        return;
+      const result = await api(
+        "/mcp/clients/" + encodeURIComponent(id) + "/rotate",
+        "POST",
+      );
+      await render();
+      showToken(
+        result.token,
+        `「${c.name}」的新令牌已签发，旧令牌已失效。仅显示这一次，请立即更新到使用它的系统中。`,
+      );
+      return;
+    }
+    if (action === "delete-client") {
+      const c = state.clients.find((x) => String(x.id) === id);
+      if (!c) throw Error("该客户端已不存在，请刷新页面后再操作。");
+      if (
+        !(await askConfirmation(
+          `删除客户端「${c.name}」？它的令牌已经不能使用。删除后不再出现在列表里，名称可以重新使用；它提交过的诊断任务和审计记录保留。`,
+          { danger: true, confirmText: "删除" },
+        ))
+      )
+        return;
+      await api("/mcp/clients/" + encodeURIComponent(id), "DELETE");
+      notice(`客户端「${c.name}」已删除`);
       await render();
       return;
     }
