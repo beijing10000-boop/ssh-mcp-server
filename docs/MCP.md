@@ -90,7 +90,23 @@
 | ssh_diagnose_service_map（service_map） | 无 | 监听端口 → 进程（PID、程序名、用户）→ systemd 单元/容器映射（最多 80 行），附 RSS 与运行时长；非 root 账号只能看到自己进程的端口归属 | 低 |
 | ssh_collect（collect） | `actions`（1–6 个固定动作，按顺序执行）、`service`（含 service/logs 步骤时必填，否则不能传）、`minutes`=30（1–120，日志类步骤的窗口）、`timeout_seconds`（可选，10–120，v0.9.0） | 在一次 SSH 会话内顺序执行多个固定诊断，每个步骤单独返回 exit_code、summary 与 findings，并合并为带 `source_action` 的总 findings；执行上限 120 秒（另可能排队最多 30 秒），给出 `timeout_seconds` 时排队与执行合计不超过该值，见下文 [ssh_collect 使用建议](#ssh_collect-使用建议)。可组合动作为 cpu、memory、processes、memory_processes、pressure、resource_limits、disk、io、mount_health、block_devices、network、sockets、tcp_states、system、health、capabilities、failed_services、service_inventory、timers、time_sync、containers、container_stats、security_status、kernel、log_errors、oom、service、logs（不含 directory、peer_*、triage 及扩展动作） | 低 |
 
-共 51 个工具：32 类经典单项诊断（含连接测试）、7 类 v0.6.0 深度诊断、单会话多项采集 `ssh_collect`、组合诊断 `ssh_triage`、6 个资产/目录查询工具和 4 个后台任务工具。`ssh_list_hosts` 支持 query、group_id、offset、limit（最多 1000），返回当前授权范围内的所属主机组名称，只返回当前客户端可访问且已就绪的资产。所有执行操作**仅接受登记的数字 host_id**，单项诊断支持可选的 `expected_revision`：建议 AI 平台始终传入解析时取得的版本，拒绝过期映射。即使模型请求任意 IP 或 shell 命令，服务端也没有对应工具。
+### v0.11.0 新增工具
+
+| MCP 工具（动作 id） | 参数 | 用途 | 风险 |
+| --- | --- | --- | --- |
+| ssh_diagnose_java_apps（java_apps） | 无 | Java 应用清单：最多 60 个 Java 进程的应用名、JAR/主类、profiles、用户、systemd 单元或容器、运行时长与 RSS，以及各自监听的 TCP 端口；另附本机 IPv4 地址。只读 /proc，不附加 JVM，不返回启动命令 | 低 |
+
+`summary` 的字段：
+
+- `addresses`：本机 IPv4 地址（`ip -4 addr` 的 global 地址，最多 16 个；不含 docker0、网桥、veth 等虚拟接口）。一台主机在资产里只登记一个地址，其他网卡的地址从这里得到。
+- `java_processes`：Java 进程总数；多于 60 个或 8 秒时间预算内未读完时另有 `apps_shown`、`time_budget_reached`。
+- `apps[]`：`pid`、`application`（依次取 spring.application.name、app.name、app、service.name，再取 JAR 名、自己的 systemd 单元名，都没有为“未识别”；supervisord、docker 这类进程管理器的单元不算应用名）、`main`、`jar_path`、`profiles`、`user`、`unit`、`container`、`elapsed_seconds`、`rss_KiB`、`ports`（最多 16 个）、`local_ports`（只绑定回环地址的端口，是 `ports` 的子集，只有本机上的代理才到得了）、`ports_source`、`declared_port`（启动参数里的 server.port）。
+- `ports_source`：`listen` 来自 `ss -ltnp`（该进程自己的监听套接字）；`docker` 来自 `docker ps` 的发布端口（bridge 网络的容器，取的是宿主机端口，同一容器内的多个 Java 进程都记这些端口）；`argument` 表示 ss 没有给出归属，用启动参数里的 server.port 代替（非 root 账号看不到其他用户进程的套接字）；`null` 表示不知道端口，此时 `ports` 为空——可能确实不监听（定时任务、消息消费者），不能据此说应用不对外服务。
+- `port_owner_visible`：ss 是否给出了进程归属（`false` 多为非 root 账号，`null` 为 ss 不可用）；`docker_ports`：`ok`、`none`、`unavailable`（读不到 Docker）或 `absent`（没有 docker 命令），只在有容器内的 Java 进程时出现。
+
+这个动作没有参数，可以用 `ssh_submit_diagnostics`（`action="java_apps"`）对多台主机批量采集，再用 `ssh_get_diagnostic_batch` 读取每台的 `result.summary`。它**不随任何已有权限自动扩展，也不在“按 AI Ops Platform 推荐勾选”范围内**：需要的客户端由管理员在「编辑权限」中单独勾选。要看每个 JVM 的堆、GC 与日志位置仍用 `ssh_diagnose_java`，要看所有程序的监听端口用 `ssh_diagnose_service_map`。
+
+共 52 个工具：32 类经典单项诊断（含连接测试）、7 类 v0.6.0 深度诊断、v0.11.0 的 Java 应用清单、单会话多项采集 `ssh_collect`、组合诊断 `ssh_triage`、6 个资产/目录查询工具和 4 个后台任务工具。`ssh_list_hosts` 支持 query、group_id、offset、limit（最多 1000），返回当前授权范围内的所属主机组名称，只返回当前客户端可访问且已就绪的资产。所有执行操作**仅接受登记的数字 host_id**，单项诊断支持可选的 `expected_revision`：建议 AI 平台始终传入解析时取得的版本，拒绝过期映射。即使模型请求任意 IP 或 shell 命令，服务端也没有对应工具。
 
 ### jvm 探针的副作用
 

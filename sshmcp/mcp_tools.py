@@ -825,6 +825,13 @@ def ssh_diagnose_java(host_id: int, expected_revision: Revision = None) -> dict:
 
 @mcp.tool(annotations=READ_ONLY)
 @offload
+def ssh_diagnose_java_apps(host_id: int, expected_revision: Revision = None) -> dict:
+    """Java 应用清单（最多 60 个进程）：每个应用的名称（spring.application.name / -Dapp 等，没有时取 JAR 名）、主类或 JAR、profiles、用户、systemd 单元或容器，以及它监听的 TCP 端口（ports；只绑定回环地址的在 local_ports），另附本机 IPv4 地址（addresses）。用于回答“这台主机上跑了哪些应用、各在哪个端口”，以及把发往 地址:端口 的流量对应到应用；可用 ssh_submit_diagnostics 批量采集。端口取自 ss -ltnp，容器内进程取 docker ps 的发布端口（ports_source 说明来源）；非 root 账号看不到其他用户进程的端口归属。只读 /proc，不附加 JVM，不返回启动命令；要看堆、GC 与日志位置用 ssh_diagnose_java。"""
+    return _run(host_id, "java_apps", expected_revision=expected_revision)
+
+
+@mcp.tool(annotations=READ_ONLY)
+@offload
 def ssh_diagnose_jvm(
     host_id: int,
     pid: Annotated[int, Field(ge=1, le=4194304, description="Java 进程 PID")],
