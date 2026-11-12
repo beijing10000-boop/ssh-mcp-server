@@ -9,7 +9,7 @@
 - 带 `Origin` 的浏览器请求只接受本服务自己的来源；经 HTTPS 反向代理接入时，按[安装文档](INSTALLATION.md#https-反向代理)设置 `SSHMCP_TRUSTED_PROXIES`，该代理转发的 `X-Forwarded-Proto`/`X-Forwarded-Host` 才计入（v0.10.0）。不带 Origin 的 MCP 客户端不受影响。
 - 鉴权只读数据库：客户端的“最近使用时间”每分钟最多写一次，数据库被长事务占用时跳过，不影响调用（v0.10.0）。
 
-在 Web「系统配置 → MCP 接入」创建客户端，选择允许的主机组（或明确授权全部主机）、诊断动作和 1–365 天有效期。原始令牌只显示一次，关闭弹窗后不能再次读取；数据库仅存哈希。撤销/到期从下一次请求起生效，不承诺终止已经执行中的 SSH。v0.6.0 起可以对有效客户端「编辑权限」（调整动作、全部主机与主机组），令牌保持不变，详见下文[客户端授权自动扩展与编辑](#客户端授权自动扩展与编辑)。
+在 Web「系统配置 → MCP 接入」创建客户端，选择允许的主机组（或明确授权全部主机）、诊断动作和 1–365 天有效期。原始令牌只显示一次，关闭弹窗后不能再次读取；数据库仅存哈希。忘记时不必另建客户端：v0.11.1 起可以「重新生成令牌」，已撤销或已过期的客户端可以删除（见下文）。撤销/到期从下一次请求起生效，不承诺终止已经执行中的 SSH。v0.6.0 起可以对有效客户端「编辑权限」（调整动作、全部主机与主机组），令牌保持不变，详见下文[客户端授权自动扩展与编辑](#客户端授权自动扩展与编辑)。
 
 兼容的 `/app/data/mcp.token` 拥有全部主机和动作权限，可在 MCP 接入页面停用。不同团队应使用不同客户端令牌。当前为内部服务 Bearer 认证，不提供完整 OAuth 2.1 动态客户端授权流程。
 
@@ -134,6 +134,8 @@
 - **`jvm` 只能手动授权**：它会附加到 JVM 并短暂进入安全点，不随任何已有权限自动扩展。
 - **`ssh_collect` 按步骤授权**：只要客户端拥有任一可组合步骤，`ssh_list_tool_catalog` 就会列出 `collect`；调用时逐个检查每个步骤，任一步骤未授权即整体拒绝（`forbidden`），不会部分执行。无需单独勾选 `collect`。v0.9.0起 `ssh_get_diagnostic_job`、`ssh_cancel_diagnostic_job` 与 `ssh_get_diagnostic_batch` 对采集任务同样按步骤检查（此前要求客户端持有 `collect` 本身，查询自己的采集任务会得到 `forbidden`）。
 - **编辑权限**：Web「系统配置 → MCP 接入」对有效客户端点「编辑权限」，可调整诊断动作、全部主机与主机组；接口为 `PUT /api/v1/mcp/clients/{id}`，body `{"actions": [...], "all_hosts": true|false, "group_ids": [...]}`（`all_hosts`、`group_ids` 可省略表示不变），与其他写接口一样需要飞书管理员会话与 `X-CSRF-Token`。令牌不变，新范围从下一次 MCP 请求起生效，已在执行的 SSH 不受影响；修改记录审计 `mcp_client_update`。
+- **重新生成令牌（v0.11.1）**：令牌忘了或可能泄露时，对未撤销的客户端点「重新生成令牌」：同一个客户端签发一个新令牌，名称、诊断动作与主机范围不变，旧令牌从下一次请求起失效，有效期从现在起重新计算（默认 90 天），「最近使用」清空以便确认新令牌已经在用。已过期的客户端也可以这样续期；已撤销的不行。接口为 `POST /api/v1/mcp/clients/{id}/rotate`，body 可选 `{"valid_days": 1–365}`，返回只显示一次的 `token`；记录审计 `mcp_client_rotate`。该客户端已提交的后台任务不受影响（任务按客户端而不是令牌授权）。
+- **删除客户端（v0.11.1）**：已撤销或已过期的客户端可以「删除」，删除后名称可以重新使用（此前撤销的客户端一直占着名称）；仍然有效的客户端要先撤销，否则返回 409。接口为 `DELETE /api/v1/mcp/clients/{id}`；记录审计 `mcp_client_delete`（detail 保留名称）。它提交过的诊断任务与审计记录保留，按客户端 ID 标识；仍在排队的任务轮到执行时会被拒绝。
 - **推荐范围**：新建或编辑弹窗中的「按 AI Ops Platform 推荐勾选」选中 `GET /api/v1/tools` 中 `recommended=true` 的动作（v0.9.0；此前由页面内置的列表决定）：connection、health、capabilities、cpu、memory、processes、memory_processes、disk、io、network、sockets、system、service、failed_services、logs、kernel、containers、pressure、resource_limits、mount_health、block_devices、time_sync、tcp_states、service_inventory、timers、log_errors、oom、container_stats、security_status、nginx、nginx_access、syslog、java、service_detail、service_map，共 35 个，即平台托管 Skill 预采集或点名的全部动作加上诊断测试用的 connection。其中 containers、resource_limits、mount_health、block_devices、time_sync、timers、container_stats、security_status 是原列表漏掉的 8 个，已有客户端不会自动获得，需要「编辑权限」重新勾选。不含 jvm、triage、directory 与 peer_*；`collect` 按步骤授权，不在其中。`ssh_list_tool_catalog` 不返回 `recommended`。
 
 ## ssh_collect 使用建议

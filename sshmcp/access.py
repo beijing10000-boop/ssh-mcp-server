@@ -347,6 +347,66 @@ def revoke(client_id: str, actor=Depends(admin)):
     return {"ok": True}
 
 
+class RotateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    valid_days: StrictInt = Field(default=90, ge=1, le=365)
+
+
+@router.post("/mcp/clients/{client_id}/rotate")
+def rotate(client_id: str, body: RotateIn | None = None, actor=Depends(admin)):
+    """A new token for the same client (for one that was lost, or leaked):
+    its name, actions and host scope stay, the old token stops working at
+    once and the validity starts over. A revoked client gets none."""
+    days = (body or RotateIn()).valid_days
+    raw = "sshmcp_" + secrets.token_urlsafe(36)
+    with store.db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute(
+            "SELECT name FROM mcp_clients WHERE id=? AND enabled=1", (client_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "MCP 客户端不存在或已撤销")
+        # last_used_at starts over too: it then says whether the new token is in use.
+        c.execute(
+            "UPDATE mcp_clients SET token_hash=?,prefix=?,expires_at=?,last_used_at=NULL WHERE id=?",
+            (
+                hashlib.sha256(raw.encode()).hexdigest(),
+                raw[:14],
+                int(time.time()) + days * 86400,
+                client_id,
+            ),
+        )
+    with _last_used_lock:
+        _last_used.pop(client_id, None)
+    store.audit(actor, "mcp_client_rotate", client_id, "success", "name=" + row["name"])
+    return {
+        "id": client_id,
+        "token": raw,
+        "note": "令牌仅显示一次，旧令牌已失效，请更新到使用它的系统中",
+    }
+
+
+@router.delete("/mcp/clients/{client_id}")
+def delete(client_id: str, actor=Depends(admin)):
+    """Remove a client that can no longer be used (revoked or expired), which
+    frees its name; one that still works must be revoked first. Its jobs and
+    audit rows stay (they name it by id; the delete row keeps its name)."""
+    with store.db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute(
+            "SELECT name,enabled,expires_at FROM mcp_clients WHERE id=?", (client_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "MCP 客户端不存在")
+        if row["enabled"] and row["expires_at"] > int(time.time()):
+            raise HTTPException(409, "客户端仍然有效：请先撤销，再删除")
+        c.execute("DELETE FROM mcp_clients WHERE id=?", (client_id,))
+    with _last_used_lock:
+        _last_used.pop(client_id, None)
+    store.audit(actor, "mcp_client_delete", client_id, "success", "name=" + row["name"])
+    return {"ok": True}
+
+
 @router.put("/settings/mcp-legacy")
 def legacy(body: LegacyIn, actor=Depends(admin)):
     store.save_settings({"legacy_mcp_enabled": "true" if body.enabled else "false"})
