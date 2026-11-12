@@ -294,4 +294,4 @@ def param_views(spec: ActionSpec) -> list[dict]:
     return rows
 
 
-from . import collect, nginx, syslog, java, services  # noqa: E402,F401
+from . import collect, nginx, syslog, java, apps, services  # noqa: E402,F401

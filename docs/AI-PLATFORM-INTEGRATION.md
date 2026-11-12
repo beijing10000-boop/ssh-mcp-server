@@ -61,7 +61,7 @@ async with connect(ssh_mcp_url, ssh_mcp_token, timeout=90) as ssh:
 
 支持 `structuredContent` 和单条 JSON TextContent，并同时检查 MCP `isError` 及业务 `status`。适配器关闭重定向和隐式代理，不自动重试；TLS 验证保持开启。HTTP 仅用于明确指定 `allow_http=True` 的隔离联调。
 
-保留当前 `diagnose_linux_host` 的参数限制、证据缺口 reason、quick 模式禁用 SSH、事件与资产一致性检查。模型不需要直接看到全部远端工具（v0.6.0 共 51 个）；由平台将一次剧本请求展开为允许的动作，逐个计入工具预算。目录仍须来自当前资产的管理员授权路径，不能直接把模型提供路径透传给远端。
+保留当前 `diagnose_linux_host` 的参数限制、证据缺口 reason、quick 模式禁用 SSH、事件与资产一致性检查。模型不需要直接看到全部远端工具（v0.11.0 共 52 个）；由平台将一次剧本请求展开为允许的动作，逐个计入工具预算。目录仍须来自当前资产的管理员授权路径，不能直接把模型提供路径透传给远端。
 
 ## 5. 超时、取消与证据
 
