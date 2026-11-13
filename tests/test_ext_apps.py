@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import time
+import zipfile
 
 import pytest
 
@@ -224,6 +225,218 @@ def test_published_ports_and_loopback_addresses():
     assert listeners == {1: {8080: True}, 2: {9000: False, 53: False}, 3: {7001: True}}
 
 
+def with_libs(block, lines):
+    """The block with what the script prints about its jars (before the argv)."""
+    head, mark, rest = block.partition("ARG ")
+    return head + lines + mark + rest
+
+
+def test_dubbo_version_comes_from_jar_file_names():
+    text = (
+        HEADER
+        # The JAR on disk is gone, the one the JVM holds open was read whole.
+        + with_libs(ORDERS, "JARFD 4 1\nLIB dubbo-2.7.23.jar\nLIBS dir\n")
+        # Started with a class path: Dubbo modules among the open files.
+        + with_libs(
+            TOMCAT,
+            "LIB dubbo-cluster-3.2.5.jar\nLIB dubbo-common-3.2.5.jar\nLIBS open\n",
+        )
+        # The whole directory of the JAR lists no Dubbo.
+        + with_libs(BILLING, "JARFD 7 0\nLIBS dir\n")
+        # No JAR to read and nothing among the open files: not known.
+        + with_libs(NIGHTLY, "LIBS open\n")
+        + LISTEN
+        + DOCKER
+    )
+    report = report_of(text)
+    rows = {row["pid"]: row for row in report["summary"]["apps"]}
+    assert (rows[4242]["dubbo_version"], rows[4242]["dubbo_status"]) == (
+        "2.7.23",
+        "found",
+    )
+    assert (rows[5151]["dubbo_version"], rows[5151]["dubbo_status"]) == (
+        "3.2.5",
+        "found",
+    )
+    assert (rows[6363]["dubbo_version"], rows[6363]["dubbo_status"]) == (None, "absent")
+    assert (rows[7474]["dubbo_version"], rows[7474]["dubbo_status"]) == (
+        None,
+        "unknown",
+    )
+    assert not any("dubbo_versions" in row for row in rows.values())
+    assert not any(f["metric"].startswith("dubbo") for f in report["findings"])
+    # The other fields are what they were without these lines.
+    plain = {row["pid"]: row for row in report_of(OUTPUT)["summary"]["apps"]}
+    for pid, row in rows.items():
+        same = {key: value for key, value in row.items() if "dubbo" not in key}
+        assert same == {k: v for k, v in plain[pid].items() if "dubbo" not in k}
+    # Output of a server that does not look for Dubbo yet: not known, not absent.
+    assert {row["dubbo_status"] for row in plain.values()} == {"unknown"}
+    assert {row["dubbo_version"] for row in plain.values()} == {None}
+    assert "dubbo_status=unknown" in report["summary"]["coverage"]
+
+
+def test_dubbo_status_tells_absent_from_not_checked():
+    of = apps_ext.dubbo_of
+    assert of("LIB dubbo-2.7.9.jar\nLIBS dir\n") == (["2.7.9"], "found")
+    assert of("LIB dubbo-3.3.0-beta.1.jar\nLIBS dir\n") == (["3.3.0-beta.1"], "found")
+    # The all-in-one artifact tells the release before a module does.
+    assert of("LIB dubbo-common-2.7.5.jar\nLIB dubbo-2.7.8.jar\nLIBS dir\n") == (
+        ["2.7.8"],
+        "found",
+    )
+    assert of("LIB dubbo-rpc-api-3.1.11.jar\nLIBS open\n") == (["3.1.11"], "found")
+    # A hit in a JAR that was only partly read still counts, a miss does not.
+    assert of("LIB dubbo-2.6.12.jar\nLIBS tail\n") == (["2.6.12"], "found")
+    for state in ("tail", "cut", "nofd", "open", "unreadable", "anything"):
+        assert of(f"JARFD 5 0\nLIBS {state}\n") == ([], "unknown"), state
+    assert of("") == ([], "unknown") and of("LIBS\n") == ([], "unknown")
+    assert of("LIBS dir\n") == ([], "absent")
+    # Dubbo without a version in any file name.
+    assert of("LIBX\nLIBS dir\n") == ([], "present")
+    assert of("LIBX\nLIBS open\n") == ([], "present")
+    assert of("LIBX\nLIB dubbo-2.7.23.jar\nLIBS tail\n") == (["2.7.23"], "found")
+    # Names that do not tell the release of Dubbo are not taken for one.
+    for name in (
+        "dubbo-spring-boot-starter-2.7.23.jar",
+        "dubbo-admin-ui-0.7.0-SNAPSHOT.jar",
+        "base-dubbo-api-1.0.0-SNAPSHOT.jar",
+        "dubbo-.jar",
+        "dubbo-2.7.23.jar.bak",
+        "x" * 90,
+    ):
+        assert of(f"LIB {name}\nLIBS dir\n") == ([], "absent"), name
+    # An argument cannot pass for one of these lines: argv lines start with ARG.
+    assert of("ARG LIB dubbo-9.9.9.jar\nARG LIBX\nLIBS dir\n") == ([], "absent")
+
+
+def test_two_dubbo_versions_in_one_application_are_reported():
+    block = with_libs(
+        ORDERS, "JARFD 4 0\nLIB dubbo-2.6.12.jar\nLIB dubbo-2.7.23.jar\nLIBS dir\n"
+    )
+    report = report_of(HEADER + block + BILLING + LISTEN)
+    rows = {row["pid"]: row for row in report["summary"]["apps"]}
+    assert rows[4242]["dubbo_version"] == "2.6.12"
+    assert rows[4242]["dubbo_versions"] == ["2.6.12", "2.7.23"]
+    assert rows[4242]["dubbo_status"] == "found" and "dubbo_versions" not in rows[6363]
+    mixed = next(f for f in report["findings"] if f["metric"] == "dubbo_versions_mixed")
+    assert mixed["level"] == "info" and mixed["value"] == {"count": 1, "pids": [4242]}
+    # The same version from two modules is one version.
+    same = with_libs(
+        ORDERS, "LIB dubbo-common-3.2.5.jar\nLIB dubbo-cluster-3.2.5.jar\nLIBS open\n"
+    )
+    (row,) = report_of(HEADER + same)["summary"]["apps"]
+    assert row["dubbo_version"] == "3.2.5" and "dubbo_versions" not in row
+
+
+def test_script_reads_jar_names_through_the_descriptor_the_jvm_holds():
+    script = diagnostics.command_for("java_apps")
+    # Only the file the process itself has open, never a path from its argv.
+    assert 'jf="/proc/$pid/fd/$jfd"' in script
+    assert 'tail -c 22 "$jf"' in script and 'tail -c "$need" "$jf"' in script
+    assert script.count('"$jf"') == 2 and "/root" not in script
+    # A pipe or a device under that name is not read (it would block).
+    assert '[ ! -f "/proc/$pid/fd/$jfd" ]' in script
+    assert str(apps_ext.MAX_DIRECTORY) in script
+    for tool in ("unzip", "jar tf", "jar -tf", "zipinfo"):
+        assert tool not in script, tool
+    # Every option java.main_of skips together with its value is skipped here.
+    from sshmcp.extensions import java as java_ext
+
+    for option in java_ext.VALUE_OPTIONS:
+        assert option + "|" in script or option + '"' in script, option
+    assert "__LIB_GREP__" not in script and apps_ext.LIB_GREP in script
+    # The file names that are printed come out of fixed patterns only.
+    assert "'" not in apps_ext.LIB_GREP
+    for program in (apps_ext.JAR_AWK, apps_ext.FD_AWK, apps_ext.LIB_AWK):
+        assert "'" not in program
+
+
+def awk(program, text, *options):
+    result = subprocess.run(
+        ["awk", *options, program], input=text, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.splitlines()
+
+
+@needs_sh
+def test_awk_names_the_jar_like_main_of_does():
+    from sshmcp.extensions import java as java_ext
+
+    cases = [
+        ["java", "-jar", "/srv/orders/orders_12.jar"],
+        ["java", "-jar", "-Xms128m", "-Xmx1g", "/srv/orders/orders_12.jar", "--x=1"],
+        ["/usr/bin/java", "-Xmx1g", "-Dapp=a", "-jar", "orders.war"],
+        ["java", "-cp", "/opt/lib/dubbo-2.7.8.jar:/opt/app.jar", "com.example.Main"],
+        ["java", "-classpath", "a.jar", "-jar", "b.jar"],
+        ["java", "@/etc/app/java.args", "-jar", "/srv/a+b.jar"],
+        ["java", "--add-opens", "java.base/java.lang=ALL-UNNAMED", "-jar", "c.jar"],
+        ["java", "-m", "com.example/com.example.Main", "-jar", "x.jar"],
+        ["java", "--module=com.example", "x.jar"],
+        ["java", "com.example.Main", "-jar", "x.jar"],
+        ["jsvc", "-cwd", "/opt/app", "-pidfile", "/run/a.pid", "-jar", "d.jar"],
+        ["java", "-jar", "/srv/we ird.jar"],
+        ["java", "-jar", "/srv/$(id).jar"],
+        ["java", "-jar", "/srv/not-a-jar.txt"],
+        ["java", "-jar"],
+        ["java"],
+    ]
+    for argv in cases:
+        main, _ = java_ext.main_of(argv)
+        want = []
+        if main["kind"] == "jar":
+            base = main["name"].rsplit("/", 1)[-1]
+            if re.fullmatch(r"[A-Za-z0-9._+-]+\.[jw]ar", base):
+                want = [base]
+        assert awk(apps_ext.JAR_AWK, "\n".join(argv) + "\n") == want, argv
+
+
+@needs_sh
+def test_awk_picks_the_jar_descriptor_and_dubbo_names():
+    listing = (
+        "total 0\n"
+        "lrwx------ 1 app app 64 Nov 13 10:00 0 -> /dev/null\n"
+        "lr-x------ 1 app app 64 Nov 13 10:00 3 -> /usr/lib/jvm/jre/lib/rt.jar\n"
+        "lr-x------ 1 app app 64 Nov 13 10:00 4 -> /srv/orders/orders_12.jar (deleted)\n"
+        "lr-x------ 1 app app 64 Nov 13 10:00 5 -> /srv/orders/orders_12.jar (deleted)\n"
+        "lr-x------ 1 app app 64 Nov 13 10:00 6 -> /srv/lib/dubbo-2.7.8.jar\n"
+        "lr-x------ 1 app app 64 Nov 13 10:00 7 -> /srv/lib/dubbo-2.7.8.jar\n"
+        "lr-x------ 1 app app 64 Nov 13 10:00 8 -> /srv/lib/base-dubbo-api-1.0.jar\n"
+        "lr-x------ 1 app app 64 Nov 13 10:00 9 -> /srv/lib/dubbo-common-3.2.5.jar\n"
+        "lr-x------ 1 app app 64 Nov 13 10:00 10 -> /srv/lib/dubbo.jar\n"
+        "lr-x------ 1 app app 64 Nov 13 10:00 11 -> /srv/lib/dubbo-2.7.8.jar.log\n"
+        "lrwx------ 1 app app 64 Nov 13 10:00 12 -> socket:[12345]\n"
+    )
+    assert awk(apps_ext.FD_AWK, listing, "-v", "base=orders_12.jar") == [
+        "LIB dubbo-2.7.8.jar",
+        "LIB dubbo-common-3.2.5.jar",
+        "LIBX",
+        "JARFD 4 1",
+    ]
+    # Not started from a JAR: nothing to read, the open jars are still named.
+    assert awk(apps_ext.FD_AWK, listing, "-v", "base=") == [
+        "LIB dubbo-2.7.8.jar",
+        "LIB dubbo-common-3.2.5.jar",
+        "LIBX",
+    ]
+    # The application's own JAR is not a Dubbo jar, whatever it is called.
+    own = "lr-x------ 1 a a 64 Nov 13 10:00 4 -> /srv/dubbo-2.7.8.jar\n"
+    assert awk(apps_ext.FD_AWK, own, "-v", "base=dubbo-2.7.8.jar") == ["JARFD 4 0"]
+    names = (
+        "/dubbo-2.7.23.jar\n/dubbo-spring-boot-starter-2.7.23.jar\n/dubbo-2.7.23.jar\n"
+        "/dubbo-registry-api-2.7.23.jar\n/dubbo-admin-ui-0.7.0.jar\n"
+        "META-INF/maven/org.apache.dubbo/dubbo/pom.properties\n"
+    )
+    assert awk(apps_ext.LIB_AWK, names) == [
+        "LIB dubbo-2.7.23.jar",
+        "LIB dubbo-registry-api-2.7.23.jar",
+        "LIBX",
+    ]
+    many = "".join(f"/dubbo-2.7.{n}.jar\n" for n in range(30))
+    assert len(awk(apps_ext.LIB_AWK, many)) == 8
+
+
 def test_script_is_a_fixed_read_only_bounded_template():
     script = diagnostics.command_for("java_apps")
     assert script.startswith(diagnostics.PREFIX) and "timeout -k 1" in script
@@ -353,3 +566,135 @@ def test_script_runs_under_sh_and_finds_a_listening_process_named_java(
     # The process is this account's own, so ss names it even without root.
     assert row["ports"] == [port] and row["local_ports"] == [port]
     assert row["ports_source"] == "listen" and summary["port_owner_visible"] is True
+    # Not started from a JAR and no Dubbo jar open: not known, not absent.
+    assert (row["dubbo_version"], row["dubbo_status"]) == (None, "unknown")
+
+
+def make_jar(path, names, comment=b""):
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as jar:
+        jar.comment = comment
+        for name in names:
+            jar.writestr(name, b"\xca\xfe\xba\xbe" + name.encode() * 3)
+
+
+@pytest.fixture
+def java_from_jar(tmp_path):
+    """Starts Python processes named java as ``java @holder.py -jar <jar>``.
+
+    The java launcher (and main_of) take ``@file`` for an argument file, so
+    the JAR is the first non-option argument, and the process keeps the JAR
+    open the way a JVM does.
+    """
+    link = tmp_path / "java"
+    try:
+        link.symlink_to(sys.executable)
+    except OSError:
+        pytest.skip("symlinks are not available")
+    (tmp_path / "@holder.py").write_text(
+        "import sys, time\n"
+        "handle = open(sys.argv[2], 'rb')\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    started = []
+
+    def start(jar):
+        proc = subprocess.Popen(
+            [str(link), "@holder.py", "-jar", str(jar)],
+            cwd=tmp_path,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        started.append(proc)
+        assert proc.stdout.readline().strip() == "ready"
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            with open(f"/proc/{proc.pid}/comm") as handle:
+                if handle.read().strip() == "java":
+                    break
+            time.sleep(0.05)
+        return proc
+
+    try:
+        yield start
+    finally:
+        for proc in started:
+            proc.kill()
+            proc.wait()
+
+
+@needs_linux
+def test_script_reads_dubbo_from_the_jar_a_process_holds_open(java_from_jar, tmp_path):
+    boot = [
+        "META-INF/MANIFEST.MF",
+        "BOOT-INF/classes/application.properties",
+        "BOOT-INF/lib/spring-core-5.3.31.jar",
+    ]
+    jars = {
+        # A Spring Boot JAR carrying Dubbo; deleted from disk after the start.
+        "orders_12.jar": boot
+        + [
+            "BOOT-INF/lib/base-dubbo-api-1.0.0-SNAPSHOT.jar",
+            "BOOT-INF/lib/dubbo-2.7.23.jar",
+            "BOOT-INF/lib/dubbo-spring-boot-starter-2.7.23.jar",
+        ],
+        "report_3.jar": boot,
+        # Dubbo used module by module, in a WAR.
+        "portal.war": ["WEB-INF/lib/dubbo-common-3.2.5.jar", "WEB-INF/web.xml"],
+        # Dubbo's classes merged into the JAR: there, but no name has a version.
+        "shaded.jar": [
+            "META-INF/maven/org.apache.dubbo/dubbo/pom.properties",
+            "org/apache/dubbo/common/URL.class",
+        ],
+    }
+    for name, names in jars.items():
+        make_jar(tmp_path / name, names)
+    # An archive comment: the end of the file is not the 22-byte record, so
+    # only the tail is searched. A hit counts, a miss proves nothing.
+    make_jar(tmp_path / "legacy.jar", ["lib/dubbo-2.6.12.jar"], comment=b"by hand")
+    make_jar(tmp_path / "tool.jar", ["lib/guava-33.0.jar"], comment=b"by hand")
+    # Thousands of entries before the one that matters: the directory is
+    # still read whole.
+    make_jar(
+        tmp_path / "big.jar",
+        [f"BOOT-INF/classes/com/example/C{n}.class" for n in range(3000)]
+        + ["BOOT-INF/lib/dubbo-3.2.5.jar"],
+    )
+    procs = {
+        name: java_from_jar(tmp_path / name)
+        for name in (*jars, "legacy.jar", "tool.jar", "big.jar")
+    }
+    (tmp_path / "orders_12.jar").unlink()
+    result = subprocess.run(
+        ["/bin/sh", "-c", diagnostics.command_for("java_apps")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    report = report_of(result.stdout)
+    rows = {row["pid"]: row for row in report["summary"]["apps"]}
+    if any(proc.pid not in rows for proc in procs.values()):
+        assert report["summary"]["java_processes"] > apps_ext.MAX_APPS
+        pytest.skip("more than 60 larger Java processes on this host")
+    got = {
+        name: (rows[proc.pid]["dubbo_version"], rows[proc.pid]["dubbo_status"])
+        for name, proc in procs.items()
+    }
+    assert got == {
+        "orders_12.jar": ("2.7.23", "found"),
+        "report_3.jar": (None, "absent"),
+        "portal.war": ("3.2.5", "found"),
+        "shaded.jar": (None, "present"),
+        "legacy.jar": ("2.6.12", "found"),
+        "tool.jar": (None, "unknown"),
+        "big.jar": ("3.2.5", "found"),
+    }
+    assert rows[procs["orders_12.jar"].pid]["main"] == "orders_12.jar"
+    # Only names that tell the release are printed, and no file content.
+    assert "base-dubbo-api" not in result.stdout
+    assert "spring-boot-starter" not in result.stdout
+    assert "spring-core" not in result.stdout and "\xca\xfe" not in result.stdout
+    assert not any(f["metric"].startswith("dubbo") for f in report["findings"])
