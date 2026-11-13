@@ -11,6 +11,12 @@ with the application behind it.
 
 Like ``java`` it only reads /proc and never attaches to a JVM. Command lines
 are read to name the application and are not returned.
+
+It also says which Dubbo each application carries, from file names alone: the
+``dubbo-x.y.z.jar`` listed in the ZIP directory at the end of the application
+JAR (read through the descriptor the JVM holds open, so it is the file that is
+running even when the one on disk was deleted or replaced), or a Dubbo jar the
+process holds open. Nothing is unpacked and no file content is returned.
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ import re
 from ..observations import metric, section
 from . import ActionSpec, guard, register, timed
 from .java import (
+    VALUE_OPTIONS,
     _block,
     _clean,
     _int,
@@ -113,12 +120,139 @@ END {
         print "CONTAINER", c
 }"""
 
+# The base name of the JAR a JVM was started from (`java -jar`), read from its
+# NUL-separated argv the way java.main_of reads it: options may follow -jar,
+# the first non-option argument is the JAR. Nothing is printed for a main
+# class or a name outside a plain character set (it is passed to awk -v).
+JAR_AWK = (
+    'BEGIN {\n    n = split("'
+    + "|".join(sorted(VALUE_OPTIONS))
+    + """", o, "|")
+    for (i = 1; i <= n; i++)
+        val[o[i]] = 1
+}
+NR == 1 || done {
+    next
+}
+skip {
+    skip = 0
+    next
+}
+$0 == "-jar" {
+    jar = 1
+    next
+}
+$0 == "-m" || $0 == "--module" || substr($0, 1, 9) == "--module=" {
+    done = 1
+    next
+}
+$0 in val {
+    skip = 1
+    next
+}
+$0 == "" || substr($0, 1, 1) == "-" || substr($0, 1, 1) == "@" {
+    next
+}
+{
+    done = 1
+    if (!jar)
+        next
+    sub(/^.*\\//, "")
+    if (length($0) <= 120 && $0 ~ /^[A-Za-z0-9._+-]+[.][jw]ar$/)
+        print
+}"""
+)
+# A jar file name `b` that tells the Dubbo release: the all-in-one artifact
+# (dubbo-2.7.23.jar) or, where Dubbo is used module by module, one of its core
+# modules. An unversioned dubbo.jar only says Dubbo is there (LIBX).
+LIB_RULES = """    if (b == "dubbo.jar")
+        x = 1
+    else if (length(b) <= 80 && b ~ /^dubbo-((common|rpc-api|config-api|remoting-api|registry-api|cluster)-)?[0-9][A-Za-z0-9._-]*[.]jar$/ && !(b in s) && k < 8) {
+        s[b] = 1
+        k++
+        print "LIB", b
+    }
+"""
+# `ls -l /proc/PID/fd`: Dubbo jars the process holds open (a JVM started with
+# a class path opens each jar it loads from), then "JARFD <fd> <deleted>" for
+# the descriptor of the JAR it was started from.
+FD_AWK = (
+    """{
+    i = index($0, " -> ")
+    if (i == 0)
+        next
+    t = substr($0, i + 4)
+    d = 0
+    if (length(t) > 10 && substr(t, length(t) - 9) == " (deleted)") {
+        d = 1
+        t = substr(t, 1, length(t) - 10)
+    }
+    if (t !~ /[.][jw]ar$/)
+        next
+    b = t
+    sub(/^.*\\//, "", b)
+    if (b == base) {
+        if (fd == "") {
+            n = split(substr($0, 1, i - 1), a, " ")
+            if (a[n] ~ /^[0-9]+$/) {
+                fd = a[n]
+                del = d
+            }
+        }
+        next
+    }
+"""
+    + LIB_RULES
+    + """}
+END {
+    if (x)
+        print "LIBX"
+    if (fd != "")
+        print "JARFD", fd, del
+}"""
+)
+# Entry names found in the ZIP directory of the application JAR: a Dubbo jar
+# packed inside it (BOOT-INF/lib, WEB-INF/lib, lib), or the Maven descriptor
+# that is left when Dubbo's classes were merged into the JAR itself.
+LIB_GREP = (
+    "(META-INF/maven/(org[.]apache[.]dubbo|com[.]alibaba)/dubbo(-common)?"
+    "/pom[.]properties|/dubbo[A-Za-z0-9._-]*[.]jar)"
+)
+LIB_AWK = (
+    """/pom[.]properties$/ {
+    x = 1
+    next
+}
+{
+    b = $0
+    sub(/^.*\\//, "", b)
+"""
+    + LIB_RULES
+    + """}
+END {
+    if (x)
+        print "LIBX"
+}"""
+)
+MAX_DIRECTORY = 8 << 20  # keep in sync with 8388608 in APPS_BODY
+
 # Host addresses first (bridges and virtual interfaces are not addresses a
 # peer would use), then one `[AIOPS_APP_PID]` block per Java process: owner,
-# unit or container, and the argv the name is read from (cut to a per-PID
-# byte budget; -D properties that do not name the application go first).
-# Docker is asked for its published ports only when a process runs in a
-# container.
+# unit or container, the Dubbo jars it carries, and the argv the name is read
+# from (cut to a per-PID byte budget; -D properties that do not name the
+# application go first). Docker is asked for its published ports only when a
+# process runs in a container.
+#
+# Dubbo: the ZIP directory is the last thing in a JAR, and its size stands in
+# the 22-byte record that ends the file (read with od; 101010256 is that
+# record's signature). Exactly that many bytes are read (`LIBS dir`: the
+# listing is complete). A JAR whose end is not that record (an archive
+# comment, ZIP64) or whose directory is larger than 8 MiB gets its last 1 MiB
+# searched instead (`LIBS tail`: a hit counts, a miss proves nothing), and a
+# read that ran into its timeout is `LIBS cut`. `LIBS nofd`: started from a
+# JAR the process does not hold open as a regular file (a pipe would block
+# the read); `LIBS open`: no JAR to read, only the open files were looked at;
+# `LIBS unreadable`: another account's process.
 APPS_BODY = r"""printf '[AIOPS_APPS]\nSCAN_UID %s\n' "$(id -u)"
 if command -v ip >/dev/null 2>&1; then
 { tmo2 ip -4 -o addr show scope global; } 2>/dev/null | awk '$2 !~ /^(docker|br-|veth|cni|flannel|cali|virbr|kube|tunl|podman)/ { split($4, a, "/"); if (a[1] ~ /^[0-9.]+$/ && n++ < 16) print "ADDR", a[1] }'
@@ -147,6 +281,30 @@ printf 'USER %s\n' "$(stat -c %U "/proc/$pid" 2>/dev/null)"
 cgl=$(awk "$cgawk" "/proc/$pid/cgroup" 2>/dev/null)
 if [ -n "$cgl" ]; then printf '%s\n' "$cgl"; fi
 case "$cgl" in *CONTAINER*) hasct=1;; esac
+if [ -r "/proc/$pid/fd" ] && [ -x "/proc/$pid/fd" ]; then
+jb=$( { tmo2 tr '\000' '\n' < "/proc/$pid/cmdline"; } 2>/dev/null | awk "$jarawk")
+fdo=$( { tmo3 ls -l "/proc/$pid/fd"; } 2>/dev/null | awk -v base="$jb" "$fdawk")
+jfd=''
+case "$fdo" in *"JARFD "*) jfd=${fdo##*JARFD }; jfd=${jfd%% *};; esac
+case "$jfd" in *[!0-9]*) jfd='';; esac
+if [ -n "$jfd" ] && [ ! -f "/proc/$pid/fd/$jfd" ]; then jfd=''; fi
+if [ -n "$fdo" ]; then printf '%s\n' "$fdo"; fi
+if [ -n "$jfd" ]; then
+jf="/proc/$pid/fd/$jfd"
+need=$( { tmo2 tail -c 22 "$jf"; } 2>/dev/null | od -An -tu4 2>/dev/null | awk 'NR == 1 && $1 == 101010256 && $4 > 0 && $4 <= 8388608 { print $4 + 22 }')
+st=dir
+if [ -z "$need" ]; then need=1048576; st=tail; fi
+read -r l0 rest < /proc/uptime; l0=${l0%%.*}; l0=${l0:-0}
+{ tmo3 tail -c "$need" "$jf"; } 2>/dev/null | grep -a -o -E '__LIB_GREP__' | awk "$libawk"
+read -r l1 rest < /proc/uptime; l1=${l1%%.*}; l1=${l1:-0}
+if [ $((l1 - l0)) -ge 3 ]; then st=cut; fi
+printf 'LIBS %s\n' "$st"
+elif [ -n "$jb" ]; then printf 'LIBS nofd\n'
+else printf 'LIBS open\n'
+fi
+else
+printf 'LIBS unreadable\n'
+fi
 { tmo2 tr '\000' '\n' < "/proc/$pid/cmdline"; } 2>/dev/null | awk -v lim="$lim" '{ n++ }
 n > 200 || over { over = 1; next }
 { v = substr($0, 1, 296); l = length(v) + 5 }
@@ -182,15 +340,28 @@ def apps_script(options: dict) -> str:
         + LISTEN_AWK
         + "'\ncgawk='"
         + CGROUP_AWK
+        + "'\njarawk='"
+        + JAR_AWK
+        + "'\nfdawk='"
+        + FD_AWK
+        + "'\nlibawk='"
+        + LIB_AWK
         + "'\n"
-        + APPS_BODY
+        + APPS_BODY.replace("__LIB_GREP__", LIB_GREP)
     )
 
 
 COVERAGE = (
     "只读 /proc 的单次快照（按 RSS 取前 60 个 java/jsvc 进程），不附加 JVM、不返回启动命令；"
     "端口取自 ss -ltnp 的 TCP 监听与 docker ps 的发布端口；非 root 时看不到其他用户进程的端口归属，"
-    "bridge 网络容器内的监听只能从 Docker 发布端口得知；没有端口不代表应用不对外服务"
+    "bridge 网络容器内的监听只能从 Docker 发布端口得知；没有端口不代表应用不对外服务；"
+    "Dubbo 版本只看文件名（应用 JAR 目录区里的 dubbo-x.y.z.jar，或进程打开着的 Dubbo 包），"
+    "dubbo_status=unknown 表示没能查，不代表没有"
+)
+# dubbo-2.7.23.jar (group 2), dubbo-common-3.2.5.jar (groups 1 and 2).
+DUBBO_JAR = re.compile(
+    r"dubbo-(?:(common|rpc-api|config-api|remoting-api|registry-api|cluster)-)?"
+    r"([0-9][A-Za-z0-9._-]{0,60})\.jar"
 )
 ADDRESS = re.compile(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}")
 # One published TCP mapping of `docker ps`: 0.0.0.0:8080->8080/tcp,
@@ -239,6 +410,28 @@ def published_of(body):
     return found
 
 
+def dubbo_of(block):
+    """(versions in the order found, status) from the LIB / LIBX / LIBS lines.
+
+    ``found``: a jar name gave the version. ``present``: Dubbo is there but no
+    name tells the version (an unversioned dubbo.jar, or its classes merged
+    into the application JAR). ``absent``: the whole directory of the
+    application JAR was read and lists no Dubbo. ``unknown``: it could not be
+    checked, which is not the same as absent.
+    """
+    core, modules = [], []
+    for match in re.finditer(r"(?m)^LIB (\S{1,80})$", block):
+        jar = DUBBO_JAR.fullmatch(match[1])
+        if jar:
+            (modules if jar[1] else core).append(jar[2])
+    versions = list(dict.fromkeys(core or modules))[:4]
+    if versions:
+        return versions, "found"
+    if re.search(r"(?m)^LIBX$", block):
+        return [], "present"
+    return [], "absent" if _value(block, "LIBS") == "dir" else "unknown"
+
+
 def app_of(block, listeners, published):
     """One `[AIOPS_APP_PID]` block as an inventory row."""
     fields, lists = _block(block)
@@ -274,7 +467,8 @@ def app_of(block, listeners, published):
         # (another account's socket, seen without root); a container's own
         # port says nothing about the host port.
         ports, source = {declared: True}, "argument"
-    return {
+    dubbo, dubbo_status = dubbo_of(block)
+    row = {
         "pid": pid,
         "application": application_of(
             sysprops,
@@ -300,7 +494,14 @@ def app_of(block, listeners, published):
         "ports_source": source,
         "declared_port": declared,
         "args_truncated": "ARGS_END" not in fields or "ARGS_TRUNCATED" in fields,
+        "dubbo_version": dubbo[0] if dubbo else None,
+        "dubbo_status": dubbo_status,
     }
+    if len(dubbo) > 1:
+        # Two artifacts of Dubbo side by side (com.alibaba next to
+        # org.apache): the class path order decides which one is used.
+        row["dubbo_versions"] = dubbo
+    return row
 
 
 def _finding(level, key, value, threshold, hint):
@@ -400,6 +601,18 @@ def parse_apps(text: str, summary: dict, findings: list, options: dict) -> None:
                 "；".join(reasons),
             )
         )
+    mixed = [row["pid"] for row in apps if "dubbo_versions" in row]
+    if mixed:
+        findings.append(
+            _finding(
+                "info",
+                "dubbo_versions_mixed",
+                {"count": len(mixed), "pids": mixed[:20]},
+                "每个应用一个 Dubbo 版本",
+                "应用里同时带有多个版本的 Dubbo 包（见 dubbo_versions），实际生效的由类路径顺序决定；"
+                "dubbo_version 取先出现的那个",
+            )
+        )
     if count is not None and len(apps) < count:
         findings.append(
             _finding(
@@ -430,6 +643,8 @@ register(
         notes=(
             "最多 60 个 Java 进程；读取启动命令只为识别应用名、JAR 与 profiles，不返回命令本身。",
             "端口取自 ss -ltnp 与 docker ps 的发布端口：非 root 账号看不到其他用户进程的端口归属。",
+            "Dubbo 版本取自文件名：读进程打开着的应用 JAR 末尾的目录区（不解压、不读文件内容），"
+            "或进程打开着的 Dubbo 包；非 root 账号查不了其他用户的进程，结果为 unknown。",
         ),
     )
 )

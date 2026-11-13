@@ -94,13 +94,14 @@
 
 | MCP 工具（动作 id） | 参数 | 用途 | 风险 |
 | --- | --- | --- | --- |
-| ssh_diagnose_java_apps（java_apps） | 无 | Java 应用清单：最多 60 个 Java 进程的应用名、JAR/主类、profiles、用户、systemd 单元或容器、运行时长与 RSS，以及各自监听的 TCP 端口；另附本机 IPv4 地址。只读 /proc，不附加 JVM，不返回启动命令 | 低 |
+| ssh_diagnose_java_apps（java_apps） | 无 | Java 应用清单：最多 60 个 Java 进程的应用名、JAR/主类、profiles、用户、systemd 单元或容器、运行时长与 RSS，以及各自监听的 TCP 端口和所带的 Dubbo 版本（v0.11.2）；另附本机 IPv4 地址。只读 /proc，不附加 JVM，不返回启动命令 | 低 |
 
 `summary` 的字段：
 
 - `addresses`：本机 IPv4 地址（`ip -4 addr` 的 global 地址，最多 16 个；不含 docker0、网桥、veth 等虚拟接口）。一台主机在资产里只登记一个地址，其他网卡的地址从这里得到。
 - `java_processes`：Java 进程总数；多于 60 个或 8 秒时间预算内未读完时另有 `apps_shown`、`time_budget_reached`。
-- `apps[]`：`pid`、`application`（依次取 spring.application.name、app.name、app、service.name，再取 JAR 名、自己的 systemd 单元名，都没有为“未识别”；supervisord、docker 这类进程管理器的单元不算应用名）、`main`、`jar_path`、`profiles`、`user`、`unit`、`container`、`elapsed_seconds`、`rss_KiB`、`ports`（最多 16 个）、`local_ports`（只绑定回环地址的端口，是 `ports` 的子集，只有本机上的代理才到得了）、`ports_source`、`declared_port`（启动参数里的 server.port）。
+- `apps[]`：`pid`、`application`（依次取 spring.application.name、app.name、app、service.name，再取 JAR 名、自己的 systemd 单元名，都没有为“未识别”；supervisord、docker 这类进程管理器的单元不算应用名）、`main`、`jar_path`、`profiles`、`user`、`unit`、`container`、`elapsed_seconds`、`rss_KiB`、`ports`（最多 16 个）、`local_ports`（只绑定回环地址的端口，是 `ports` 的子集，只有本机上的代理才到得了）、`ports_source`、`declared_port`（启动参数里的 server.port）、`dubbo_version`、`dubbo_status`（v0.11.2）。
+- `dubbo_version` / `dubbo_status`（v0.11.2）：应用所带 Dubbo 的版本，只取自文件名。用 `java -jar` 启动的应用读应用 JAR 末尾的 ZIP 目录区里的 `dubbo-x.y.z.jar`（`BOOT-INF/lib`、`WEB-INF/lib`、`lib` 都认；按模块引入时取 `dubbo-common-x.y.z.jar` 等核心模块）；读的是 JVM 打开着的那个文件，磁盘上的 JAR 在发布后被删除或替换而进程尚未重启时，得到的仍是正在运行的那一版。用主类加类路径启动的应用看进程打开着的 Dubbo 包。`dubbo_status`：`found` 取到了版本；`present` 有 Dubbo 但文件名里没有版本（不带版本号的 `dubbo.jar`，或 Dubbo 的类被合并进了应用 JAR）；`absent` 应用 JAR 的目录区完整读过，里面没有 Dubbo；`unknown` 没能查（非 root 账号读不了其他用户的进程、不是从 JAR 启动且打开的文件里没有 Dubbo 包、JAR 结尾带注释或目录区超过 8 MiB 时只搜了末尾 1 MiB 而没有找到）——**`unknown` 不代表没有**。同一个应用里出现多个版本时另有 `dubbo_versions`（按出现顺序，`dubbo_version` 取第一个）和 `dubbo_versions_mixed` 提示。
 - `ports_source`：`listen` 来自 `ss -ltnp`（该进程自己的监听套接字）；`docker` 来自 `docker ps` 的发布端口（bridge 网络的容器，取的是宿主机端口，同一容器内的多个 Java 进程都记这些端口）；`argument` 表示 ss 没有给出归属，用启动参数里的 server.port 代替（非 root 账号看不到其他用户进程的套接字）；`null` 表示不知道端口，此时 `ports` 为空——可能确实不监听（定时任务、消息消费者），不能据此说应用不对外服务。
 - `port_owner_visible`：ss 是否给出了进程归属（`false` 多为非 root 账号，`null` 为 ss 不可用）；`docker_ports`：`ok`、`none`、`unavailable`（读不到 Docker）或 `absent`（没有 docker 命令），只在有容器内的 Java 进程时出现。
 
