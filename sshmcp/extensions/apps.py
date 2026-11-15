@@ -162,12 +162,41 @@ $0 == "" || substr($0, 1, 1) == "-" || substr($0, 1, 1) == "@" {
         print
 }"""
 )
-# A jar file name `b` that tells the Dubbo release: the all-in-one artifact
-# (dubbo-2.7.23.jar) or, where Dubbo is used module by module, one of its core
-# modules. An unversioned dubbo.jar only says Dubbo is there (LIBX).
+# Whether a jar file name is Dubbo itself with its release in the name: the
+# all-in-one artifact (dubbo-2.7.23.jar) or, where Dubbo is used module by
+# module, one of its core modules (dubbo-common-3.2.5.jar). A release is two
+# or more numbers with dots between them (2.7.23, 2.7.4.1) and may go on with
+# a qualifier that starts with a letter (-SNAPSHOT, .RELEASE, -beta.1).
+#
+# A jar of something else that only names the Dubbo it is made for is not
+# Dubbo, and its own version is not Dubbo's: a letter where a number would be
+# (dubbo-2.7.x-plugin-1.0.0-RELEASE.jar, dubbo-3.x-conflict-patch-8.9.0.jar,
+# an agent's plug-in for "Dubbo 2.7.x"), or a second version further on
+# (dubbo-2.7-plugin-1.0.0.jar). Such a name says nothing either way.
+#
+# No interval expressions and no "$" inside a group: mawk and BusyBox awk read
+# this too. release_of below is the same rule for the server's side.
+LIB_FUNCTION = """function rel(b,    v, q) {
+    if (length(b) > 80 || b !~ /^dubbo-[A-Za-z0-9._-]+[.]jar$/)
+        return 0
+    v = substr(b, 7, length(b) - 10)
+    sub(/^(common|rpc-api|config-api|remoting-api|registry-api|cluster)-/, "", v)
+    if (v !~ /^[0-9]+[.][0-9]/)
+        return 0
+    q = v
+    sub(/^[0-9]+([.][0-9]+)+/, "", q)
+    if (q == "")
+        return 1
+    if (q !~ /^[-.][A-Za-z]/ || q ~ /^[-.][xX]$/ || q ~ /^[-.][xX][-.]/ || q ~ /[0-9][.][0-9]/)
+        return 0
+    return 1
+}
+"""
+# What is printed of a jar file name `b`: "LIB <name>" for one that tells the
+# Dubbo release; an unversioned dubbo.jar only says Dubbo is there (LIBX).
 LIB_RULES = """    if (b == "dubbo.jar")
         x = 1
-    else if (length(b) <= 80 && b ~ /^dubbo-((common|rpc-api|config-api|remoting-api|registry-api|cluster)-)?[0-9][A-Za-z0-9._-]*[.]jar$/ && !(b in s) && k < 8) {
+    else if (rel(b) && !(b in s) && k < 8) {
         s[b] = 1
         k++
         print "LIB", b
@@ -177,7 +206,8 @@ LIB_RULES = """    if (b == "dubbo.jar")
 # a class path opens each jar it loads from), then "JARFD <fd> <deleted>" for
 # the descriptor of the JAR it was started from.
 FD_AWK = (
-    """{
+    LIB_FUNCTION
+    + """{
     i = index($0, " -> ")
     if (i == 0)
         next
@@ -219,7 +249,8 @@ LIB_GREP = (
     "/pom[.]properties|/dubbo[A-Za-z0-9._-]*[.]jar)"
 )
 LIB_AWK = (
-    """/pom[.]properties$/ {
+    LIB_FUNCTION
+    + """/pom[.]properties$/ {
     x = 1
     next
 }
@@ -358,10 +389,11 @@ COVERAGE = (
     "Dubbo 版本只看文件名（应用 JAR 目录区里的 dubbo-x.y.z.jar，或进程打开着的 Dubbo 包），"
     "dubbo_status=unknown 表示没能查，不代表没有"
 )
-# dubbo-2.7.23.jar (group 2), dubbo-common-3.2.5.jar (groups 1 and 2).
+# dubbo-2.7.23.jar (group 2), dubbo-common-3.2.5-SNAPSHOT.jar (groups 1, 2
+# and 3): the numbers of the release, then what follows them.
 DUBBO_JAR = re.compile(
     r"dubbo-(?:(common|rpc-api|config-api|remoting-api|registry-api|cluster)-)?"
-    r"([0-9][A-Za-z0-9._-]{0,60})\.jar"
+    r"([0-9]+(?:\.[0-9]+)+)([A-Za-z0-9._-]{0,60})\.jar"
 )
 ADDRESS = re.compile(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}")
 # One published TCP mapping of `docker ps`: 0.0.0.0:8080->8080/tcp,
@@ -410,6 +442,28 @@ def published_of(body):
     return found
 
 
+def release_of(name):
+    """(whether it is a core module, the release) a jar file name tells of
+    Dubbo, or None for a name that is not Dubbo with a release: the rule of
+    LIB_FUNCTION, which the script applies before it prints a name.
+
+    The numbers may go on with a qualifier that starts with a letter. A
+    placeholder there (2.7.x) or a second version further on belongs to a jar
+    of something else that names the Dubbo it is made for.
+    """
+    jar = DUBBO_JAR.fullmatch(name)
+    if not jar:
+        return None
+    rest = jar[3]
+    if rest and (
+        not re.match(r"[-.][A-Za-z]", rest)
+        or re.match(r"[-.][xX](?:[-.]|$)", rest)
+        or re.search(r"[0-9]\.[0-9]", rest)
+    ):
+        return None
+    return bool(jar[1]), jar[2] + rest
+
+
 def dubbo_of(block):
     """(versions in the order found, status) from the LIB / LIBX / LIBS lines.
 
@@ -421,9 +475,9 @@ def dubbo_of(block):
     """
     core, modules = [], []
     for match in re.finditer(r"(?m)^LIB (\S{1,80})$", block):
-        jar = DUBBO_JAR.fullmatch(match[1])
-        if jar:
-            (modules if jar[1] else core).append(jar[2])
+        told = release_of(match[1])
+        if told:
+            (modules if told[0] else core).append(told[1])
     versions = list(dict.fromkeys(core or modules))[:4]
     if versions:
         return versions, "found"

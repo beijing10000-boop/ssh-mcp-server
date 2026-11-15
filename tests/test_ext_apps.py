@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -310,6 +311,81 @@ def test_dubbo_status_tells_absent_from_not_checked():
     assert of("ARG LIB dubbo-9.9.9.jar\nARG LIBX\nLIBS dir\n") == ([], "absent")
 
 
+# Jar file names that start like Dubbo's own: what each tells of its release.
+# None: a jar of something else (it names the Dubbo it is made for), or no
+# release in the name.
+JAR_NAMES = {
+    "dubbo-2.7.23.jar": (False, "2.7.23"),
+    "dubbo-2.7.4.1.jar": (False, "2.7.4.1"),
+    "dubbo-3.3.6.jar": (False, "3.3.6"),
+    "dubbo-2.7.23-SNAPSHOT.jar": (False, "2.7.23-SNAPSHOT"),
+    "dubbo-2.6.5.RELEASE.jar": (False, "2.6.5.RELEASE"),
+    "dubbo-3.0.0.preview.jar": (False, "3.0.0.preview"),
+    "dubbo-3.3.0-beta.1.jar": (False, "3.3.0-beta.1"),
+    "dubbo-2.7.0-RC1.jar": (False, "2.7.0-RC1"),
+    "dubbo-2.8.jar": (False, "2.8"),
+    "dubbo-common-3.2.5.jar": (True, "3.2.5"),
+    "dubbo-rpc-api-2.7.23-SNAPSHOT.jar": (True, "2.7.23-SNAPSHOT"),
+    "dubbo-cluster-3.1.11.jar": (True, "3.1.11"),
+    # A plug-in "for Dubbo 2.7.x": the release in its name is its own.
+    "dubbo-2.7.x-plugin-1.0.0-RELEASE.jar": None,
+    "dubbo-2.7.x-conflict-patch-8.9.0.jar": None,
+    "dubbo-3.x-conflict-patch-8.9.0.jar": None,
+    "dubbo-2.7.X-plugin.jar": None,
+    "dubbo-2.7.x.jar": None,
+    "dubbo-3.x.jar": None,
+    "dubbo-2.7-plugin-1.0.0.jar": None,
+    "dubbo-2.7.23-plugin-1.0.jar": None,
+    "dubbo-common-2.7.x-plugin-1.0.0.jar": None,
+    # Not a release: one number, a qualifier without a letter, loose ends.
+    "dubbo-2.jar": None,
+    "dubbo-3-plugin.jar": None,
+    "dubbo-2.7.23-.jar": None,
+    "dubbo-2.7.23x.jar": None,
+    "dubbo-2.7.23-1.jar": None,
+    "dubbo-2.7..23.jar": None,
+    "dubbo-.2.7.jar": None,
+    "dubbo-conflict-patch-8.9.0.jar": None,
+    "dubbo-spring-boot-starter-2.7.23.jar": None,
+    "dubbo-common-utils-1.0.0.jar": None,
+    "apm-dubbo-2.7.x-plugin-8.9.0.jar": None,
+    "dubbo.jar": None,
+}
+
+
+def test_a_jar_that_only_names_the_dubbo_it_is_made_for_is_not_dubbo():
+    for name, told in JAR_NAMES.items():
+        assert apps_ext.release_of(name) == told, name
+    of = apps_ext.dubbo_of
+    # A plug-in's own version is not taken for Dubbo's: before v0.11.3 such an
+    # application was said to carry Dubbo "2.7.x-plugin-1.0.0-RELEASE".
+    plugin = "LIB dubbo-2.7.x-plugin-1.0.0-RELEASE.jar\n"
+    assert of(plugin + "LIBS dir\n") == ([], "absent")
+    assert of(plugin + "LIBS open\n") == ([], "unknown")
+    # Next to Dubbo itself, in either order, the release is Dubbo's alone.
+    for lines in (
+        plugin + "LIB dubbo-2.7.20.jar\n",
+        "LIB dubbo-2.7.20.jar\n" + plugin,
+        "LIB dubbo-3.x-conflict-patch-8.9.0.jar\nLIB dubbo-2.7.20.jar\n" + plugin,
+    ):
+        assert of(lines + "LIBS dir\n") == (["2.7.20"], "found"), lines
+    block = with_libs(
+        ORDERS,
+        "JARFD 4 0\n" + plugin + "LIB dubbo-2.7.20.jar\nLIBS dir\n",
+    )
+    report = report_of(HEADER + block + LISTEN)
+    (row,) = report["summary"]["apps"]
+    assert (row["dubbo_version"], row["dubbo_status"]) == ("2.7.20", "found")
+    assert "dubbo_versions" not in row
+    assert not any(f["metric"].startswith("dubbo") for f in report["findings"])
+    # An agent's plug-in among the open files of an application without Dubbo.
+    agent = with_libs(
+        BILLING, "JARFD 7 0\nLIB dubbo-2.7.x-conflict-patch-8.9.0.jar\nLIBS dir\n"
+    )
+    (row,) = report_of(HEADER + agent)["summary"]["apps"]
+    assert (row["dubbo_version"], row["dubbo_status"]) == (None, "absent")
+
+
 def test_two_dubbo_versions_in_one_application_are_reported():
     block = with_libs(
         ORDERS, "JARFD 4 0\nLIB dubbo-2.6.12.jar\nLIB dubbo-2.7.23.jar\nLIBS dir\n"
@@ -435,6 +511,52 @@ def test_awk_picks_the_jar_descriptor_and_dubbo_names():
     ]
     many = "".join(f"/dubbo-2.7.{n}.jar\n" for n in range(30))
     assert len(awk(apps_ext.LIB_AWK, many)) == 8
+    # A plug-in made for some Dubbo is not printed, and takes no place of the
+    # eight: Dubbo itself after eight of them is still found.
+    plugins = "".join(f"/dubbo-2.7.x-plugin-1.0.{n}.jar\n" for n in range(9))
+    assert awk(apps_ext.LIB_AWK, plugins + "/dubbo-2.7.20.jar\n") == [
+        "LIB dubbo-2.7.20.jar"
+    ]
+    held = (
+        "lr-x------ 1 a a 64 Nov 13 10:00 5 -> /opt/agent/plugins/dubbo-2.7.x-conflict-patch-8.9.0.jar\n"
+        "lr-x------ 1 a a 64 Nov 13 10:00 6 -> /opt/agent/plugins/dubbo-3.x-conflict-patch-8.9.0.jar\n"
+        "lr-x------ 1 a a 64 Nov 13 10:00 7 -> /srv/lib/dubbo-2.7.x-plugin-1.0.0-RELEASE.jar\n"
+    )
+    assert awk(apps_ext.FD_AWK, held, "-v", "base=orders_12.jar") == []
+    assert awk(
+        apps_ext.FD_AWK,
+        held + "lr-x------ 1 a a 64 Nov 13 10:00 8 -> /srv/lib/dubbo-2.7.20.jar\n",
+        "-v",
+        "base=",
+    ) == ["LIB dubbo-2.7.20.jar"]
+
+
+# Every awk a target may have: the rule is written for the least of them.
+AWKS = [
+    command
+    for command in (["awk"], ["gawk"], ["mawk"], ["busybox", "awk"])
+    if shutil.which(command[0])
+]
+
+
+@needs_sh
+@pytest.mark.parametrize("command", AWKS, ids=" ".join)
+def test_awk_and_the_server_agree_on_what_a_dubbo_release_is(command):
+    def run(program, text, *options):
+        result = subprocess.run(
+            [*command, *options, program], input=text, capture_output=True, text=True
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout.splitlines()
+
+    for name in JAR_NAMES:
+        want = ["LIB " + name] if apps_ext.release_of(name) else []
+        if name == "dubbo.jar":
+            want = ["LIBX"]
+        # A name in the JAR's directory, and the same jar among the open files.
+        assert run(apps_ext.LIB_AWK, f"BOOT-INF/lib/{name}\n") == want, name
+        line = f"lr-x------ 1 a a 64 Nov 13 10:00 9 -> /srv/lib/{name}\n"
+        assert run(apps_ext.FD_AWK, line, "-v", "base=app.jar") == want, name
 
 
 def test_script_is_a_fixed_read_only_bounded_template():
@@ -641,6 +763,15 @@ def test_script_reads_dubbo_from_the_jar_a_process_holds_open(java_from_jar, tmp
             "BOOT-INF/lib/dubbo-spring-boot-starter-2.7.23.jar",
         ],
         "report_3.jar": boot,
+        # A plug-in made for Dubbo 2.7.x, packed before Dubbo itself: the
+        # release is Dubbo's, not the plug-in's.
+        "stock_7.jar": boot
+        + [
+            "BOOT-INF/lib/dubbo-2.7.x-plugin-1.0.0-RELEASE.jar",
+            "BOOT-INF/lib/dubbo-2.7.20.jar",
+        ],
+        # Only such a plug-in, no Dubbo: read whole, none there.
+        "notice_2.jar": boot + ["BOOT-INF/lib/dubbo-3.x-conflict-patch-8.9.0.jar"],
         # Dubbo used module by module, in a WAR.
         "portal.war": ["WEB-INF/lib/dubbo-common-3.2.5.jar", "WEB-INF/web.xml"],
         # Dubbo's classes merged into the JAR: there, but no name has a version.
@@ -686,6 +817,8 @@ def test_script_reads_dubbo_from_the_jar_a_process_holds_open(java_from_jar, tmp
     assert got == {
         "orders_12.jar": ("2.7.23", "found"),
         "report_3.jar": (None, "absent"),
+        "stock_7.jar": ("2.7.20", "found"),
+        "notice_2.jar": (None, "absent"),
         "portal.war": ("3.2.5", "found"),
         "shaded.jar": (None, "present"),
         "legacy.jar": ("2.6.12", "found"),
@@ -696,5 +829,8 @@ def test_script_reads_dubbo_from_the_jar_a_process_holds_open(java_from_jar, tmp
     # Only names that tell the release are printed, and no file content.
     assert "base-dubbo-api" not in result.stdout
     assert "spring-boot-starter" not in result.stdout
+    assert "dubbo-2.7.x-plugin" not in result.stdout
+    assert "conflict-patch" not in result.stdout
+    assert not any("dubbo_versions" in row for row in rows.values())
     assert "spring-core" not in result.stdout and "\xca\xfe" not in result.stdout
     assert not any(f["metric"].startswith("dubbo") for f in report["findings"])

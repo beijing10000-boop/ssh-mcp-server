@@ -2,7 +2,9 @@
 
 > 独立部署、中文优先、免 Agent 的 Linux SSH 诊断服务。默认 Web/MCP 端口 **9099**。
 
-**当前版本：v0.11.2**
+**当前版本：v0.11.3**
+
+v0.11.3 修正 Java 应用清单里 Dubbo 版本的识别：只认 Dubbo 自己的发布号（`2.7.23`、`3.2.5-SNAPSHOT`），名字里带 dubbo 的别的包（`dubbo-2.7.x-plugin-1.0.0.jar`、探针的 `dubbo-3.x-conflict-patch-8.9.0.jar`）不再被读成版本。工具、参数与返回字段不变，无数据库结构变化。详见 [v0.11.3 说明](docs/RELEASE-v0.11.3.md)。
 
 v0.11.2 让 Java 应用清单（`ssh_diagnose_java_apps`）带上每个应用所用的 Dubbo 版本：读 JVM 打开着的应用 JAR 末尾目录区里 `dubbo-x.y.z.jar` 的文件名，不解压、不附加 JVM、目标机不需要 `unzip`；`dubbo_status` 区分“查过没有”和“没能查”。只增两个返回字段，工具与参数不变，无数据库结构变化。详见 [v0.11.2 说明](docs/RELEASE-v0.11.2.md)。
 
