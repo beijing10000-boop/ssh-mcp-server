@@ -169,3 +169,30 @@ def test_java_inventory_fills_ps_columns_on_old_procps():
     assert row["user"] == "root" and row["rss_KiB"] > 0 and row["threads"] == 1
     assert row["elapsed_seconds"] is not None and row["elapsed_seconds"] >= 0
     assert row["cpu_percent"] is not None and row["mem_percent"] is not None
+
+
+@needs_image
+def test_the_old_awk_tells_a_dubbo_release_like_the_server_does():
+    # The image's awk (gawk 4.0.2 on EL7) is the oldest a target has: the
+    # rule java_apps prints jar names by must read there as it does here.
+    from test_ext_apps import JAR_NAMES
+
+    from sshmcp.extensions import apps
+
+    assert "'" not in apps.LIB_AWK
+    names = sorted(JAR_NAMES)
+    body = "awk --version | head -n 1\nlibawk='" + apps.LIB_AWK + "'\n"
+    body += "".join(
+        f"printf '@@ {index}\\n'; printf '%s\\n' 'BOOT-INF/lib/{name}' | "
+        'awk "$libawk" || printf \'FAILED %s\\n\' "$?"\n'
+        for index, name in enumerate(names)
+    )
+    result = in_container(body)
+    assert result.returncode == 0, result.stderr
+    parts = re.split(r"(?m)^@@ ([0-9]+)\n", result.stdout)
+    outputs = dict(zip(map(int, parts[1::2]), parts[2::2]))
+    for index, name in enumerate(names):
+        want = ["LIB " + name] if apps.release_of(name) else []
+        if name == "dubbo.jar":
+            want = ["LIBX"]
+        assert outputs.get(index, "FAILED").splitlines() == want, (parts[0], name)
